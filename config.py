@@ -40,6 +40,10 @@ CHECKOUT_BASE_URL = os.environ.get("CHECKOUT_BASE_URL", "").strip()
 CHECKOUT_SECRET = os.environ.get("CHECKOUT_SECRET", "default-secret-change-me")
 GMAIL_SEND_ENABLED = os.environ.get("GMAIL_SEND_ENABLED", "false").lower() == "true"
 
+# R+L Quote Sandbox (microservice for address validation + freight quoting)
+# Phase 2: Proxy to this service instead of calling R+L directly
+RL_QUOTE_SANDBOX_URL = os.environ.get("RL_QUOTE_SANDBOX_URL", "https://rl-quote-sandbox.onrender.com").strip()
+
 # =============================================================================
 # AUTO-SYNC CONFIG
 # =============================================================================
@@ -153,3 +157,7 @@ def is_shippo_configured():
 def is_square_configured():
     """Check if Square API is configured"""
     return bool(SQUARE_ACCESS_TOKEN)
+
+def is_rl_quote_sandbox_configured():
+    """Check if RL Quote Sandbox URL is configured"""
+    return bool(RL_QUOTE_SANDBOX_URL)
