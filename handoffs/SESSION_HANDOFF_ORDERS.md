@@ -1,52 +1,64 @@
 # SESSION HANDOFF — CFC Orders (General)
 
-**Last Updated:** 2026-02-28
-**Last Session:** Feb 28, 2026 — Deep dive audit + lane definition + restructure validation
-**Session Before That:** Dec 30, 2025 — Crash recovery, confirmed v6.0.0 working
+**Last Updated:** 2026-03-01
+**Last Session:** Mar 1, 2026 — Full audit, all services confirmed alive, battle plan written
+**Session Before That:** Feb 28, 2026 — Deep dive audit + lane definition + restructure validation
 
 ---
 
-## WHAT HAPPENED THIS SESSION
+## WHAT HAPPENED THIS SESSION (Mar 1)
 
-1. Cloned all 4 accessible repos. rl-quote-sandbox is PRIVATE — couldn't clone.
-2. Searched 15+ past conversations, read all BRAIN repo Orders files, mapped every module (17 files, 20K+ lines).
-3. Built comprehensive upgrade plan at cfc-orders:handoffs/CFC_ORDERS_PLAN.md
-4. Defined 4 sub-lanes for CFC Orders workstream: Order Lifecycle, Shipping and Freight, Payments and Checkout, Platform Ops
-5. Confirmed the 4 lanes were adopted in a parallel session and all handoff files populated
-6. Validated the restructured MASTER_STATUS.md (8 workstreams / 31 lanes)
-7. Updated all persistence layers: memory item #26, CFC_ORDERS_PLAN.md, SESSION_HANDOFF_ORDERS.md, MASTER_STATUS.md
+1. Confirmed ALL 3 Render services ALIVE: sandbox backend (v6.0.0, auto-syncing today), rl-quote-sandbox (v0.1.0), production backend
+2. Confirmed sandbox frontend + production frontend both alive on Vercel
+3. Discovered rl-quote-sandbox is a LIVE deployed service (not just a private repo) with endpoints: POST /validate-address, POST /quote, GET /warehouses
+4. Mapped full sandbox backend: 121KB main.py, 84 endpoints, 16 modules, 484KB dead files
+5. Mapped full sandbox frontend: 19 real files buried under 2,242 junk files (node_modules committed)
+6. Read complete openapi.json (v5.9.0 stale, actual v6.0.0)
+7. Read full rules.md (v1.2) — 8 alert rules, 7 golden examples
+8. **Wrote comprehensive 7-phase battle plan**: cfc-orders:handoffs/CFC_ORDERS_BATTLE_PLAN.md
 
-## LANE HANDOFF FILES (all populated)
+## BLOCKER STATUS (updated Mar 1)
 
-| Lane | File | Key Content |
-|------|------|-------------|
-| Order Lifecycle | SESSION_HANDOFF_ORDERS_LIFECYCLE.md | B2BWave sync works, AI summaries work, AlertsEngine NOT built |
-| Shipping and Freight | SESSION_HANDOFF_ORDERS_SHIPPING.md | R+L + Shippo work, rl-quote-sandbox PRIVATE, API auth flaky |
-| Payments and Checkout | SESSION_HANDOFF_ORDERS_PAYMENTS.md | Square checkout built, GMAIL_SEND_ENABLED=false |
-| Platform Ops | SESSION_HANDOFF_ORDERS_OPS.md | Sandbox v6.0.0, prod 2mo behind, dead files need cleanup |
+| # | Blocker | Status |
+|---|---------|--------|
+| 1 | rl-quote-sandbox private | OPEN — but service is LIVE, could use as microservice |
+| 2 | Render services dead | ✅ RESOLVED — all 3 services alive |
+| 3 | PostgreSQL expired | ✅ RESOLVED — auto_sync ran today, DB is alive |
+| 4 | Hardcoded API key | OPEN — rl_api_test_clean.py still needs deletion |
 
-## CURRENT BLOCKERS
+## BATTLE PLAN SUMMARY (7 Phases)
 
-1. rl-quote-sandbox repo PRIVATE — need 4 files: backend/main.py, models.py, smarty_api.py, rl_api.py
-2. Render services may be dead — 2 months idle, check health endpoints
-3. PostgreSQL may be expired — Render free-tier 90-day limit
-4. Hardcoded R+L API key in rl_api_test_clean.py — DELETE immediately
+| Phase | Focus | Est. Sessions |
+|-------|-------|---------------|
+| 1 | Cleanup & Hygiene (dead files, .gitignore, requirements.txt) | 1 (30 min) |
+| 2 | RL-Quote Integration (address validation + freight quoting) | 1 |
+| 3 | AlertsEngine (8 rules, cron, business hours calc) | 1 |
+| 4 | Customer Communications (email templates, auto-send) | 1 |
+| 5 | Backend Hardening (main.py decomp, config consolidation, security) | 1 |
+| 6 | Frontend Polish (dashboard, real-time, search, mobile) | 1 |
+| 7 | Production Promotion (copy, configure, deploy, smoke test) | 1+ |
+
+**Full plan**: cfc-orders:handoffs/CFC_ORDERS_BATTLE_PLAN.md
 
 ## NEXT SESSION SHOULD
 
-1. William resolves blocker #1 (share rl-quote-sandbox files or make public)
-2. Hit health endpoints: cfcorderbackend-sandbox.onrender.com, cfc-backend-b83s.onrender.com
-3. Start Platform Ops lane: delete dead files, fix .gitignore
-4. If files available: start Shipping lane — integrate Smarty + R+L API quoting
+1. Start Phase 1: Delete dead files, fix requirements.txt, fix .gitignore
+2. Decision needed from William: rl-quote-sandbox — make public, share files, or keep as microservice?
+3. After cleanup, move to Phase 2 or 3 (can run in parallel)
+
+## Render Service IDs
+- rl-quote-sandbox: `srv-d58g4163jp1c73bg91pg`
+- CFCOrderBackend-Sandbox: `srv-d4tu1e24d50c73b6952g`
 
 ## KEY REFERENCE FILES
 
-- Full upgrade plan: cfc-orders:handoffs/CFC_ORDERS_PLAN.md
-- Lane manifest: brain:lane_manifest.json
-- Orders rules: brain:WILLIAM_BRAIN/ORDERS_BRAIN/rules.md (v1.2)
-- Orders state: brain:WILLIAM_BRAIN/ORDERS_BRAIN/state.md (STALE)
-- Master status: brain:MASTER_STATUS.md (Workstream 6)
-- Memory: Claude memory item #26
+- **Battle plan**: cfc-orders:handoffs/CFC_ORDERS_BATTLE_PLAN.md
+- **Original upgrade plan**: cfc-orders:handoffs/CFC_ORDERS_PLAN.md
+- **Sandbox audit**: cfc-orders:handoffs/CFC_ORDERS_SANDBOX_AUDIT_20260228.md
+- **Lane handoffs**: cfc-orders:handoffs/SESSION_HANDOFF_ORDERS_*.md (4 files)
+- **Rules**: brain:WILLIAM_BRAIN/ORDERS_BRAIN/rules.md (v1.2)
+- **Lane manifest**: brain:lane_manifest.json (v3.0)
+- **Master status**: brain:MASTER_STATUS.md (Workstream 6)
 
 ## REPOS
 
@@ -54,10 +66,11 @@
 - Sandbox frontend: github.com/4wprince/CFCOrdersFrontend_Sandbox (v5.10.1)
 - Prod backend: github.com/4wprince/CFCOrderBackend (outdated monolithic)
 - Prod frontend: github.com/4wprince/CFCOrdersFrontend (behind sandbox)
-- RL sandbox: github.com/4wprince/rl-quote-sandbox (PRIVATE)
+- RL sandbox: github.com/4wprince/rl-quote-sandbox (PRIVATE but deployed)
 
 ## DEPLOY URLS
 
 - Sandbox backend: cfcorderbackend-sandbox.onrender.com
-- Production backend: cfc-backend-b83s.onrender.com
-- Frontend: Both on Vercel
+- RL-quote sandbox: rl-quote-sandbox.onrender.com
+- Sandbox frontend: cfcordersfrontend-sandbox.vercel.app
+- Production frontend: cfc-orders-frontend.vercel.app
