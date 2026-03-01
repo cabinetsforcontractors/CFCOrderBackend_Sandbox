@@ -16,7 +16,7 @@ The Design-to-Doorstep bootstrap e-commerce platform. BOM-to-cart conversion fro
 ## Key Files
 - `brain:BOOTSTRAP_PLATFORM_SPEC.md` — TO BE CREATED. Full 6-phase plan for platform build.
 - `v5:engine/solve_kitchen_v5.py` — Produces BOM output (upstream of cart)
-- `brain:WILLIAM_BRAIN/CFC_BRAIN/rules.md` — Pricing rules that feed product pricing ⚠️ pending migration from WILLIAM_BRAIN
+- `brain:WILLIAM_BRAIN/CFC_BRAIN/rules.md` — Pricing rules that feed product pricing
 
 ## Active Bugs / Blockers
 - BOOTSTRAP_PLATFORM_SPEC.md not yet written
