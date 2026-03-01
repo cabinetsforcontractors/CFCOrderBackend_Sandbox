@@ -1,4 +1,16 @@
+# CFC Order Workflow Backend v6.0.0
+# Updated 2026-03-01 — Phase 1 cleanup
+
+# Web framework
 fastapi
 uvicorn[standard]
+
+# Database
 psycopg2-binary
-httpx
+
+# Data models (FastAPI dependency, pinned for clarity)
+pydantic
+
+# Excel/data processing (RTA cabinet database)
+pandas
+openpyxl
