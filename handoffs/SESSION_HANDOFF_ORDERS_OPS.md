@@ -20,7 +20,7 @@ Sandbox-to-production promotion pipeline, repo cleanup, database migrations, Ren
 - `CFCOrderBackend_Sandbox/schema.py` — 298 lines, full DB schema SQL
 - `CFCOrderBackend_Sandbox/db_helpers.py` — 287 lines, database connection management
 - `CFCOrderBackend_Sandbox/db_migrations.py` — 255 lines, schema migration helpers
-- `brain:CFC_ORDERS_PLAN.md` — full upgrade plan with 5 steps
+- `cfc-orders:handoffs/CFC_ORDERS_PLAN.md` — full upgrade plan with 5 steps
 
 ## Active Bugs / Blockers
 1. **Render services may be dead** — 2 months idle, need to hit health endpoints
