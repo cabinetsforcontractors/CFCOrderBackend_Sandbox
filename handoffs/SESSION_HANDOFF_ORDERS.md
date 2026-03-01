@@ -1,80 +1,122 @@
 # SESSION HANDOFF — CFC Orders (General)
 
-**Last Updated:** 2026-03-01 (Session 2)
-**Last Session:** Mar 1, 2026 — Phase 1 Cleanup executed
-**Session Before That:** Mar 1, 2026 — Full audit, all services confirmed alive, battle plan written
+**Last Updated:** 2026-03-01 (Session 3)
+**Last Session:** Mar 1, 2026 — Phase 2 RL-Quote Integration executed
+**Session Before That:** Mar 1, 2026 — Phase 1 Cleanup 100% complete
 
 ---
 
-## WHAT HAPPENED THIS SESSION (Mar 1 — Session 2)
+## WHAT HAPPENED THIS SESSION (Mar 1 — Session 3)
 
-### Phase 1 Cleanup — MOSTLY COMPLETE
+### Phase 2: RL-Quote Integration — BACKEND + FRONTEND DONE, NEEDS WIRING
 
-**Backend repo (cfc-orders) — DONE:**
-1. ✅ Deleted 6 dead files: main2.py (134KB), main4.py (131KB), main7.py (113KB), main8.py (103KB), rl_api_test_clean.py (3KB, HAD HARDCODED API KEY), desktop.ini — **~484KB garbage removed**
-2. ✅ Fixed requirements.txt: added pandas, openpyxl, pydantic; removed unused httpx; added comments
-3. ✅ Updated README.md: full architecture docs, module table, env vars, deploy info, workflow diagram
+**Decision: Microservice architecture (Option B)**
+- rl-quote-sandbox stays as separate Render service
+- Sandbox backend proxies requests to it
+- No need to access private repo or merge code
 
-**Frontend repo (cfc-orders-frontend) — PARTIAL:**
-4. ✅ Fixed .gitignore: added dist/, *.zip, OS files, IDE dirs
-5. ✅ Deleted duplicate `src/components/App.jsx` (10KB dead copy — `src/App.jsx` is canonical, imported by main.jsx)
-6. ⚠️ **NEEDS LOCAL CLEANUP** — these can't be done through GitHub API:
-   - `node_modules/` dir committed to repo (~2,242 files) — needs `git rm -r --cached node_modules` locally
-   - `dist/` dir committed to repo — needs `git rm -r --cached dist` locally
-   - `cfc-frontend.zip` — binary file, API can't delete (encoding error)
+**Backend repo (cfc-orders) — 2 files written:**
+1. ✅ **NEW: `rl_quote_proxy.py`** — FastAPI APIRouter with 5 endpoints:
+   - `GET /proxy/health` — connectivity check
+   - `POST /proxy/validate-address` — Smarty address validation
+   - `POST /proxy/quote` — R+L freight quote
+   - `POST /proxy/auto-quote` — Combined: validate → quote → +$50 markup
+   - `GET /proxy/warehouses` — warehouse list
+2. ✅ **UPDATED: `config.py`** — Added `RL_QUOTE_SANDBOX_URL` env var (defaults to rl-quote-sandbox.onrender.com)
 
-### William Local Cleanup Commands (copy-paste ready)
+**Frontend repo (cfc-orders-frontend) — 1 file written:**
+3. ✅ **UPDATED: `RLQuoteHelper.jsx` v5.9.0** — Added "Get Auto Quote" button:
+   - Calls `POST /proxy/auto-quote` with origin ZIP, dest address, weight
+   - Shows validated address, carrier price, customer price (+$50), transit days
+   - Auto-fills quote number and price fields
+   - Manual flow ("Manual RL →") still works as before
+   - Green success banner with quote details
 
-Run these in the CFCOrdersFrontend_Sandbox repo:
+### ⚠️ WILLIAM NEEDS TO DO (3 items)
 
+**Item 1: Add 2 lines to main.py (locally)**
+
+Find the import area near line ~140 (after the rl_carriers try/except block), add:
+
+```python
+from rl_quote_proxy import router as rl_proxy_router
 ```
-git rm -r --cached node_modules
+
+Find the area after `app.add_middleware(CORSMiddleware, ...)` near line ~155, add:
+
+```python
+app.include_router(rl_proxy_router)
 ```
 
+Then push:
 ```
-git rm -r --cached dist
+git add main.py
 ```
-
 ```
-git rm --cached cfc-frontend.zip
+git commit -m "Phase 2: Mount rl_quote_proxy router"
 ```
-
-```
-git commit -m "Remove committed junk: node_modules, dist, cfc-frontend.zip"
-```
-
 ```
 git push origin main
 ```
+
+**Item 2: Add env var on Render**
+Go to Render → CFCOrderBackend-Sandbox → Environment → Add:
+- Key: `RL_QUOTE_SANDBOX_URL`
+- Value: `https://rl-quote-sandbox.onrender.com`
+(This is optional — config.py defaults to this URL already, but explicit is better)
+
+**Item 3: Phase 1 leftover — frontend local cleanup** (from Session 2)
+If not done yet, run in CFCOrdersFrontend_Sandbox:
+```
+git rm -r --cached node_modules
+```
+```
+git rm -r --cached dist
+```
+```
+git rm --cached cfc-frontend.zip
+```
+```
+git commit -m "Remove committed junk: node_modules, dist, cfc-frontend.zip"
+```
+```
+git push origin main
+```
+
+## TESTING AFTER WIRING
+
+Once main.py is updated and deployed:
+1. Hit `https://cfcorderbackend-sandbox.onrender.com/proxy/health` — should return `{ "status": "ok" }`
+2. Open sandbox frontend → pick an LTL shipment → click "⚡ Get Auto Quote"
+3. Should see validated address + carrier price + customer price (+$50)
 
 ## BLOCKER STATUS (updated Mar 1)
 
 | # | Blocker | Status |
 |---|---------|--------|
-| 1 | rl-quote-sandbox private | OPEN — but service is LIVE, could use as microservice |
-| 2 | Render services dead | ✅ RESOLVED — all 3 services alive |
-| 3 | PostgreSQL expired | ✅ RESOLVED — auto_sync ran today, DB is alive |
-| 4 | Hardcoded API key | ✅ RESOLVED — rl_api_test_clean.py deleted |
-| 5 | Frontend junk in repo | OPEN — needs William local git rm commands above |
-
-## NEXT SESSION SHOULD
-
-1. **William runs local cleanup commands** above (5 min)
-2. Start **Phase 2 (RL-Quote Integration)** or **Phase 3 (AlertsEngine)** — both are independent
-3. Decision still needed: rl-quote-sandbox — make public, share files, or keep as microservice?
-4. Also consider: delete stale openapi.json from backend (says v5.9.0, actual v6.0.0) or regenerate it
+| 1 | rl-quote-sandbox private | ✅ RESOLVED — using as microservice, no code access needed |
+| 2 | Render services dead | ✅ RESOLVED |
+| 3 | PostgreSQL expired | ✅ RESOLVED |
+| 4 | Hardcoded API key | ✅ RESOLVED |
+| 5 | Frontend junk in repo | OPEN — needs William local git rm commands |
 
 ## BATTLE PLAN STATUS
 
 | Phase | Focus | Status |
 |-------|-------|--------|
-| 1 | Cleanup & Hygiene | ✅ MOSTLY DONE (local git cleanup remaining) |
-| 2 | RL-Quote Integration | NOT STARTED |
+| 1 | Cleanup & Hygiene | ✅ DONE (local git cleanup remaining) |
+| 2 | RL-Quote Integration | ✅ CODE WRITTEN — needs main.py wiring + deploy |
 | 3 | AlertsEngine | NOT STARTED |
 | 4 | Customer Communications | NOT STARTED |
 | 5 | Backend Hardening | NOT STARTED |
 | 6 | Frontend Polish | NOT STARTED |
 | 7 | Production Promotion | NOT STARTED |
+
+## NEXT SESSION SHOULD
+
+1. Verify Phase 2 is wired and working (test auto-quote end to end)
+2. Start **Phase 3 (AlertsEngine)** — 8 alert rules, business hours calculator, cron endpoint
+3. Read rules from brain:WILLIAM_BRAIN/ORDERS_BRAIN/rules.md for ORD-A1 spec
 
 ## KEY REFERENCE FILES
 
