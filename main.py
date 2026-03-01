@@ -140,6 +140,9 @@ except ImportError:
     RL_CARRIERS_LOADED = False
     print("[STARTUP] rl_carriers module not found")
 
+# R+L Quote Sandbox proxy (Phase 2 — microservice integration)
+from rl_quote_proxy import router as rl_proxy_router
+
 # =============================================================================
 # FASTAPI APP
 # =============================================================================
@@ -153,6 +156,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Phase 2: RL-Quote proxy endpoints (/proxy/*)
+app.include_router(rl_proxy_router)
 
 # Global for tracking last sync
 last_auto_sync = None
