@@ -43,8 +43,8 @@
 
 - Full upgrade plan: cfc-orders:handoffs/CFC_ORDERS_PLAN.md
 - Lane manifest: brain:lane_manifest.json
-- Orders rules: brain:WILLIAM_BRAIN/ORDERS_BRAIN/rules.md (v1.2) ⚠️ pending migration from WILLIAM_BRAIN
-- Orders state: brain:WILLIAM_BRAIN/ORDERS_BRAIN/state.md (STALE) ⚠️ pending migration from WILLIAM_BRAIN
+- Orders rules: brain:WILLIAM_BRAIN/ORDERS_BRAIN/rules.md (v1.2)
+- Orders state: brain:WILLIAM_BRAIN/ORDERS_BRAIN/state.md (STALE)
 - Master status: brain:MASTER_STATUS.md (Workstream 6)
 - Memory: Claude memory item #26
 
