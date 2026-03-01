@@ -10,7 +10,7 @@
 
 1. Cloned all 4 accessible repos. rl-quote-sandbox is PRIVATE — couldn't clone.
 2. Searched 15+ past conversations, read all BRAIN repo Orders files, mapped every module (17 files, 20K+ lines).
-3. Built comprehensive upgrade plan at brain:CFC_ORDERS_PLAN.md
+3. Built comprehensive upgrade plan at cfc-orders:handoffs/CFC_ORDERS_PLAN.md
 4. Defined 4 sub-lanes for CFC Orders workstream: Order Lifecycle, Shipping and Freight, Payments and Checkout, Platform Ops
 5. Confirmed the 4 lanes were adopted in a parallel session and all handoff files populated
 6. Validated the restructured MASTER_STATUS.md (8 workstreams / 31 lanes)
@@ -41,10 +41,10 @@
 
 ## KEY REFERENCE FILES
 
-- Full upgrade plan: brain:CFC_ORDERS_PLAN.md
+- Full upgrade plan: cfc-orders:handoffs/CFC_ORDERS_PLAN.md
 - Lane manifest: brain:lane_manifest.json
-- Orders rules: brain:WILLIAM_BRAIN/ORDERS_BRAIN/rules.md (v1.2)
-- Orders state: brain:WILLIAM_BRAIN/ORDERS_BRAIN/state.md (STALE)
+- Orders rules: brain:WILLIAM_BRAIN/ORDERS_BRAIN/rules.md (v1.2) ⚠️ pending migration from WILLIAM_BRAIN
+- Orders state: brain:WILLIAM_BRAIN/ORDERS_BRAIN/state.md (STALE) ⚠️ pending migration from WILLIAM_BRAIN
 - Master status: brain:MASTER_STATUS.md (Workstream 6)
 - Memory: Claude memory item #26
 
