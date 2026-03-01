@@ -20,8 +20,8 @@ The 7-step order workflow from B2BWave sync through delivery. Status tracking ac
 - `CFCOrderBackend_Sandbox/detection.py` — Payment/quote/PRO detection
 - `CFCOrderBackend_Sandbox/email_parser.py` — Email content parsing
 - `CFCOrderBackend_Sandbox/gmail_sync.py` — Email scanning and parsing
-- `brain:WILLIAM_BRAIN/ORDERS_BRAIN/rules.md` — v1.2, 7 golden examples, AlertsEngine rules ⚠️ pending migration from WILLIAM_BRAIN
-- `brain:WILLIAM_BRAIN/ORDERS_BRAIN/state.md` — Domain state (stale — Feb 1) ⚠️ pending migration from WILLIAM_BRAIN
+- `brain:WILLIAM_BRAIN/ORDERS_BRAIN/rules.md` — v1.2, 7 golden examples, AlertsEngine rules
+- `brain:WILLIAM_BRAIN/ORDERS_BRAIN/state.md` — Domain state (stale — Feb 1)
 
 ## Active Bugs / Blockers
 - AlertsEngine cron never built (8 rules defined but no implementation)
