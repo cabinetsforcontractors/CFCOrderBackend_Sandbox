@@ -1,21 +1,51 @@
 # SESSION HANDOFF — CFC Orders (General)
 
-**Last Updated:** 2026-03-01
-**Last Session:** Mar 1, 2026 — Full audit, all services confirmed alive, battle plan written
-**Session Before That:** Feb 28, 2026 — Deep dive audit + lane definition + restructure validation
+**Last Updated:** 2026-03-01 (Session 2)
+**Last Session:** Mar 1, 2026 — Phase 1 Cleanup executed
+**Session Before That:** Mar 1, 2026 — Full audit, all services confirmed alive, battle plan written
 
 ---
 
-## WHAT HAPPENED THIS SESSION (Mar 1)
+## WHAT HAPPENED THIS SESSION (Mar 1 — Session 2)
 
-1. Confirmed ALL 3 Render services ALIVE: sandbox backend (v6.0.0, auto-syncing today), rl-quote-sandbox (v0.1.0), production backend
-2. Confirmed sandbox frontend + production frontend both alive on Vercel
-3. Discovered rl-quote-sandbox is a LIVE deployed service (not just a private repo) with endpoints: POST /validate-address, POST /quote, GET /warehouses
-4. Mapped full sandbox backend: 121KB main.py, 84 endpoints, 16 modules, 484KB dead files
-5. Mapped full sandbox frontend: 19 real files buried under 2,242 junk files (node_modules committed)
-6. Read complete openapi.json (v5.9.0 stale, actual v6.0.0)
-7. Read full rules.md (v1.2) — 8 alert rules, 7 golden examples
-8. **Wrote comprehensive 7-phase battle plan**: cfc-orders:handoffs/CFC_ORDERS_BATTLE_PLAN.md
+### Phase 1 Cleanup — MOSTLY COMPLETE
+
+**Backend repo (cfc-orders) — DONE:**
+1. ✅ Deleted 6 dead files: main2.py (134KB), main4.py (131KB), main7.py (113KB), main8.py (103KB), rl_api_test_clean.py (3KB, HAD HARDCODED API KEY), desktop.ini — **~484KB garbage removed**
+2. ✅ Fixed requirements.txt: added pandas, openpyxl, pydantic; removed unused httpx; added comments
+3. ✅ Updated README.md: full architecture docs, module table, env vars, deploy info, workflow diagram
+
+**Frontend repo (cfc-orders-frontend) — PARTIAL:**
+4. ✅ Fixed .gitignore: added dist/, *.zip, OS files, IDE dirs
+5. ✅ Deleted duplicate `src/components/App.jsx` (10KB dead copy — `src/App.jsx` is canonical, imported by main.jsx)
+6. ⚠️ **NEEDS LOCAL CLEANUP** — these can't be done through GitHub API:
+   - `node_modules/` dir committed to repo (~2,242 files) — needs `git rm -r --cached node_modules` locally
+   - `dist/` dir committed to repo — needs `git rm -r --cached dist` locally
+   - `cfc-frontend.zip` — binary file, API can't delete (encoding error)
+
+### William Local Cleanup Commands (copy-paste ready)
+
+Run these in the CFCOrdersFrontend_Sandbox repo:
+
+```
+git rm -r --cached node_modules
+```
+
+```
+git rm -r --cached dist
+```
+
+```
+git rm --cached cfc-frontend.zip
+```
+
+```
+git commit -m "Remove committed junk: node_modules, dist, cfc-frontend.zip"
+```
+
+```
+git push origin main
+```
 
 ## BLOCKER STATUS (updated Mar 1)
 
@@ -24,40 +54,33 @@
 | 1 | rl-quote-sandbox private | OPEN — but service is LIVE, could use as microservice |
 | 2 | Render services dead | ✅ RESOLVED — all 3 services alive |
 | 3 | PostgreSQL expired | ✅ RESOLVED — auto_sync ran today, DB is alive |
-| 4 | Hardcoded API key | OPEN — rl_api_test_clean.py still needs deletion |
-
-## BATTLE PLAN SUMMARY (7 Phases)
-
-| Phase | Focus | Est. Sessions |
-|-------|-------|---------------|
-| 1 | Cleanup & Hygiene (dead files, .gitignore, requirements.txt) | 1 (30 min) |
-| 2 | RL-Quote Integration (address validation + freight quoting) | 1 |
-| 3 | AlertsEngine (8 rules, cron, business hours calc) | 1 |
-| 4 | Customer Communications (email templates, auto-send) | 1 |
-| 5 | Backend Hardening (main.py decomp, config consolidation, security) | 1 |
-| 6 | Frontend Polish (dashboard, real-time, search, mobile) | 1 |
-| 7 | Production Promotion (copy, configure, deploy, smoke test) | 1+ |
-
-**Full plan**: cfc-orders:handoffs/CFC_ORDERS_BATTLE_PLAN.md
+| 4 | Hardcoded API key | ✅ RESOLVED — rl_api_test_clean.py deleted |
+| 5 | Frontend junk in repo | OPEN — needs William local git rm commands above |
 
 ## NEXT SESSION SHOULD
 
-1. Start Phase 1: Delete dead files, fix requirements.txt, fix .gitignore
-2. Decision needed from William: rl-quote-sandbox — make public, share files, or keep as microservice?
-3. After cleanup, move to Phase 2 or 3 (can run in parallel)
+1. **William runs local cleanup commands** above (5 min)
+2. Start **Phase 2 (RL-Quote Integration)** or **Phase 3 (AlertsEngine)** — both are independent
+3. Decision still needed: rl-quote-sandbox — make public, share files, or keep as microservice?
+4. Also consider: delete stale openapi.json from backend (says v5.9.0, actual v6.0.0) or regenerate it
 
-## Render Service IDs
-- rl-quote-sandbox: `srv-d58g4163jp1c73bg91pg`
-- CFCOrderBackend-Sandbox: `srv-d4tu1e24d50c73b6952g`
+## BATTLE PLAN STATUS
+
+| Phase | Focus | Status |
+|-------|-------|--------|
+| 1 | Cleanup & Hygiene | ✅ MOSTLY DONE (local git cleanup remaining) |
+| 2 | RL-Quote Integration | NOT STARTED |
+| 3 | AlertsEngine | NOT STARTED |
+| 4 | Customer Communications | NOT STARTED |
+| 5 | Backend Hardening | NOT STARTED |
+| 6 | Frontend Polish | NOT STARTED |
+| 7 | Production Promotion | NOT STARTED |
 
 ## KEY REFERENCE FILES
 
 - **Battle plan**: cfc-orders:handoffs/CFC_ORDERS_BATTLE_PLAN.md
 - **Original upgrade plan**: cfc-orders:handoffs/CFC_ORDERS_PLAN.md
-- **Sandbox audit**: cfc-orders:handoffs/CFC_ORDERS_SANDBOX_AUDIT_20260228.md
-- **Lane handoffs**: cfc-orders:handoffs/SESSION_HANDOFF_ORDERS_*.md (4 files)
 - **Rules**: brain:WILLIAM_BRAIN/ORDERS_BRAIN/rules.md (v1.2)
-- **Lane manifest**: brain:lane_manifest.json (v3.0)
 - **Master status**: brain:MASTER_STATUS.md (Workstream 6)
 
 ## REPOS
