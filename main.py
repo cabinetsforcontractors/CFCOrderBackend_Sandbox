@@ -172,6 +172,10 @@ app.include_router(rl_proxy_router)
 if ALERTS_ENGINE_LOADED:
     app.include_router(alerts_router)
 
+# Phase 3B+4: Lifecycle + Email + AI Config (one-call wiring)
+from startup_wiring import wire_all
+WIRING_STATUS = wire_all(app)
+
 # Global for tracking last sync
 last_auto_sync = None
 auto_sync_running = False
@@ -277,6 +281,15 @@ def root():
         },
         "alerts_engine": {
             "enabled": ALERTS_ENGINE_LOADED
+        },
+        "lifecycle_engine": {
+            "enabled": WIRING_STATUS.get("lifecycle", False)
+        },
+        "email_engine": {
+            "enabled": WIRING_STATUS.get("email", False)
+        },
+        "ai_configure": {
+            "enabled": WIRING_STATUS.get("ai_configure", False)
         }
     }
 
@@ -595,7 +608,7 @@ def rl_quote(
     origin_zip: str,
     dest_zip: str,
     weight_lbs: int,
-    freight_class: str = "70"
+    freight_class: str = "85"
 ):
     """
     Get LTL freight quote from R+L Carriers.
@@ -672,7 +685,7 @@ class RLBolRequest(BaseModel):
     weight_lbs: int
     pieces: int = 1
     description: str = "RTA Cabinets"
-    freight_class: str = "70"
+    freight_class: str = "85"
     # Reference
     po_number: Optional[str] = ""
     quote_number: Optional[str] = ""
@@ -1076,7 +1089,7 @@ def rl_create_order_bol(
             weight_lbs=int(weight),
             pieces=pieces,
             description=description,
-            freight_class="70",
+            freight_class="85",
             po_number=order_id,
             quote_number=quote_number,
             special_instructions=special_instructions,
