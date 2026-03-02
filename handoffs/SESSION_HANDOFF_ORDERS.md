@@ -1,9 +1,9 @@
 # SESSION HANDOFF — CFC Orders (General)
 
-**Last Updated:** 2026-03-02 (End-of-day audit — all sessions reconciled)
-**Latest Session:** Session 12 — RL Fix + App.jsx v7.0 + BrainChat Header (all 3 complete)
+**Last Updated:** 2026-03-02 (Session 13 — RL proxy method fix GET→POST)
+**Latest Session:** Session 13 — Fixed rl_quote_proxy.py: /quote/simple requires POST not GET (405 Method Not Allowed resolved)
+**Session Before:** Session 12 — RL Fix + App.jsx v7.0 + BrainChat Header (all 3 complete)
 **Session Before:** Session 11 — RL proxy payload fix completed (276 lines)
-**Session Before:** Sessions 9-10 — Phase 4 email templates built, Phase 3B lifecycle code complete
 
 ---
 
@@ -19,7 +19,7 @@
 | Email Frontend (Phase 4) | EmailPanel.jsx, OrderCard.jsx v5.12 | ✅ COMMITTED (but OrderCard replaced by v7.0 table) |
 | AI Config Panel | ai_configure.py, ai_configure_wiring.py, AiConfigPanel.jsx | ✅ COMMITTED — needs startup_wiring import |
 | Startup Wiring | startup_wiring.py | ✅ COMMITTED — wires lifecycle + email + AI config in one call |
-| RL Quote Proxy | rl_quote_proxy.py (276 lines) | ✅ FIXED — GET to /quote/simple, zip_code field correct |
+| RL Quote Proxy | rl_quote_proxy.py (276 lines) | ✅ WORKING — POST to /quote/simple, zip_code field correct |
 | Freight Class | checkout.py, rl_carriers.py, rl_quote_proxy.py | ✅ All "85" — main.py still has 3× "70" |
 | **Frontend v7.0** | App.jsx, index.css, BrainChat.jsx v2.0, index.html | ✅ DARK THEME TABLE LAYOUT LIVE |
 
@@ -51,7 +51,7 @@ Complete frontend rewrite committed to cfc-orders-frontend:
 
 ---
 
-## R+L QUOTE PROXY — COMPLETE (Sessions 11-12)
+## R+L QUOTE PROXY — WORKING ✅ (Sessions 11-13)
 
 `rl_quote_proxy.py` is COMPLETE at 276 lines. All three R+L paths working:
 
@@ -59,7 +59,9 @@ Complete frontend rewrite committed to cfc-orders-frontend:
 |------|------|--------|
 | Direct API | rl_carriers.py | ✅ Works |
 | Checkout | checkout.py | ✅ Works |
-| Proxy | rl_quote_proxy.py | ✅ FIXED — GET to /quote/simple, zip_code correct |
+| Proxy | rl_quote_proxy.py | ✅ WORKING — POST to /quote/simple (fixed Session 13) |
+
+**Session 13 bug fix:** rl-quote-sandbox defines `/quote/simple` as `@app.post`. The proxy was incorrectly calling it with `method="GET"`, causing 405 Method Not Allowed. Fixed both call sites (proxy_freight_quote line 161, proxy_auto_quote line 219) to `method="POST"`. Params still pass as query string — `_call_rl_sandbox` appends them to URL regardless of method.
 
 ---
 
@@ -76,6 +78,7 @@ Complete frontend rewrite committed to cfc-orders-frontend:
 | 7 | Duplicate endpoint | ✅ NOT A BUG — POST/GET/DELETE are different methods |
 | 8 | Freight class bug | ✅ PARTIAL — checkout.py + rl_carriers.py + proxy all "85". **3 spots in main.py still "70"** |
 | 9 | No authentication | OPEN — Phase 5 |
+| 10 | RL proxy 405 Method Not Allowed | ✅ RESOLVED Session 13 — was sending GET to POST-only endpoint |
 
 ---
 
@@ -117,7 +120,7 @@ Complete frontend rewrite committed to cfc-orders-frontend:
 | cfc-orders | alerts_engine.py / alerts_routes.py | Phase 3A (WIRED) |
 | cfc-orders | lifecycle_engine.py / lifecycle_routes.py / lifecycle_wiring.py | Phase 3B |
 | cfc-orders | email_templates.py / email_sender.py / email_routes.py / email_wiring.py | Phase 4 |
-| cfc-orders | rl_quote_proxy.py | R+L proxy (FIXED) |
+| cfc-orders | rl_quote_proxy.py | R+L proxy (WORKING ✅) |
 | cfc-orders | ai_configure.py / ai_configure_wiring.py | AI Config Panel |
 | cfc-orders-frontend | src/App.jsx (v7.0) | Dark theme table layout |
 | cfc-orders-frontend | src/components/BrainChat.jsx (v2.0) | Header-triggered Brain chat |
