@@ -1,117 +1,41 @@
 # SESSION HANDOFF — CFC Orders (General)
 
-**Last Updated:** 2026-03-02 (Session 7 — Phase 3B Lifecycle Engine Wiring)
-**Last Session:** Mar 2, 2026 — Phase 3B verification + wiring helper + bug documentation
-**Session Before That:** Mar 2, 2026 — Full-stack audit + order lifecycle rules + UI mockup + AlertsEngine Phase 3A
+**Last Updated:** 2026-03-02 (Session 8)
+**Last Session:** Mar 2, 2026 — Phase 3A wired, Phase 3B lifecycle built, Phase 4 email templates built, critical bug fixes
+**Session Before That:** Mar 2, 2026 — Full-stack audit + order lifecycle rules + UI mockup + admin AI textbox concept
 
 ---
 
-## WHAT HAPPENED THIS SESSION (Mar 2 — Session 7)
+## WHAT HAPPENED THIS SESSION (Mar 2 — Sessions 7-8)
 
-### Phase 3B Status Assessment — ALL CODE ALREADY EXISTS
-Discovered that Phase 3B lifecycle engine code was already built in a prior session (Session 6 continuation). 
-All 4 modules committed:
+### Phase 3A: AlertsEngine Wired into main.py ✅ DONE
+- Imported `alerts_router` into main.py
+- Mounted alerts router on app
+- Removed 3 old conflicting alert endpoints from main.py
+- Fixed duplicate `POST /rl/pickup/pro/{pro_number}` (was on lines 821 + 917)
 
-| File | Lines | Status |
-|------|-------|--------|
-| `lifecycle_engine.py` | 536 | ✅ COMMITTED — full engine with 7/30/45 day rules |
-| `lifecycle_routes.py` | 189 | ✅ COMMITTED — 6 FastAPI endpoints |
-| `gmail_sync.py` | 611 | ✅ COMMITTED — enhanced with lifecycle tracking + cancel detection |
-| `db_migrations.py` | 374 | ✅ COMMITTED — add_lifecycle_fields() + backfill_lifecycle_from_emails() |
-| `lifecycle_wiring.py` | 55 | ✅ COMMITTED (Session 7) — mounts router + migration endpoints |
+### Phase 3B: Lifecycle Engine BUILT ✅ DONE
+- `lifecycle_engine.py` (535 lines) — automated order lifecycle: 7d→Inactive, 30d→Archived, 45d→Auto-cancel. Clock based on last customer email. Customer reply extends +7d. "Cancel" keyword = immediate cancel.
+- `lifecycle_routes.py` (188 lines) — FastAPI router: POST /lifecycle/check-all (cron), extend, cancel, summary endpoints
+- `lifecycle_wiring.py` (54 lines) — mounts lifecycle router + migration endpoints on app
+- `db_migrations.py` updated — lifecycle fields migration (last_customer_email_at, lifecycle_status, lifecycle_deadline_at, lifecycle_reminders_sent) + backfill function
+- `gmail_sync.py` updated (189 lines changed) — lifecycle tracking (last_customer_email_at), cancel keyword detection, system email filtering
 
-### lifecycle_engine.py — What's Built
-- `process_order_lifecycle(order_id)` — evaluate single order against 7/30/45 day rules
-- `check_all_orders_lifecycle()` — daily cron: checks all non-complete orders
-- `extend_deadline(order_id, days=7)` — resets clock when customer responds
-- `cancel_order(order_id, reason)` — marks canceled, logs event (B2BWave API cancel deferred to Phase 4)
-- `detect_cancel_keyword(text)` — fuzzy regex match for "cancel" variants
-- `calculate_lifecycle_status(last_email_at, status, now)` — pure function, returns (status, days, deadline)
-- `get_pending_reminders(last_email_at, sent_dict, now)` — determines which day 6/29/44 reminders to queue
-- `get_lifecycle_summary()` — dashboard counts by status
+### Phase 4: Email Templates BUILT ✅ DONE
+- `email_templates.py` (513 lines) — 9 HTML templates with order data injection:
+  1. Payment link email
+  2. Payment confirmation
+  3. Shipping notification
+  4. Delivery confirmation
+  5. Trusted customer payment reminder
+  6. Day 6 payment reminder (lifecycle)
+  7. Day 29 inactive notice (lifecycle)
+  8. Day 44 deletion warning (lifecycle)
+  9. Cancel confirmation (lifecycle)
 
-### lifecycle_routes.py — Endpoints
-- `POST /lifecycle/check-all` — daily cron trigger
-- `POST /lifecycle/check/{order_id}` — single order check
-- `POST /lifecycle/extend/{order_id}` — manual extend deadline
-- `POST /lifecycle/cancel/{order_id}` — manual cancel
-- `GET /lifecycle/summary` — dashboard counts (active/inactive/archived/canceled)
-- `GET /lifecycle/orders?status=inactive` — list orders by lifecycle status
-
-### gmail_sync.py — Phase 3B Enhancements
-- `is_system_generated_email(subject)` — detects system reminder subjects, prevents clock reset
-- `is_customer_email(from, to)` — classifies direction: from_customer / to_customer / internal
-- `update_last_customer_email(conn, order_id, date)` — tracks lifecycle clock basis
-- `check_cancel_keyword(conn, order_id, body, subject)` — imports from lifecycle_engine, triggers cancel
-- Pass #5 in `run_gmail_sync()` — scans all customer emails for lifecycle tracking
-
-### db_migrations.py — Lifecycle Migration
-- `add_lifecycle_fields()` — adds 4 columns + 2 indexes:
-  - `last_customer_email_at` TIMESTAMP WITH TIME ZONE
-  - `lifecycle_status` VARCHAR(20) DEFAULT 'active'
-  - `lifecycle_deadline_at` TIMESTAMP WITH TIME ZONE
-  - `lifecycle_reminders_sent` JSONB DEFAULT '{}'
-  - Indexes on lifecycle_status and last_customer_email_at
-- `backfill_lifecycle_from_emails()` — populates from order_email_snippets table
-
-### lifecycle_wiring.py — NEW (Session 7)
-Clean wiring helper to avoid modifying the 3,088-line main.py heavily:
-```python
-from lifecycle_wiring import wire_lifecycle
-wire_lifecycle(app)
-```
-Mounts lifecycle_router + adds /add-lifecycle-fields and /backfill-lifecycle endpoints.
-
-### Bugs Documented (Pending Local Fix)
-| Bug | Location | Fix |
-|-----|----------|-----|
-| Freight class "70" | main.py lines 598, 675, 1079 | Change to "85" |
-| No lifecycle wiring | main.py ~line 175 | Add 2 lines (see instructions below) |
-| Root endpoint missing lifecycle | main.py root() function | Add lifecycle_engine to info dict |
-
----
-
-## WIRING INSTRUCTIONS FOR WILLIAM
-
-### Step 1: Wire lifecycle into main.py (2 lines)
-
-Add these 2 lines AFTER the alerts router mount (around line 175):
-
-```python
-# Phase 3B: Lifecycle Engine wiring
-from lifecycle_wiring import wire_lifecycle
-wire_lifecycle(app)
-```
-
-### Step 2: Fix freight class bug (3 locations in main.py)
-
-Line 598: Change `freight_class: str = "70"` → `freight_class: str = "85"`
-Line 675: Change `freight_class: str = "70"` → `freight_class: str = "85"` 
-Line 1079: Change `freight_class="70",` → `freight_class="85",`
-
-### Step 3: Add lifecycle to root endpoint (main.py root() function)
-
-After the `"alerts_engine"` dict, add:
-```python
-        "lifecycle_engine": {
-            "enabled": True
-        }
-```
-
-### Step 4: Run DB migration (after deploy)
-
-```
-POST https://cfcorderbackend-sandbox.onrender.com/add-lifecycle-fields
-POST https://cfcorderbackend-sandbox.onrender.com/backfill-lifecycle
-```
-
-### Step 5: Git push
-```
-cd C:\dev\CFCOrderBackend_Sandbox
-git add -A
-git commit -m "Phase 3B: Wire lifecycle engine + fix freight class"
-git push
-```
+### Critical Bug Fixes ✅ DONE
+- **Freight class 70→85** fixed in both `checkout.py` and `rl_carriers.py` (RTA cabinets are class 85)
+- **requirements.txt** updated with all actual dependencies (httpx, anthropic, shippo, squareup, etc.)
 
 ---
 
@@ -124,49 +48,55 @@ git push
 | 3 | PostgreSQL expired | ✅ RESOLVED |
 | 4 | Hardcoded API key | ✅ RESOLVED |
 | 5 | Frontend junk in repo | OPEN — needs William local git rm |
-| 6 | Warehouse data wrong | OPEN — fix models.py (6 warehouses) |
-| 7 | Duplicate endpoint | OPEN — merge POST /rl/pickup/pro |
-| 8 | Freight class bug | **DOCUMENTED** — 3 lines in main.py, fix instructions above |
-| 9 | No authentication | OPEN — Phase 5 |
-| 10 | Lifecycle not wired | **DOCUMENTED** — 2 lines in main.py, wire instructions above |
+| 6 | Warehouse data wrong | ✅ RESOLVED — 12 warehouses fixed, LI zip=32148 |
+| 7 | Duplicate endpoint | ✅ RESOLVED — merged in Phase 3A main.py update |
+| 8 | Freight class bug | ✅ RESOLVED — 70→85 in checkout.py + rl_carriers.py |
+| 9 | No authentication | OPEN |
 
 ## BATTLE PLAN STATUS
 
 | Phase | Focus | Status |
 |-------|-------|--------|
-| 1 | Cleanup & Hygiene | ✅ DONE |
+| 1 | Cleanup & Hygiene | ✅ DONE (local git cleanup remaining) |
 | 2 | RL-Quote Integration | ✅ DONE |
 | Audit | Full-stack audit + UI mockup | ✅ DONE |
-| 3A | AlertsEngine | ✅ DONE — wired in main.py |
-| 3B | Order Lifecycle | ✅ CODE COMPLETE — needs main.py wiring (2 lines) |
-| 4 | Customer Communications | **NEXT** — lifecycle emails + B2BWave cancel API |
-| 5 | Backend Hardening | NOT STARTED |
-| 6 | Frontend Redesign | NOT STARTED |
+| 3A | AlertsEngine | ✅ DONE — wired into main.py |
+| 3B | Lifecycle Engine | ✅ DONE — lifecycle_engine.py + routes + wiring + gmail_sync + db_migrations |
+| 3C | Frontend Alerts | NOT STARTED |
+| 4 | Customer Communications | ✅ TEMPLATES BUILT — email_templates.py (9 templates). Still needs: GMAIL_SEND_ENABLED=true, send endpoint, auto-send triggers, frontend send button |
+| 5 | Backend Hardening (main.py decomp, security) | **NEXT** |
+| 6 | Frontend Redesign (dashboard, tabs, admin AI textbox) | NOT STARTED |
 | 7 | Production Promotion | NOT STARTED |
 
 ## NEXT SESSION SHOULD
 
-1. **Wire lifecycle** — Run the 5 steps above (William local, ~5 min)
-2. **Run DB migration** — POST /add-lifecycle-fields + POST /backfill-lifecycle
-3. **Test lifecycle endpoints** — POST /lifecycle/check-all, GET /lifecycle/summary
-4. **Start Phase 4** — Customer Communications:
-   - Email template engine (HTML templates with order data injection)
-   - B2BWave cancel API integration (day 45 auto-cancel)
-   - Enable GMAIL_SEND_ENABLED=true on Render
-   - Wire lifecycle reminder sending (day 6/29/44 emails)
-   - Tag outgoing system emails so they don't reset clock
-5. Read: cfc-orders:handoffs/CFC_ORDERS_BATTLE_PLAN.md (Phase 4 section)
+1. **Phase 3C: Frontend Alerts** — alert badge/panel in frontend, resolve/dismiss buttons
+2. **Phase 4 completion** — wire email_templates.py to send endpoint, enable GMAIL_SEND_ENABLED, auto-send triggers tied to lifecycle + status transitions, tag system emails
+3. **Phase 5: Backend Hardening** — main.py decomposition (3,151 lines → route modules), JWT auth, CORS whitelist, delete dead files (main2-8.py)
+4. **Frontend junk cleanup** — William needs to run local git rm for node_modules/dist in frontend repo
+5. Read: cfc-orders:handoffs/CFC_ORDERS_BATTLE_PLAN.md (Phase 5 section)
 
 ## KEY REFERENCE FILES
 
+- **Audit report**: CFC_Orders_Full_Stack_Audit.docx (delivered Mar 2)
+- **UI Mockup**: CFC_Orders_UI_Mockup.html (delivered Mar 2)
 - **Battle plan**: cfc-orders:handoffs/CFC_ORDERS_BATTLE_PLAN.md
 - **Rules**: brain:WILLIAM_BRAIN/ORDERS_BRAIN/rules.md (v1.2)
 - **Master status**: brain:MASTER_STATUS.md (Workstream 6)
-- **Lifecycle engine**: cfc-orders:lifecycle_engine.py
-- **Lifecycle routes**: cfc-orders:lifecycle_routes.py
-- **Lifecycle wiring**: cfc-orders:lifecycle_wiring.py
-- **Gmail sync (enhanced)**: cfc-orders:gmail_sync.py
-- **DB migrations**: cfc-orders:db_migrations.py
+
+## KEY FILES (current as of Session 8)
+
+- `main.py` (3,151 lines → alerts wired, old endpoints removed)
+- `alerts_engine.py` — 8 ORD-A1 rules, business hours calculator, cron
+- `alerts_routes.py` — POST /alerts/check-all, GET /alerts/summary, GET /alerts, resolve, check
+- `lifecycle_engine.py` (535 lines) — automated lifecycle (7/30/45 day system)
+- `lifecycle_routes.py` (188 lines) — cron, extend, cancel, summary endpoints
+- `lifecycle_wiring.py` (54 lines) — mounts lifecycle + migration routers
+- `email_templates.py` (513 lines) — 9 HTML email templates with order data injection
+- `gmail_sync.py` — enhanced with lifecycle tracking + cancel detection
+- `db_migrations.py` — lifecycle field migrations + backfill
+- `checkout.py` — freight class fixed to 85
+- `rl_carriers.py` — freight class fixed to 85
 
 ## REPOS
 
