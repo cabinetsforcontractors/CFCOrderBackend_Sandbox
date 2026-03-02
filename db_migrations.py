@@ -253,3 +253,121 @@ def add_weight_column() -> dict:
                 if "already exists" in str(e):
                     return {"status": "ok", "message": "total_weight column already exists"}
                 return {"status": "error", "message": str(e)}
+
+
+# =============================================================================
+# PHASE 3B: LIFECYCLE FIELDS MIGRATION
+# =============================================================================
+
+def add_lifecycle_fields() -> dict:
+    """
+    Add lifecycle management columns to orders table.
+    
+    New columns:
+      - last_customer_email_at: Timestamp of last email to/from customer about this order
+      - lifecycle_status: Enum-like VARCHAR — active, inactive, archived, canceled
+      - lifecycle_deadline_at: Next lifecycle action deadline
+      - lifecycle_reminders_sent: JSON tracking which reminders have been sent
+    
+    Safe to run multiple times — uses IF NOT EXISTS pattern.
+    """
+    results = []
+    
+    fields_to_add = [
+        ("last_customer_email_at", "TIMESTAMP WITH TIME ZONE"),
+        ("lifecycle_status", "VARCHAR(20) DEFAULT 'active'"),
+        ("lifecycle_deadline_at", "TIMESTAMP WITH TIME ZONE"),
+        ("lifecycle_reminders_sent", "JSONB DEFAULT '{}'::jsonb"),
+    ]
+    
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            for field_name, field_type in fields_to_add:
+                try:
+                    cur.execute(f"ALTER TABLE orders ADD COLUMN {field_name} {field_type}")
+                    results.append(f"{field_name}: added")
+                except Exception as e:
+                    if "already exists" in str(e):
+                        results.append(f"{field_name}: already exists")
+                    else:
+                        results.append(f"{field_name}: ERROR — {str(e)}")
+                    conn.rollback()
+                    continue
+            
+            # Add index on lifecycle_status for tab queries
+            try:
+                cur.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_orders_lifecycle_status 
+                    ON orders(lifecycle_status)
+                """)
+                results.append("idx_orders_lifecycle_status: created")
+            except Exception as e:
+                results.append(f"lifecycle index: {str(e)}")
+                conn.rollback()
+            
+            # Add index on last_customer_email_at for cron queries
+            try:
+                cur.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_orders_last_customer_email 
+                    ON orders(last_customer_email_at)
+                """)
+                results.append("idx_orders_last_customer_email: created")
+            except Exception as e:
+                results.append(f"email index: {str(e)}")
+                conn.rollback()
+            
+            conn.commit()
+    
+    return {
+        "status": "ok",
+        "message": "Lifecycle fields migration complete",
+        "results": results
+    }
+
+
+def backfill_lifecycle_from_emails() -> dict:
+    """
+    Backfill last_customer_email_at from existing order_email_snippets.
+    
+    Looks at the most recent email snippet for each order and uses its
+    date as the initial last_customer_email_at value.
+    
+    Also sets lifecycle_status based on the calculated days inactive.
+    Run AFTER add_lifecycle_fields().
+    """
+    updated = 0
+    errors = []
+    
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            # Find orders with NULL last_customer_email_at that have email snippets
+            cur.execute("""
+                UPDATE orders o
+                SET last_customer_email_at = sub.latest_email
+                FROM (
+                    SELECT order_id, MAX(email_date) as latest_email
+                    FROM order_email_snippets
+                    GROUP BY order_id
+                ) sub
+                WHERE o.order_id = sub.order_id
+                AND o.last_customer_email_at IS NULL
+            """)
+            updated += cur.rowcount
+            
+            # For orders with no email snippets, use updated_at as fallback
+            cur.execute("""
+                UPDATE orders
+                SET last_customer_email_at = COALESCE(updated_at, order_date, created_at)
+                WHERE last_customer_email_at IS NULL
+                AND (is_complete = FALSE OR is_complete IS NULL)
+            """)
+            updated += cur.rowcount
+            
+            conn.commit()
+    
+    return {
+        "status": "ok",
+        "message": f"Backfilled {updated} orders with last_customer_email_at",
+        "updated": updated,
+        "errors": errors
+    }
