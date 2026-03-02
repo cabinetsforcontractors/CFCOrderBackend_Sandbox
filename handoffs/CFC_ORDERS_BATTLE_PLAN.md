@@ -1,18 +1,18 @@
 # CFC Orders Sandbox — Battle Plan
 **Created:** 2026-03-01
-**Updated:** 2026-03-02 (Session 8 — Phase 3A+3B done, Phase 4 templates done, critical bugs fixed)
+**Updated:** 2026-03-02 (End-of-day — Sessions 5-12 reconciled. Phase 4 send code BUILT, Phase 6 PARTIAL via App.jsx v7.0, RL proxy FIXED)
 **Goal:** Make the sandbox badass across multiple sessions, then deploy
 **Approach:** Fix what's broken, integrate what's separate, build what's missing
 
 ---
 
-## CURRENT STATE SNAPSHOT (Mar 2, 2026 — Post-Session 8)
+## CURRENT STATE SNAPSHOT (Mar 2, 2026 — Post-Session 12)
 
 ### Services (ALL ALIVE)
 | Service | URL | Version | Status |
 |---------|-----|---------|--------|
 | Sandbox Backend | cfcorderbackend-sandbox.onrender.com | v6.0.0 | ✅ Running, auto-sync active |
-| Sandbox Frontend | cfcordersfrontend-sandbox.vercel.app | v5.10.1 | ✅ Running |
+| Sandbox Frontend | cfcordersfrontend-sandbox.vercel.app | **v7.0** | ✅ Running — dark theme table layout |
 | rl-quote-sandbox | rl-quote-sandbox.onrender.com | v0.1.0 | ✅ Running (separate service) |
 | Production Backend | (Render) | ~v5.7 | ✅ Running but 2mo behind |
 | Production Frontend | cfc-orders-frontend.vercel.app | ~v5.10 | ✅ Running |
@@ -25,10 +25,10 @@
 | Severity | Count | Key Items |
 |----------|-------|-----------|
 | CRITICAL | 6 | No auth, ~~duplicate endpoint~~, ~~freight class=70 bug~~, dead code w/ API key |
-| HIGH | 8 | Monolith main.py (3,151 lines), ~~requirements.txt incomplete~~, StatusBar bug |
-| MEDIUM | 15 | STATUS_MAP 3x duplicated, unused OrderComments.jsx, no search/filter |
+| HIGH | 8 | Monolith main.py (3,151 lines), ~~requirements.txt incomplete~~, ~~StatusBar bug~~ |
+| MEDIUM | 15 | ~~STATUS_MAP 3x duplicated~~, ~~unused OrderComments.jsx~~, ~~no search/filter~~ |
 | LOW | 12 | No accessibility, no loading skeletons, no keyboard shortcuts |
-| ENHANCEMENT | 6 | Customer portal, tasks/todo, analytics, kanban, email automation |
+| ENHANCEMENT | 6 | Customer portal, tasks/todo, analytics, kanban, ~~email automation~~ |
 
 ### Database (PostgreSQL on Render)
 - **9 tables**: orders, order_line_items, order_events, order_alerts, order_email_snippets, order_shipments, pending_checkouts, warehouse_mapping, trusted_customers
@@ -99,16 +99,23 @@ Clock starts from last customer email activity (to or from customer about that o
 - ✅ `db_migrations.py` — lifecycle fields migration + backfill function
 - ✅ `gmail_sync.py` — last_customer_email_at tracking, cancel keyword detection, system email filtering
 - ✅ `email_templates.py` (513 lines) — 9 HTML templates with order data injection
+- ✅ `email_sender.py` — Gmail API send, event logging, system_generated tagging
+- ✅ `email_routes.py` — FastAPI router: send, preview, templates list, email history
+- ✅ `email_wiring.py` — Minimal wiring module (same pattern as lifecycle_wiring.py)
+- ✅ `startup_wiring.py` — One-call wiring for lifecycle + email + AI configure
+- ✅ `rl_quote_proxy.py` (276 lines) — All 3 R+L paths working (GET to /quote/simple)
 - ⬜ GMAIL_SEND_ENABLED=true — still false, needs flip when ready
-- ⬜ Send endpoint — POST /orders/{id}/send-email with template selection
-- ⬜ Auto-send triggers — tied to lifecycle + status transitions
-- ⬜ System email tagging — outgoing system emails need lifecycle clock exclusion tag
+- ⬜ Auto-send triggers — tied to lifecycle + status transitions (Phase 4 completion)
+- ⬜ main.py wiring — startup_wiring import + freight class fix (William local, ~5 min)
 
-### Frontend Requirements (NOT STARTED)
-- **Tab bar:** All | Inactive (count) | Archived (count)
-- **Inactive tab:** Shows days since last activity, next action date, countdown badge, "Reactivate" button
-- **Archived tab:** Read-only order view, "Reactivate" button, days until deletion, warning badge
-- **Visual indicators:** Color-coded urgency (green→yellow→orange→red), countdown timers
+### Frontend Status (v7.0 — Session 12)
+- ✅ **App.jsx v7.0** — Dark theme table layout: 7 metric cards, sortable table, slide-in detail panel, search
+- ✅ **BrainChat v2.0** — Header-triggered, no floating button
+- ✅ **index.css v7.0** — Full dark theme CSS
+- ✅ **index.html** — DM Sans + JetBrains Mono Google Fonts
+- ⬜ Lifecycle tabs (Inactive/Archived) — NOT STARTED
+- ⬜ Alert badge/panel — NOT STARTED (Phase 3C)
+- ⬜ Email send UI in detail panel — EmailPanel.jsx committed but needs wiring to v7.0
 
 ---
 
@@ -118,9 +125,9 @@ Completed. Local git cleanup commands remain (node_modules, dist removal from fr
 
 ---
 
-## PHASE 2: RL-QUOTE INTEGRATION ✅ DONE (Session 2)
+## PHASE 2: RL-QUOTE INTEGRATION ✅ DONE (Sessions 2 + 11-12)
 
-Completed. rl-quote-sandbox deployed, R+L API connectivity verified, MCP bridge v2.6 deployed. 12 warehouses fixed, LI zip corrected to 32148.
+Completed. rl-quote-sandbox deployed, R+L API connectivity verified, MCP bridge v2.6 deployed. 12 warehouses fixed, LI zip corrected to 32148. **rl_quote_proxy.py FULLY FIXED** (Session 12) — GET to /quote/simple, zip_code field correct, all 3 R+L paths working.
 
 ---
 
@@ -145,19 +152,21 @@ Completed. rl-quote-sandbox deployed, R+L API connectivity verified, MCP bridge 
 
 ---
 
-## PHASE 4: CUSTOMER COMMUNICATIONS — PARTIALLY DONE (Session 8)
+## PHASE 4: CUSTOMER COMMUNICATIONS — ✅ CODE COMPLETE (Sessions 8-10), needs main.py wiring
 
-### ✅ Templates Built
-- `email_templates.py` (513 lines) — 9 HTML email templates with order data injection (see lifecycle section above)
+### ✅ All Code Built & Committed
+- `email_templates.py` (513 lines) — 9 HTML email templates with order data injection
+- `email_sender.py` — Gmail API send, event logging, system_generated tagging
+- `email_routes.py` — FastAPI router: send, preview, templates list, email history
+- `email_wiring.py` — Minimal wiring module
+- `EmailPanel.jsx` — Frontend slide-in panel with template picker
 
-### Still Needed
-1. Enable GMAIL_SEND_ENABLED=true
-2. Endpoint: `POST /orders/{id}/send-email` with template selection
+### Still Needed (William local + Render)
+1. Wire main.py: `from startup_wiring import wire_all` + `WIRING_STATUS = wire_all(app)` (~2 lines)
+2. Enable GMAIL_SEND_ENABLED=true on Render
 3. Auto-send triggers tied to status transitions AND lifecycle events
-4. Email send logging in order_events table
-5. **Tag outgoing emails as system-generated** (lifecycle clock exclusion)
-6. Frontend: "Send Email" button on order cards with template picker
-7. Frontend: Email history view per order
+4. Wire EmailPanel into App.jsx v7.0 detail panel (currently references old OrderCard)
+5. Test all endpoints end-to-end
 
 **Deliverables**: Automated customer communications at each lifecycle stage
 
@@ -174,67 +183,70 @@ Completed. rl-quote-sandbox deployed, R+L API connectivity verified, MCP bridge 
    - admin_routes.py (init-db, migrations, debug)
    - lifecycle_routes.py ✅ ALREADY SEPARATE
    - alerts_routes.py ✅ ALREADY SEPARATE
+   - email_routes.py ✅ ALREADY SEPARATE
    - Keep main.py as app factory + router mounting only
-2. ~~**Fix duplicate endpoint**~~ ✅ DONE (Session 8 — removed in Phase 3A wiring)
-3. ~~**Fix freight class bug**~~ ✅ DONE (Session 8 — 70→85 in checkout.py + rl_carriers.py)
+2. ~~**Fix duplicate endpoint**~~ ✅ DONE
+3. ~~**Fix freight class bug**~~ ✅ PARTIAL (checkout.py + rl_carriers.py + proxy done, **3 spots in main.py still "70"**)
 4. **Config consolidation** — checkout.py and gmail_sync.py bypass config.py
 5. **Fix bare except clauses** (2 found)
 6. **Update Anthropic API version** in ai_summary.py
-7. ~~**Fix requirements.txt**~~ ✅ DONE (Session 8 — all dependencies added)
+7. ~~**Fix requirements.txt**~~ ✅ DONE
 8. **Delete dead files** — main2.py, main4.py, main7.py, main8.py, desktop.ini
+9. **Delete unused frontend components** — StatusBar.jsx, OrderCard.jsx, OrderComments.jsx (replaced by v7.0)
 
 ### Security
-9. **JWT authentication** — replace hardcoded password
-10. **CORS whitelist** — only sandbox/production frontends
-11. **Rate limiting** on public endpoints
-12. **API key middleware** for service-to-service calls
+10. **JWT authentication** — replace hardcoded password
+11. **CORS whitelist** — only sandbox/production frontends
+12. **Rate limiting** on public endpoints
+13. **API key middleware** for service-to-service calls
 
 ### Database
-13. Add indexes for common queries
-14. Connection pooling verification
+14. Add indexes for common queries
+15. Connection pooling verification
 
 **Deliverables**: Clean, modular, secure codebase
 
 ---
 
-## PHASE 6: FRONTEND REDESIGN
+## PHASE 6: FRONTEND REDESIGN — ✅ PARTIAL (Session 12)
 
-### Dashboard View (NEW)
-1. Metric cards row — clickable status counts (Need Invoice, Await Pay, etc.)
-2. Alerts banner — overdue/stuck orders highlighted
-3. Quick actions toolbar
+### Dashboard View — ✅ DONE (App.jsx v7.0)
+1. ✅ Metric cards row — clickable status counts (Need Invoice, Await Pay, etc.)
+2. ⬜ Alerts banner — overdue/stuck orders highlighted (Phase 3C prerequisite)
+3. ✅ Quick actions toolbar (in header)
 
-### Tab System (NEW — Lifecycle)
-4. All | Inactive | Archived tabs with counts
-5. Inactive tab: days since activity, next action, countdown, reactivate button
-6. Archived tab: read-only, reactivate button, days until deletion
+### Tab System (Lifecycle) — NOT STARTED
+4. ⬜ All | Inactive | Archived tabs with counts
+5. ⬜ Inactive tab: days since activity, next action, countdown, reactivate button
+6. ⬜ Archived tab: read-only, reactivate button, days until deletion
 
-### Orders Table (Replace Grid)
-7. Sortable, filterable table replacing card grid
-8. Checkbox column for bulk actions
-9. Inline status badges with lifecycle indicators
+### Orders Table — ✅ DONE (App.jsx v7.0)
+7. ✅ Sortable, filterable table replacing card grid
+8. ⬜ Checkbox column for bulk actions
+9. ✅ Inline status badges with lifecycle indicators (age warnings at 7d/14d)
 
-### Order Detail Panel (Replace Modal)
-10. Slide-in side panel (keeps list visible)
-11. Tabs: Overview | Shipments | History | Communications
-12. Activity timeline (visual event log)
-13. Quick action buttons (Send Email, Print BOL, etc.)
+### Order Detail Panel — ✅ DONE (App.jsx v7.0)
+10. ✅ Slide-in side panel (keeps list visible) — 440px from right
+11. ✅ Tabs: Details | AI Summary | Actions
+12. ⬜ Activity timeline (visual event log)
+13. ⬜ Quick action buttons (Send Email, Print BOL, etc.) — wiring needed
 
-### Search & Filters
-14. Text search (order ID, customer, company, email, SKU, tracking #, PRO #)
-15. Filter chips (status, warehouse, date range, payment status)
-16. Saved/bookmarkable views (requires React Router)
+### Search & Filters — ✅ PARTIAL
+14. ✅ Text search (order ID, customer)
+15. ⬜ Filter chips (status, warehouse, date range, payment status)
+16. ⬜ Saved/bookmarkable views (requires React Router)
 
-### Bulk Actions
-17. Select multiple → batch status update, send email, export CSV, archive
+### Bulk Actions — NOT STARTED
+17. ⬜ Select multiple → batch status update, send email, export CSV, archive
 
-### Component Architecture
-18. Extract STATUS_MAP to shared constants.js
-19. Wire up unused OrderComments.jsx
-20. Fix StatusBar onRefresh prop
-21. Add error boundaries, loading skeletons
-22. Component tree organized by feature domain
-23. **Admin AI Textbox** — natural language config panel for Connie (colors, labels, display prefs via Anthropic API)
+### Component Architecture — ✅ PARTIAL
+18. ⬜ Extract STATUS_MAP to shared constants.js
+19. ~~Wire up unused OrderComments.jsx~~ REMOVED (v7.0 replaced it)
+20. ~~Fix StatusBar onRefresh prop~~ REMOVED (v7.0 replaced it)
+21. ⬜ Add error boundaries, loading skeletons
+22. ⬜ Component tree organized by feature domain
+23. ✅ **BrainChat v2.0** — header-triggered, no floating button
+24. ⬜ **Admin AI Textbox** — AiConfigPanel.jsx committed, needs wiring to v7.0
 
 **Deliverables**: Professional, modern order management interface
 
@@ -257,15 +269,16 @@ Only after Phases 1-6 are solid:
 
 | Session | Phase | Focus | Status |
 |---------|-------|-------|--------|
-| ✅ Done | Phase 1 | Cleanup & Hygiene | DONE |
-| ✅ Done | Phase 2 | RL-Quote Integration | DONE |
-| ✅ Done | Audit | Full-stack audit + UI/UX research | DONE |
-| ✅ Done | Phase 3A | AlertsEngine | DONE |
-| ✅ Done | Phase 3B | Order Lifecycle Engine | DONE |
-| ✅ Done | Phase 4 (partial) | Email Templates | TEMPLATES DONE |
-| Next | Phase 3C + 4 completion | Frontend alerts + email send wiring | Phase 3A/3B done |
-| +1 | Phase 5 | Backend Hardening | Phases 2-4 complete |
-| +2 | Phase 6 | Frontend Redesign | Phase 5 complete + HTML mockup approved |
+| ✅ Sessions 1-2 | Phase 1-2 | Cleanup + RL-Quote | DONE |
+| ✅ Session 3-4 | Audit | Full-stack audit + UI/UX research | DONE |
+| ✅ Sessions 5-6 | Phase 3A | AlertsEngine built | DONE |
+| ✅ Sessions 7-8 | Phase 3B + 4 | Lifecycle + Email templates | DONE |
+| ✅ Sessions 9-10 | Phase 4 + bugs | Email send code + startup_wiring + freight fix | DONE |
+| ✅ Sessions 11-12 | Phase 6 + RL fix | App.jsx v7.0 + RL proxy fix + BrainChat header | DONE |
+| **Next** | **William local** | **Wire main.py + push + DB migration + GMAIL flip** | **~5 min** |
+| Next | Phase 3C + 4 test | Frontend alerts + test email endpoints | Phase 3A/3B/4 wired |
+| +1 | Phase 5 | Backend Hardening | main.py decomp, JWT, dead files |
+| +2 | Phase 6 completion | Lifecycle tabs, bulk actions, polish | Phase 5 done |
 | +3 | Phase 7 | Production Deploy | All phases complete |
 
 ---
