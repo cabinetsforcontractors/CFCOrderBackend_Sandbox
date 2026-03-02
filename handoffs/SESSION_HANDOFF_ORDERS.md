@@ -1,41 +1,158 @@
 # SESSION HANDOFF — CFC Orders (General)
 
-**Last Updated:** 2026-03-02 (Session 8)
-**Last Session:** Mar 2, 2026 — Phase 3A wired, Phase 3B lifecycle built, Phase 4 email templates built, critical bug fixes
-**Session Before That:** Mar 2, 2026 — Full-stack audit + order lifecycle rules + UI mockup + admin AI textbox concept
+**Last Updated:** 2026-03-02 (Session 7B — AI Config Panel + Sandbox Link)
+**Last Session:** Mar 2, 2026 — AI Config Panel (Connie's NLP UI customizer) + sandbox link for production
+**Session Before That:** Mar 2, 2026 — Phase 3B lifecycle wiring + bug documentation
 
 ---
 
-## WHAT HAPPENED THIS SESSION (Mar 2 — Sessions 7-8)
+## WHAT HAPPENED THIS SESSION (Mar 2 — Session 7B)
 
-### Phase 3A: AlertsEngine Wired into main.py ✅ DONE
-- Imported `alerts_router` into main.py
-- Mounted alerts router on app
-- Removed 3 old conflicting alert endpoints from main.py
-- Fixed duplicate `POST /rl/pickup/pro/{pro_number}` (was on lines 821 + 917)
+### Feature 1: AI Config Panel (Sandbox Frontend)
+Built a floating AI-powered configuration panel for the sandbox frontend. Connie can type natural language commands like "make awaiting payment pink" and Claude interprets them into live UI changes.
 
-### Phase 3B: Lifecycle Engine BUILT ✅ DONE
-- `lifecycle_engine.py` (535 lines) — automated order lifecycle: 7d→Inactive, 30d→Archived, 45d→Auto-cancel. Clock based on last customer email. Customer reply extends +7d. "Cancel" keyword = immediate cancel.
-- `lifecycle_routes.py` (188 lines) — FastAPI router: POST /lifecycle/check-all (cron), extend, cancel, summary endpoints
-- `lifecycle_wiring.py` (54 lines) — mounts lifecycle router + migration endpoints on app
-- `db_migrations.py` updated — lifecycle fields migration (last_customer_email_at, lifecycle_status, lifecycle_deadline_at, lifecycle_reminders_sent) + backfill function
-- `gmail_sync.py` updated (189 lines changed) — lifecycle tracking (last_customer_email_at), cancel keyword detection, system email filtering
+**Backend — 2 new files committed to cfc-orders:**
+| File | Purpose |
+|------|---------|
+| `ai_configure.py` | FastAPI router: `POST /ai/configure` + `GET /ai/ui-schema` |
+| `ai_configure_wiring.py` | Mount helper (2-line wire into main.py) |
 
-### Phase 4: Email Templates BUILT ✅ DONE
-- `email_templates.py` (513 lines) — 9 HTML templates with order data injection:
-  1. Payment link email
-  2. Payment confirmation
-  3. Shipping notification
-  4. Delivery confirmation
-  5. Trusted customer payment reminder
-  6. Day 6 payment reminder (lifecycle)
-  7. Day 29 inactive notice (lifecycle)
-  8. Day 44 deletion warning (lifecycle)
-  9. Cancel confirmation (lifecycle)
+How it works:
+1. Frontend sends `{ prompt: "make awaiting payment pink" }` to `POST /ai/configure`
+2. Backend sends prompt to Claude Sonnet with system prompt describing the UI schema
+3. Claude returns structured JSON: `{ statusColors: { awaiting_payment: "#ff69b4" }, ... }`
+4. Frontend applies changes live via injected CSS
 
-### Critical Bug Fixes ✅ DONE
-- **Freight class 70→85** fixed in both `checkout.py` and `rl_carriers.py` (RTA cabinets are class 85)
-- **requirements.txt** updated with all actual dependencies (httpx, anthropic, shippo, squareup, etc.)
+Supported config changes:
+- `statusColors` — change any status badge/button color
+- `statusLabels` — rename status labels
+- `theme` — "light" or "dark"
+- `headerColor` — header background color
+- `fontSize` — base font size
+- `accentColor` — primary accent color
+- `customCSS` — raw CSS for advanced tweaks
+
+**Frontend — 2 files committed to cfc-orders-frontend:**
+| File | Purpose |
+|------|---------|
+| `src/components/AiConfigPanel.jsx` | Floating 🤖 button → expandable chat panel |
+| `src/App.jsx` | Updated to v5.10.0 — wires panel, dynamic CSS injection |
+
+App.jsx changes:
+- Added `useMemo` import
+- Added `AiConfigPanel` import
+- `BASE_STATUS_MAP` const (was `STATUS_MAP`) — labels now overridable
+- `STATUS_MAP` is now a `useMemo` that merges base + AI label overrides
+- `dynamicCSS` useMemo generates CSS from aiConfig state
+- `handleConfigChange` merges incoming changes into aiConfig state
+- `<style>{dynamicCSS}</style>` injected into render
+- `<AiConfigPanel>` rendered at bottom of app
+- Header now shows "SANDBOX" badge
+
+### Feature 2: Sandbox Link for Production Frontend
+**NOT YET APPLIED** — production frontend repo not in MCP aliases.
+Code changes ready — see wiring instructions below.
+
+---
+
+## WIRING INSTRUCTIONS FOR WILLIAM
+
+### Step 1: Wire AI Configure into sandbox backend main.py (2 lines)
+
+Add after the lifecycle/alerts router mount (around line 175):
+
+```python
+# Session 7: AI Config Panel
+from ai_configure_wiring import wire_ai_configure
+wire_ai_configure(app)
+```
+
+### Step 2: Wire lifecycle into main.py (2 lines — from Session 7)
+
+Add these 2 lines AFTER the alerts router mount:
+
+```python
+# Phase 3B: Lifecycle Engine wiring
+from lifecycle_wiring import wire_lifecycle
+wire_lifecycle(app)
+```
+
+### Step 3: Fix freight class bug (3 locations in main.py)
+
+Line 598: Change `freight_class: str = "70"` → `freight_class: str = "85"`
+Line 675: Change `freight_class: str = "70"` → `freight_class: str = "85"` 
+Line 1079: Change `freight_class="70",` → `freight_class="85",`
+
+### Step 4: Add lifecycle to root endpoint (main.py root() function)
+
+After the `"alerts_engine"` dict, add:
+```python
+        "lifecycle_engine": {
+            "enabled": True
+        },
+        "ai_configure": {
+            "enabled": True
+        }
+```
+
+### Step 5: Git push sandbox backend
+
+```
+cd C:\dev\CFCOrderBackend_Sandbox
+git add -A
+git commit -m "Session 7: Wire AI config + lifecycle + fix freight class"
+git push
+```
+
+### Step 6: Add sandbox link to PRODUCTION frontend
+
+Edit `C:\dev\CFCOrdersFrontend\src\App.jsx`.
+
+In the header section, add a sandbox link button in `header-actions`:
+
+```jsx
+<div className="header-actions">
+  <a
+    href="https://cfcordersfrontend-sandbox.vercel.app"
+    target="_blank"
+    rel="noopener noreferrer"
+    title="Open Sandbox"
+    style={{
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: '4px',
+      padding: '6px 12px',
+      backgroundColor: '#ff9800',
+      color: '#fff',
+      borderRadius: '6px',
+      textDecoration: 'none',
+      fontSize: '12px',
+      fontWeight: 600,
+    }}
+  >
+    🧪 Sandbox
+  </a>
+  <button onClick={loadOrders} disabled={loading}>
+    {loading ? 'Loading...' : 'Refresh'}
+  </button>
+  <button onClick={handleLogout}>Logout</button>
+</div>
+```
+
+Then push:
+```
+cd C:\dev\CFCOrdersFrontend
+git add -A
+git commit -m "Add sandbox link to production header"
+git push
+```
+
+### Step 7: Run DB migration (after sandbox backend deploy)
+
+```
+POST https://cfcorderbackend-sandbox.onrender.com/add-lifecycle-fields
+POST https://cfcorderbackend-sandbox.onrender.com/backfill-lifecycle
+```
 
 ---
 
@@ -48,60 +165,54 @@
 | 3 | PostgreSQL expired | ✅ RESOLVED |
 | 4 | Hardcoded API key | ✅ RESOLVED |
 | 5 | Frontend junk in repo | OPEN — needs William local git rm |
-| 6 | Warehouse data wrong | ✅ RESOLVED — 12 warehouses fixed, LI zip=32148 |
-| 7 | Duplicate endpoint | ✅ RESOLVED — merged in Phase 3A main.py update |
-| 8 | Freight class bug | ✅ RESOLVED — 70→85 in checkout.py + rl_carriers.py |
-| 9 | No authentication | OPEN |
+| 6 | Warehouse data wrong | OPEN — fix models.py (6 warehouses) |
+| 7 | Duplicate endpoint | OPEN — merge POST /rl/pickup/pro |
+| 8 | Freight class bug | **DOCUMENTED** — 3 lines in main.py |
+| 9 | No authentication | OPEN — Phase 5 |
+| 10 | Lifecycle not wired | **DOCUMENTED** — 2 lines in main.py |
+| 11 | AI config not wired | **DOCUMENTED** — 2 lines in main.py |
 
 ## BATTLE PLAN STATUS
 
 | Phase | Focus | Status |
 |-------|-------|--------|
-| 1 | Cleanup & Hygiene | ✅ DONE (local git cleanup remaining) |
+| 1 | Cleanup & Hygiene | ✅ DONE |
 | 2 | RL-Quote Integration | ✅ DONE |
 | Audit | Full-stack audit + UI mockup | ✅ DONE |
-| 3A | AlertsEngine | ✅ DONE — wired into main.py |
-| 3B | Lifecycle Engine | ✅ DONE — lifecycle_engine.py + routes + wiring + gmail_sync + db_migrations |
-| 3C | Frontend Alerts | NOT STARTED |
-| 4 | Customer Communications | ✅ TEMPLATES BUILT — email_templates.py (9 templates). Still needs: GMAIL_SEND_ENABLED=true, send endpoint, auto-send triggers, frontend send button |
-| 5 | Backend Hardening (main.py decomp, security) | **NEXT** |
-| 6 | Frontend Redesign (dashboard, tabs, admin AI textbox) | NOT STARTED |
+| 3A | AlertsEngine | ✅ DONE — wired in main.py |
+| 3B | Order Lifecycle | ✅ CODE COMPLETE — needs main.py wiring (2 lines) |
+| — | AI Config Panel | ✅ CODE COMPLETE — needs main.py wiring (2 lines) |
+| 4 | Customer Communications | **NEXT** |
+| 5 | Backend Hardening | NOT STARTED |
+| 6 | Frontend Redesign | NOT STARTED |
 | 7 | Production Promotion | NOT STARTED |
 
 ## NEXT SESSION SHOULD
 
-1. **Phase 3C: Frontend Alerts** — alert badge/panel in frontend, resolve/dismiss buttons
-2. **Phase 4 completion** — wire email_templates.py to send endpoint, enable GMAIL_SEND_ENABLED, auto-send triggers tied to lifecycle + status transitions, tag system emails
-3. **Phase 5: Backend Hardening** — main.py decomposition (3,151 lines → route modules), JWT auth, CORS whitelist, delete dead files (main2-8.py)
-4. **Frontend junk cleanup** — William needs to run local git rm for node_modules/dist in frontend repo
-5. Read: cfc-orders:handoffs/CFC_ORDERS_BATTLE_PLAN.md (Phase 5 section)
+1. **Wire everything** — Run Steps 1-7 above (William local, ~10 min)
+2. **Test AI Config Panel** — Open sandbox frontend, click 🤖 button, try:
+   - "make awaiting payment pink"
+   - "switch to dark mode"
+   - "make the font bigger"
+   - "rename Need BOL to Get BOL"
+3. **Test lifecycle endpoints** — POST /lifecycle/check-all, GET /lifecycle/summary
+4. **Start Phase 4** — Customer Communications (email templates, lifecycle emails)
+5. **Consider**: Add production frontend to MCP aliases for future sessions
 
 ## KEY REFERENCE FILES
 
-- **Audit report**: CFC_Orders_Full_Stack_Audit.docx (delivered Mar 2)
-- **UI Mockup**: CFC_Orders_UI_Mockup.html (delivered Mar 2)
 - **Battle plan**: cfc-orders:handoffs/CFC_ORDERS_BATTLE_PLAN.md
 - **Rules**: brain:WILLIAM_BRAIN/ORDERS_BRAIN/rules.md (v1.2)
-- **Master status**: brain:MASTER_STATUS.md (Workstream 6)
-
-## KEY FILES (current as of Session 8)
-
-- `main.py` (3,151 lines → alerts wired, old endpoints removed)
-- `alerts_engine.py` — 8 ORD-A1 rules, business hours calculator, cron
-- `alerts_routes.py` — POST /alerts/check-all, GET /alerts/summary, GET /alerts, resolve, check
-- `lifecycle_engine.py` (535 lines) — automated lifecycle (7/30/45 day system)
-- `lifecycle_routes.py` (188 lines) — cron, extend, cancel, summary endpoints
-- `lifecycle_wiring.py` (54 lines) — mounts lifecycle + migration routers
-- `email_templates.py` (513 lines) — 9 HTML email templates with order data injection
-- `gmail_sync.py` — enhanced with lifecycle tracking + cancel detection
-- `db_migrations.py` — lifecycle field migrations + backfill
-- `checkout.py` — freight class fixed to 85
-- `rl_carriers.py` — freight class fixed to 85
+- **AI configure**: cfc-orders:ai_configure.py + ai_configure_wiring.py
+- **AI config panel**: cfc-orders-frontend:src/components/AiConfigPanel.jsx
+- **Lifecycle engine**: cfc-orders:lifecycle_engine.py
+- **Lifecycle wiring**: cfc-orders:lifecycle_wiring.py
 
 ## REPOS
 
 - Sandbox backend: github.com/4wprince/CFCOrderBackend_Sandbox (v6.0.0)
-- Sandbox frontend: github.com/4wprince/CFCOrdersFrontend_Sandbox (v5.10.1)
+- Sandbox frontend: github.com/4wprince/CFCOrdersFrontend_Sandbox (v5.10.0)
+- Prod frontend: github.com/4wprince/CFCOrdersFrontend (NOT in MCP)
 - RL quote sandbox: github.com/4wprince/rl-quote-sandbox (MCP alias: `rl-quote`)
 
 ## DEPLOY URLS
@@ -109,8 +220,10 @@
 - Sandbox backend: cfcorderbackend-sandbox.onrender.com
 - RL-quote sandbox: rl-quote-sandbox.onrender.com
 - Sandbox frontend: cfcordersfrontend-sandbox.vercel.app
+- Prod frontend: cfc-orders-frontend.vercel.app
 
 ## LOCAL REPOS
 
 - `C:\dev\CFCOrderBackend_Sandbox` — backend
-- `C:\dev\CFCOrdersFrontend_Sandbox` — frontend
+- `C:\dev\CFCOrdersFrontend_Sandbox` — sandbox frontend
+- `C:\dev\CFCOrdersFrontend` — production frontend
