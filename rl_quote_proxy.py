@@ -15,6 +15,7 @@ Endpoints:
 import json
 import urllib.request
 import urllib.error
+import urllib.parse
 from datetime import datetime
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -41,6 +42,7 @@ class FreightQuoteRequest(BaseModel):
     weight: float
     freight_class: str = "85"  # Always 85 for RTA cabinets
     is_residential: bool = True
+    is_oversized: bool = False
 
 class AutoQuoteRequest(BaseModel):
     """Combined validate + quote in one call"""
@@ -51,15 +53,36 @@ class AutoQuoteRequest(BaseModel):
     dest_zipcode: str = ""
     weight: float
     freight_class: str = "85"
+    is_oversized: bool = False
     customer_markup: float = 50.00  # Default $50 markup per rules
 
 # =============================================================================
 # INTERNAL HELPERS
 # =============================================================================
 
-def _call_rl_sandbox(endpoint: str, method: str = "GET", data: dict = None, timeout: int = 30) -> dict:
-    """Make request to rl-quote-sandbox service"""
+def _call_rl_sandbox(
+    endpoint: str,
+    method: str = "GET",
+    data: dict = None,
+    params: dict = None,
+    timeout: int = 30
+) -> dict:
+    """
+    Make request to rl-quote-sandbox service.
+
+    Args:
+        endpoint: API path (e.g. "quote/simple")
+        method: HTTP method
+        data: JSON body (for POST with body)
+        params: Query string parameters (appended to URL)
+        timeout: Request timeout in seconds
+    """
     url = f"{RL_QUOTE_SANDBOX_URL.rstrip('/')}/{endpoint.lstrip('/')}"
+
+    # Append query params if provided
+    if params:
+        query_string = urllib.parse.urlencode(params)
+        url = f"{url}?{query_string}"
 
     req = urllib.request.Request(url, method=method)
     req.add_header("Content-Type", "application/json")
@@ -124,7 +147,7 @@ def proxy_validate_address(req: AddressValidationRequest):
         "street": req.street,
         "city": req.city,
         "state": req.state,
-        "zipcode": req.zipcode
+        "zip_code": req.zipcode
     })
     return result
 
@@ -132,17 +155,15 @@ def proxy_validate_address(req: AddressValidationRequest):
 @router.post("/quote")
 def proxy_freight_quote(req: FreightQuoteRequest):
     """
-    Get R+L LTL freight quote.
+    Get R+L LTL freight quote via /quote/simple query params.
     Returns carrier price (before customer markup).
     """
-    result = _call_rl_sandbox("quote", method="POST", data={
+    result = _call_rl_sandbox("quote/simple", method="POST", params={
         "origin_zip": req.origin_zip,
-        "dest_zip": req.dest_zip,
-        "dest_city": req.dest_city,
-        "dest_state": req.dest_state,
-        "weight": req.weight,
-        "freight_class": req.freight_class,
-        "is_residential": req.is_residential
+        "destination_zip": req.dest_zip,
+        "weight_lbs": req.weight,
+        "is_residential": str(req.is_residential).lower(),
+        "is_oversized": str(req.is_oversized).lower()
     })
     return result
 
@@ -156,7 +177,7 @@ def proxy_auto_quote(req: AutoQuoteRequest):
     Returns:
         validated_address: Smarty-corrected address
         quote: R+L freight quote details
-        carrier_price: Raw R+L price
+        carrier_price: Raw R+L price (total_cost from rl-quote-sandbox)
         customer_price: carrier_price + markup (default +$50)
         markup: The markup amount applied
     """
@@ -166,7 +187,7 @@ def proxy_auto_quote(req: AutoQuoteRequest):
             "street": req.dest_street,
             "city": req.dest_city,
             "state": req.dest_state,
-            "zipcode": req.dest_zipcode
+            "zip_code": req.dest_zipcode
         })
     except HTTPException:
         # If address validation fails, still try to quote with raw address
@@ -176,66 +197,63 @@ def proxy_auto_quote(req: AutoQuoteRequest):
                 "street": req.dest_street,
                 "city": req.dest_city,
                 "state": req.dest_state,
-                "zipcode": req.dest_zipcode
+                "zip_code": req.dest_zipcode
             },
             "error": "Address validation unavailable, using original address"
         }
 
     # Extract validated ZIP (or fall back to original)
     validated_zip = req.dest_zipcode
-    validated_city = req.dest_city
-    validated_state = req.dest_state
     is_residential = True
 
-    if address_result.get("validated") or address_result.get("address"):
+    if address_result.get("validated") or address_result.get("address") or address_result.get("success"):
         addr = address_result.get("address", address_result)
-        validated_zip = addr.get("zipcode", addr.get("zip", req.dest_zipcode))
-        validated_city = addr.get("city", req.dest_city)
-        validated_state = addr.get("state", req.dest_state)
-        # Smarty returns dpv_vacant or rdi field for residential detection
-        rdi = addr.get("rdi", addr.get("is_residential", ""))
-        if isinstance(rdi, str):
-            is_residential = rdi.lower() != "commercial"
-        elif isinstance(rdi, bool):
-            is_residential = rdi
+        validated_zip = addr.get("zip_code", addr.get("zipcode", addr.get("zip", req.dest_zipcode)))
+        # Smarty returns is_residential directly in the response
+        if "is_residential" in address_result:
+            is_residential = address_result["is_residential"]
+        elif isinstance(addr.get("is_residential"), bool):
+            is_residential = addr["is_residential"]
 
-    # Step 2: Get freight quote
-    quote_result = _call_rl_sandbox("quote", method="POST", data={
+    # Step 2: Get freight quote via /quote/simple with query params
+    quote_result = _call_rl_sandbox("quote/simple", method="POST", params={
         "origin_zip": req.origin_zip,
-        "dest_zip": validated_zip,
-        "dest_city": validated_city,
-        "dest_state": validated_state,
-        "weight": req.weight,
-        "freight_class": req.freight_class,
-        "is_residential": is_residential
+        "destination_zip": validated_zip,
+        "weight_lbs": req.weight,
+        "is_residential": str(is_residential).lower(),
+        "is_oversized": str(req.is_oversized).lower()
     })
 
     # Step 3: Extract price and apply markup
+    # /quote/simple returns: { success, quote: { total_cost, customer_price, ... }, warnings }
     carrier_price = 0.0
     quote_number = None
     service_days = None
 
-    # Handle various response shapes from rl-quote-sandbox
-    if quote_result.get("quote"):
+    if quote_result.get("success") and quote_result.get("quote"):
         q = quote_result["quote"]
-        carrier_price = float(q.get("net_charge", q.get("price", q.get("total", 0))))
+        # total_cost = R+L's actual cost (base + fuel + accessorials)
+        carrier_price = float(q.get("total_cost", 0))
+        quote_number = q.get("quote_number")
+        service_days = q.get("transit_days")
+    elif quote_result.get("quote"):
+        # Fallback: quote exists but success flag missing
+        q = quote_result["quote"]
+        carrier_price = float(q.get("total_cost", q.get("net_charge", q.get("price", 0))))
         quote_number = q.get("quote_number", q.get("quoteNumber"))
-        service_days = q.get("service_days", q.get("serviceDays"))
-    elif quote_result.get("net_charge"):
-        carrier_price = float(quote_result["net_charge"])
+        service_days = q.get("transit_days", q.get("service_days"))
+    elif quote_result.get("total_cost"):
+        # Flat response shape fallback
+        carrier_price = float(quote_result["total_cost"])
         quote_number = quote_result.get("quote_number")
-        service_days = quote_result.get("service_days")
-    elif quote_result.get("price"):
-        carrier_price = float(quote_result["price"])
-        quote_number = quote_result.get("quote_number")
-        service_days = quote_result.get("service_days")
+        service_days = quote_result.get("transit_days")
 
     customer_price = round(carrier_price + req.customer_markup, 2)
 
     return {
         "success": True,
         "validated_address": address_result,
-        "quote": quote_result,
+        "quote": quote_result.get("quote", quote_result),
         "quote_number": quote_number,
         "carrier_price": round(carrier_price, 2),
         "customer_price": customer_price,
@@ -244,6 +262,7 @@ def proxy_auto_quote(req: AutoQuoteRequest):
         "is_residential": is_residential,
         "freight_class": req.freight_class,
         "weight": req.weight,
+        "is_oversized": req.is_oversized,
         "origin_zip": req.origin_zip,
         "timestamp": datetime.utcnow().isoformat()
     }
