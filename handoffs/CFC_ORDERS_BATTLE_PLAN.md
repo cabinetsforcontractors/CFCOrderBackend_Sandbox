@@ -1,12 +1,12 @@
 # CFC Orders Sandbox — Battle Plan
 **Created:** 2026-03-01
-**Updated:** 2026-03-02 (Session 6 — audit results + order lifecycle rules)
+**Updated:** 2026-03-02 (Session 8 — Phase 3A+3B done, Phase 4 templates done, critical bugs fixed)
 **Goal:** Make the sandbox badass across multiple sessions, then deploy
 **Approach:** Fix what's broken, integrate what's separate, build what's missing
 
 ---
 
-## CURRENT STATE SNAPSHOT (Mar 2, 2026 — Post-Audit)
+## CURRENT STATE SNAPSHOT (Mar 2, 2026 — Post-Session 8)
 
 ### Services (ALL ALIVE)
 | Service | URL | Version | Status |
@@ -21,17 +21,18 @@
 - rl-quote-sandbox: `srv-d58g4163jp1c73bg91pg`
 - CFCOrderBackend-Sandbox: `srv-d4tu1e24d50c73b6952g`
 
-### Audit Summary (47 Issues Found)
+### Audit Summary (47 Issues Found — Session 6)
 | Severity | Count | Key Items |
 |----------|-------|-----------|
-| CRITICAL | 6 | No auth, duplicate endpoint, freight class=70 bug, dead code w/ API key |
-| HIGH | 8 | Monolith main.py (3,151 lines), requirements.txt incomplete, StatusBar bug |
+| CRITICAL | 6 | No auth, ~~duplicate endpoint~~, ~~freight class=70 bug~~, dead code w/ API key |
+| HIGH | 8 | Monolith main.py (3,151 lines), ~~requirements.txt incomplete~~, StatusBar bug |
 | MEDIUM | 15 | STATUS_MAP 3x duplicated, unused OrderComments.jsx, no search/filter |
 | LOW | 12 | No accessibility, no loading skeletons, no keyboard shortcuts |
 | ENHANCEMENT | 6 | Customer portal, tasks/todo, analytics, kanban, email automation |
 
 ### Database (PostgreSQL on Render)
 - **9 tables**: orders, order_line_items, order_events, order_alerts, order_email_snippets, order_shipments, pending_checkouts, warehouse_mapping, trusted_customers
+- **New lifecycle fields** (migration ready): last_customer_email_at, lifecycle_status, lifecycle_deadline_at, lifecycle_reminders_sent
 - **Alive** — auto_sync running successfully
 - **order_status VIEW** exists for computed status
 
@@ -45,7 +46,7 @@
 
 ---
 
-## ORDER LIFECYCLE SYSTEM (NEW — William's Rules, Mar 2)
+## ORDER LIFECYCLE SYSTEM (William's Rules, Mar 2 — ✅ BACKEND BUILT)
 
 ### Overview
 Automated inactivity detection, escalation, archiving, and cancellation based on email activity between CFC and the customer regarding a specific order. This is the backbone of the new tab system.
@@ -78,23 +79,32 @@ Clock starts from last customer email activity (to or from customer about that o
   2. Send customer cancellation confirmation email
   3. Move order to Canceled status
 
-### Email Templates
+### Email Templates (✅ BUILT — email_templates.py, 513 lines)
 | Template | Trigger | Content |
 |----------|---------|---------|
+| payment_link | Checkout created | Payment link + order summary |
+| payment_confirm | Payment received | Payment confirmation |
+| shipping_notify | Shipment created | Tracking number, carrier, ETA |
+| delivery_confirm | Delivered | Delivery confirmation |
+| trusted_reminder | Trusted customer unpaid | Payment reminder (ORD-T2) |
 | payment_reminder | Day 6 | "Your order #{id} hasn't been paid. [Payment link]" |
 | inactive_notice | Day 29 | "Your order #{id} has been marked inactive due to no activity." |
 | deletion_warning | Day 44 | "Your order #{id} will be canceled tomorrow if no action." |
 | cancel_confirm | Customer says "cancel" | "Your order #{id} has been canceled per your request." |
 
-### Backend Requirements
-- **New DB fields:** `last_customer_email_at` (timestamp), `lifecycle_status` (enum: active/inactive/archived/canceled), `lifecycle_deadline_at` (computed)
-- **New cron endpoint:** `POST /lifecycle/check-all` — runs daily, processes all orders against timeline
-- **B2BWave integration:** Cancel order API call at day 45
-- **Email parser enhancement:** Detect "cancel" keyword in customer emails (fuzzy match)
-- **Gmail sync enhancement:** Track `last_customer_email_at` per order on every email processed
-- **Reminder filter:** System-generated emails tagged so they don't reset the clock
+### Backend Implementation Status
+- ✅ `lifecycle_engine.py` (535 lines) — check_all_orders(), process_order_lifecycle(), extend_deadline(), cancel_order()
+- ✅ `lifecycle_routes.py` (188 lines) — POST /lifecycle/check-all (cron), extend, cancel, summary
+- ✅ `lifecycle_wiring.py` (54 lines) — mounts lifecycle + migration routers on app
+- ✅ `db_migrations.py` — lifecycle fields migration + backfill function
+- ✅ `gmail_sync.py` — last_customer_email_at tracking, cancel keyword detection, system email filtering
+- ✅ `email_templates.py` (513 lines) — 9 HTML templates with order data injection
+- ⬜ GMAIL_SEND_ENABLED=true — still false, needs flip when ready
+- ⬜ Send endpoint — POST /orders/{id}/send-email with template selection
+- ⬜ Auto-send triggers — tied to lifecycle + status transitions
+- ⬜ System email tagging — outgoing system emails need lifecycle clock exclusion tag
 
-### Frontend Requirements
+### Frontend Requirements (NOT STARTED)
 - **Tab bar:** All | Inactive (count) | Archived (count)
 - **Inactive tab:** Shows days since last activity, next action date, countdown badge, "Reactivate" button
 - **Archived tab:** Read-only order view, "Reactivate" button, days until deletion, warning badge
@@ -110,73 +120,50 @@ Completed. Local git cleanup commands remain (node_modules, dist removal from fr
 
 ## PHASE 2: RL-QUOTE INTEGRATION ✅ DONE (Session 2)
 
-Completed. rl-quote-sandbox deployed, R+L API connectivity verified, MCP bridge v2.6 deployed.
-
-**Remaining:** Fix warehouse data in models.py (6 warehouses, correct LI zip).
+Completed. rl-quote-sandbox deployed, R+L API connectivity verified, MCP bridge v2.6 deployed. 12 warehouses fixed, LI zip corrected to 32148.
 
 ---
 
-## PHASE 3: ALERTSENGINE + ORDER LIFECYCLE (Next)
+## PHASE 3: ALERTSENGINE + ORDER LIFECYCLE ✅ DONE (Sessions 7-8)
 
-### 3A: AlertsEngine (from ORD-A1)
-1. Create `alerts_engine.py` module
-2. Implement 8 alert rules from ORD-A1
-3. Business hours calculator (Mon-Fri, skip US federal holidays)
-4. Cron endpoint: `POST /alerts/check-all`
-5. Wire into existing order_alerts table
+### 3A: AlertsEngine (from ORD-A1) ✅ DONE
+1. ✅ Created `alerts_engine.py` — 8 alert rules, business hours calculator (Mon-Fri + US holidays), check_all_orders() cron, auto-resolve on condition change
+2. ✅ Created `alerts_routes.py` — POST /alerts/check-all (cron), GET /alerts/summary, GET /alerts, POST /alerts/{id}/resolve, POST /alerts/check/{order_id}
+3. ✅ Wired into main.py — import + mount router, removed 3 old conflicting endpoints, fixed duplicate POST /rl/pickup/pro
 
-### 3B: Order Lifecycle System (NEW)
-6. Add DB fields: `last_customer_email_at`, `lifecycle_status`, `lifecycle_deadline_at`
-7. DB migration script for new columns
-8. Create `lifecycle_engine.py` module:
-   - `check_all_orders()` — daily cron
-   - `process_order_lifecycle(order)` — individual order check
-   - `extend_deadline(order_id, days=7)` — customer response handler
-   - `cancel_order(order_id)` — B2BWave API + email + status
-9. Cron endpoint: `POST /lifecycle/check-all`
-10. Integrate with gmail_sync.py — track `last_customer_email_at` on every email
-11. Add "cancel" keyword detection to email parser
-12. Tag system-generated emails so they don't reset clock
+### 3B: Order Lifecycle System ✅ DONE
+4. ✅ `lifecycle_engine.py` (535 lines) — full automated lifecycle
+5. ✅ `lifecycle_routes.py` (188 lines) — cron, extend, cancel, summary endpoints
+6. ✅ `lifecycle_wiring.py` (54 lines) — mounts on app
+7. ✅ `db_migrations.py` updated — lifecycle field migration + backfill
+8. ✅ `gmail_sync.py` updated — lifecycle tracking, cancel keyword detection, system email filtering
 
-### 3C: Frontend Alerts
-13. Alerts panel/badge showing unresolved alert count
-14. Alert detail view per order
-15. Resolve/dismiss alert buttons
-
-**Deliverables**: Proactive alerting + automated order lifecycle management
+### 3C: Frontend Alerts — NOT STARTED
+9. Alerts panel/badge showing unresolved alert count
+10. Alert detail view per order
+11. Resolve/dismiss alert buttons
 
 ---
 
-## PHASE 4: CUSTOMER COMMUNICATIONS
+## PHASE 4: CUSTOMER COMMUNICATIONS — PARTIALLY DONE (Session 8)
 
-### Email Templates (expanded with lifecycle emails)
-1. Payment link email (checkout link + order summary)
-2. Payment confirmation email
-3. Shipping notification email (tracking number, carrier, ETA)
-4. Delivery confirmation email
-5. Payment reminder for trusted customers (ORD-T2)
-6. **Day 6 payment reminder** (lifecycle)
-7. **Day 29 inactive notice** (lifecycle)
-8. **Day 44 deletion warning** (lifecycle)
-9. **Cancel confirmation** (lifecycle)
+### ✅ Templates Built
+- `email_templates.py` (513 lines) — 9 HTML email templates with order data injection (see lifecycle section above)
 
-### Backend
-10. Enable GMAIL_SEND_ENABLED=true
-11. Build email template engine (HTML templates with order data injection)
-12. Endpoint: `POST /orders/{id}/send-email` with template selection
-13. Auto-send triggers tied to status transitions AND lifecycle events
-14. Email send logging in order_events table
-15. **Tag outgoing emails as system-generated** (lifecycle clock exclusion)
-
-### Frontend
-16. "Send Email" button on order cards with template picker
-17. Email history view per order
+### Still Needed
+1. Enable GMAIL_SEND_ENABLED=true
+2. Endpoint: `POST /orders/{id}/send-email` with template selection
+3. Auto-send triggers tied to status transitions AND lifecycle events
+4. Email send logging in order_events table
+5. **Tag outgoing emails as system-generated** (lifecycle clock exclusion)
+6. Frontend: "Send Email" button on order cards with template picker
+7. Frontend: Email history view per order
 
 **Deliverables**: Automated customer communications at each lifecycle stage
 
 ---
 
-## PHASE 5: BACKEND HARDENING
+## PHASE 5: BACKEND HARDENING (NEXT)
 
 ### Code Quality
 1. **main.py decomposition** — 3,151 lines → route modules:
@@ -185,14 +172,15 @@ Completed. rl-quote-sandbox deployed, R+L API connectivity verified, MCP bridge 
    - sync_routes.py (B2BWave, Gmail, Square sync)
    - checkout_routes.py (checkout flow)
    - admin_routes.py (init-db, migrations, debug)
-   - lifecycle_routes.py (lifecycle + alerts endpoints)
+   - lifecycle_routes.py ✅ ALREADY SEPARATE
+   - alerts_routes.py ✅ ALREADY SEPARATE
    - Keep main.py as app factory + router mounting only
-2. **Fix duplicate endpoint** — merge POST /rl/pickup/pro/{pro_number} (lines 821 + 917)
-3. **Fix freight class bug** — global 70→85, add FREIGHT_CLASS constant
+2. ~~**Fix duplicate endpoint**~~ ✅ DONE (Session 8 — removed in Phase 3A wiring)
+3. ~~**Fix freight class bug**~~ ✅ DONE (Session 8 — 70→85 in checkout.py + rl_carriers.py)
 4. **Config consolidation** — checkout.py and gmail_sync.py bypass config.py
 5. **Fix bare except clauses** (2 found)
 6. **Update Anthropic API version** in ai_summary.py
-7. **Fix requirements.txt** — add all 12+ actual dependencies
+7. ~~**Fix requirements.txt**~~ ✅ DONE (Session 8 — all dependencies added)
 8. **Delete dead files** — main2.py, main4.py, main7.py, main8.py, desktop.ini
 
 ### Security
@@ -246,6 +234,7 @@ Completed. rl-quote-sandbox deployed, R+L API connectivity verified, MCP bridge 
 20. Fix StatusBar onRefresh prop
 21. Add error boundaries, loading skeletons
 22. Component tree organized by feature domain
+23. **Admin AI Textbox** — natural language config panel for Connie (colors, labels, display prefs via Anthropic API)
 
 **Deliverables**: Professional, modern order management interface
 
@@ -266,16 +255,18 @@ Only after Phases 1-6 are solid:
 
 ## SESSION EXECUTION ORDER
 
-| Session | Phase | Focus | Prerequisites |
-|---------|-------|-------|---------------|
-| ✅ Done | Phase 1 | Cleanup & Hygiene | — |
-| ✅ Done | Phase 2 | RL-Quote Integration | Phase 1 |
-| ✅ Done | Audit | Full-stack audit + UI/UX research | — |
-| Next | Phase 3 | AlertsEngine + Order Lifecycle | Phase 1, warehouse fix |
-| +1 | Phase 4 | Customer Communications | Phase 3 (lifecycle triggers emails) |
-| +2 | Phase 5 | Backend Hardening | Phases 2-4 complete |
-| +3 | Phase 6 | Frontend Redesign | Phase 5 complete + HTML mockup approved |
-| +4 | Phase 7 | Production Deploy | All phases complete |
+| Session | Phase | Focus | Status |
+|---------|-------|-------|--------|
+| ✅ Done | Phase 1 | Cleanup & Hygiene | DONE |
+| ✅ Done | Phase 2 | RL-Quote Integration | DONE |
+| ✅ Done | Audit | Full-stack audit + UI/UX research | DONE |
+| ✅ Done | Phase 3A | AlertsEngine | DONE |
+| ✅ Done | Phase 3B | Order Lifecycle Engine | DONE |
+| ✅ Done | Phase 4 (partial) | Email Templates | TEMPLATES DONE |
+| Next | Phase 3C + 4 completion | Frontend alerts + email send wiring | Phase 3A/3B done |
+| +1 | Phase 5 | Backend Hardening | Phases 2-4 complete |
+| +2 | Phase 6 | Frontend Redesign | Phase 5 complete + HTML mockup approved |
+| +3 | Phase 7 | Production Deploy | All phases complete |
 
 ---
 
