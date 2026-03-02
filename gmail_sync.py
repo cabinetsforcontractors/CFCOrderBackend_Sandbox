@@ -2,6 +2,11 @@
 gmail_sync.py
 Gmail email scanning for CFC Order Workflow
 Detects: Payment links sent, Payments received (Square), RL Quotes, Tracking numbers
+
+Phase 3B Enhancement:
+  - Tracks last_customer_email_at per order for lifecycle engine
+  - Detects "cancel" keyword in customer emails
+  - Tags system-generated emails so they don't reset lifecycle clock
 """
 
 import os
@@ -19,6 +24,15 @@ GMAIL_REFRESH_TOKEN = os.environ.get("GMAIL_REFRESH_TOKEN", "").strip()
 # Email sender patterns
 SQUARE_PAYMENT_SENDER = "noreply@messaging.squareup.com"
 RL_CARRIERS_SENDER = "rlloads@rlcarriers.com"
+
+# System-generated email subjects (do NOT reset lifecycle clock)
+SYSTEM_EMAIL_SUBJECTS = [
+    "order hasn't been paid",
+    "order marked inactive",
+    "order will be deleted",
+    "order will be canceled",
+    "cancellation confirmation",
+]
 
 # Cache access token
 _access_token = None
@@ -154,10 +168,120 @@ def extract_customer_name(text):
 # Import needed for base64 in get_email_content
 import urllib.parse
 
+
+# =============================================================================
+# LIFECYCLE HELPERS (Phase 3B)
+# =============================================================================
+
+def is_system_generated_email(subject: str) -> bool:
+    """
+    Check if an email subject indicates a system-generated lifecycle email.
+    System emails do NOT reset the lifecycle clock.
+    """
+    if not subject:
+        return False
+    subject_lower = subject.lower()
+    for pattern in SYSTEM_EMAIL_SUBJECTS:
+        if pattern in subject_lower:
+            return True
+    return False
+
+
+def is_customer_email(email_from: str, email_to: str) -> str:
+    """
+    Determine if this is a customer-related email (to or from customer).
+    Returns 'from_customer', 'to_customer', or 'internal'.
+    
+    CFC emails: cabinetsforcontractors, william, 4wprince
+    """
+    cfc_patterns = ['cabinetsforcontractors', 'william', '4wprince', 'team@cabinetcloudai']
+    
+    from_lower = (email_from or '').lower()
+    to_lower = (email_to or '').lower()
+    
+    from_is_cfc = any(p in from_lower for p in cfc_patterns)
+    to_is_cfc = any(p in to_lower for p in cfc_patterns)
+    
+    if not from_is_cfc and to_is_cfc:
+        return 'from_customer'
+    elif from_is_cfc and not to_is_cfc:
+        return 'to_customer'
+    else:
+        return 'internal'
+
+
+def update_last_customer_email(conn, order_id: str, email_date_str: str = None):
+    """
+    Update last_customer_email_at for an order.
+    Called on every customer-related email detected during sync.
+    
+    This drives the lifecycle engine's day counter.
+    """
+    with conn.cursor() as cur:
+        if email_date_str:
+            try:
+                # Try parsing the email date
+                email_dt = datetime.fromisoformat(email_date_str.replace('Z', '+00:00'))
+            except (ValueError, AttributeError):
+                email_dt = datetime.now(timezone.utc)
+        else:
+            email_dt = datetime.now(timezone.utc)
+        
+        # Only update if this email is MORE RECENT than the current value
+        cur.execute("""
+            UPDATE orders 
+            SET last_customer_email_at = GREATEST(
+                COALESCE(last_customer_email_at, '1970-01-01'::timestamptz),
+                %s
+            ),
+            updated_at = NOW()
+            WHERE order_id = %s
+        """, (email_dt, order_id))
+        
+        conn.commit()
+
+
+def check_cancel_keyword(conn, order_id: str, email_body: str, email_subject: str):
+    """
+    Check if a customer email contains a cancel keyword.
+    If detected, triggers lifecycle cancellation.
+    
+    Returns True if cancel was detected and processed.
+    """
+    from lifecycle_engine import detect_cancel_keyword, cancel_order
+    
+    text = f"{email_subject} {email_body}"
+    if detect_cancel_keyword(text):
+        print(f"[GMAIL] Cancel keyword detected for order {order_id}")
+        result = cancel_order(order_id, reason="customer_request")
+        
+        # Log the detection event
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO order_events (order_id, event_type, event_data, source)
+                VALUES (%s, 'cancel_keyword_detected', %s, 'gmail_sync')
+            """, (order_id, json.dumps({
+                'subject': email_subject[:100],
+                'body_snippet': email_body[:200]
+            })))
+            conn.commit()
+        
+        return True
+    return False
+
+
+# =============================================================================
+# MAIN SYNC FUNCTION
+# =============================================================================
+
 def run_gmail_sync(db_conn, hours_back=2):
     """
-    Main email sync function - scans Gmail and updates orders
-    Returns dict with counts of what was processed
+    Main email sync function - scans Gmail and updates orders.
+    
+    Phase 3B: Now also tracks last_customer_email_at for lifecycle engine
+    and detects cancel keywords in customer emails.
+    
+    Returns dict with counts of what was processed.
     """
     if not gmail_configured():
         print("[GMAIL] Not configured, skipping email sync")
@@ -170,6 +294,8 @@ def run_gmail_sync(db_conn, hours_back=2):
         "payments_received": 0,
         "rl_quotes": 0,
         "tracking_numbers": 0,
+        "lifecycle_updates": 0,
+        "cancel_detections": 0,
         "errors": []
     }
     
@@ -197,6 +323,11 @@ def run_gmail_sync(db_conn, hours_back=2):
                 if order_id:
                     update_order_payment_link_sent(db_conn, order_id, email)
                     results["payment_links"] += 1
+                    
+                    # Phase 3B: Update lifecycle (sent TO customer, so it's customer-related)
+                    if not is_system_generated_email(email['subject']):
+                        update_last_customer_email(db_conn, order_id, email.get('date'))
+                        results["lifecycle_updates"] += 1
                     
             except Exception as e:
                 results["errors"].append(f"Payment link error: {e}")
@@ -294,8 +425,59 @@ def run_gmail_sync(db_conn, hours_back=2):
     except Exception as e:
         results["errors"].append(f"Tracking search error: {e}")
     
+    # 5. Phase 3B: Scan for customer emails (lifecycle tracking + cancel detection)
+    try:
+        messages = search_emails(f'{time_filter} (in:inbox OR in:sent) (order OR cabinet OR shipping)')
+        print(f"[GMAIL] Found {len(messages)} potential customer emails for lifecycle tracking")
+        
+        for msg in messages:
+            try:
+                email = get_email_content(msg['id'])
+                if not email:
+                    continue
+                
+                # Skip system-generated emails
+                if is_system_generated_email(email.get('subject', '')):
+                    continue
+                
+                # Determine if customer-related
+                direction = is_customer_email(email.get('from', ''), email.get('to', ''))
+                if direction == 'internal':
+                    continue
+                
+                # Try to find order ID
+                text = email['subject'] + ' ' + email['body']
+                order_id = extract_order_id(text)
+                if not order_id:
+                    continue
+                
+                # Update lifecycle timestamp
+                update_last_customer_email(db_conn, order_id, email.get('date'))
+                results["lifecycle_updates"] += 1
+                
+                # Check for cancel keyword (only in customer-sent emails)
+                if direction == 'from_customer':
+                    try:
+                        canceled = check_cancel_keyword(
+                            db_conn, order_id, 
+                            email.get('body', ''), 
+                            email.get('subject', '')
+                        )
+                        if canceled:
+                            results["cancel_detections"] += 1
+                    except Exception as e:
+                        # Don't let cancel detection failure break the sync
+                        results["errors"].append(f"Cancel detection error for {order_id}: {e}")
+                
+            except Exception as e:
+                results["errors"].append(f"Lifecycle tracking error: {e}")
+                
+    except Exception as e:
+        results["errors"].append(f"Lifecycle scan error: {e}")
+    
     print(f"[GMAIL] Sync complete: {results}")
     return results
+
 
 # =============================================================================
 # DATABASE UPDATE FUNCTIONS
@@ -375,6 +557,9 @@ def match_payment_to_order(conn, amount, customer_name, email):
                     'customer': customer_name,
                     'subject': email['subject'][:100]
                 })))
+                
+                # Phase 3B: Payment is customer activity — update lifecycle
+                update_last_customer_email(conn, order['order_id'])
                 
                 conn.commit()
                 print(f"[GMAIL] Order {order['order_id']}: payment ${amount} received from {customer_name}")
