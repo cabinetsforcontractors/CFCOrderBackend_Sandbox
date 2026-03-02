@@ -1,89 +1,66 @@
 # SESSION HANDOFF — Phase 4: Customer Communications
-**Date:** 2026-03-02
-**Session:** Phase 4 Build
-**Status:** Backend COMPLETE, Frontend component DONE, wiring needed
+**Date:** 2026-03-02 (Session 2)
+**Session:** Phase 4 Wiring Complete
+**Status:** ALL CODE COMMITTED — only 3 paste-ins to main.py remain
 
 ---
 
-## WHAT WAS BUILT THIS SESSION
+## WHAT WAS BUILT (TWO SESSIONS)
 
 ### Backend (cfc-orders repo) — ALL COMMITTED
 
-| File | SHA | Description |
-|------|-----|-------------|
-| `email_templates.py` | 7259a2b | 9 HTML email templates with order data injection |
-| `email_sender.py` | a22e678 | Gmail API send, event logging, system_generated tagging |
-| `email_routes.py` | ac11078 | FastAPI router: send, preview, templates list, email history |
+| File | Description |
+|------|-------------|
+| `email_templates.py` | 9 HTML email templates with order data injection |
+| `email_sender.py` | Gmail API send, event logging, system_generated tagging |
+| `email_routes.py` | FastAPI router: send, preview, templates list, email history |
+| `email_wiring.py` | Minimal wiring module (same pattern as lifecycle_wiring.py) |
 
-### Frontend (cfc-orders-frontend repo) — COMMITTED
+### Frontend (cfc-orders-frontend repo) — ALL COMMITTED
 
-| File | SHA | Description |
-|------|-----|-------------|
-| `src/components/EmailPanel.jsx` | f870c29 | Slide-in panel: template picker, send, preview, history tabs |
-
-### Architecture Decisions
-- **Source tagging:** Lifecycle emails get `source='system_generated'` in order_events → lifecycle engine excludes them from clock resets
-- **Event types:** `email_sent` (success) and `email_send_failed` (failure) in order_events
-- **Templates split:** 5 manual (payment_link, payment_confirmation, shipping_notification, delivery_confirmation, trusted_payment_reminder) + 4 lifecycle (payment_reminder_day6, inactive_notice_day29, deletion_warning_day44, cancel_confirmation)
-- **Gmail send:** Uses existing OAuth token management from gmail_sync.py, builds MIME multipart, sends via Gmail API REST endpoint
-- **Preview:** Separate dry-run endpoint renders template without sending
+| File | Description |
+|------|-------------|
+| `src/components/EmailPanel.jsx` | Slide-in panel: template picker, send, preview, history tabs |
+| `src/components/OrderCard.jsx` | v5.12.0 — Added 📧 Email Customer button, passes onOpenEmail |
+| `src/App.jsx` | v5.10.0 — EmailPanel import, state mgmt, handler wiring |
 
 ---
 
-## WHAT STILL NEEDS WIRING
+## WHAT STILL NEEDS DOING
 
-### 1. main.py — 3 Small Insertions (CRITICAL)
+### 1. main.py — 3 Small Paste-Ins (THE ONLY REMAINING CODE WORK)
 
-The email_routes.py router must be mounted in main.py. Three insertions:
-
-**A) Import (after alerts import, ~line 153)**
-After: `print("[STARTUP] alerts_routes module not found, AlertsEngine disabled")`
-Add:
+**CHANGE 1** — After line ~152 (`print("[STARTUP] alerts_routes module not found..."`):
 ```python
+
 # Email Communications (Phase 4)
-try:
-    from email_routes import email_router
-    EMAIL_ROUTES_LOADED = True
-except ImportError:
-    EMAIL_ROUTES_LOADED = False
-    print("[STARTUP] email_routes module not found, Email Communications disabled")
+from email_wiring import wire_email
 ```
 
-**B) Mount router (after alerts mount, ~line 174)**
-After: `app.include_router(alerts_router)`
-Add:
+**CHANGE 2** — After line ~174 (`app.include_router(alerts_router)`):
 ```python
-# Phase 4: Email Communications endpoints
-if EMAIL_ROUTES_LOADED:
-    app.include_router(email_router)
+
+# Phase 4: Email Communications
+EMAIL_ROUTES_LOADED = wire_email(app)
 ```
 
-**C) Root endpoint status (in root() function)**
-After `"alerts_engine": { "enabled": ALERTS_ENGINE_LOADED }` add comma and:
+**CHANGE 3** — In root() function, after `"alerts_engine": {"enabled": ALERTS_ENGINE_LOADED}`:
 ```python
+        ,
         "email_communications": {
-            "enabled": EMAIL_ROUTES_LOADED
+            "enabled": EMAIL_ROUTES_LOADED if 'EMAIL_ROUTES_LOADED' in dir() else False
         }
 ```
 
-### 2. OrderCard.jsx — Add Email Button
+### 2. Render Environment Variable
+Flip `GMAIL_SEND_ENABLED=true` on Render sandbox backend to enable actual sending.
 
-Add a "📧 Email" button to the order card that opens EmailPanel. The button should:
-- Go after the Notes section, before AI Summary
-- Call a callback like `onOpenEmail(order)` that the parent App.jsx handles
-- Pass `orderId` and `customerEmail` (from `order.email`) to EmailPanel
-
-### 3. App.jsx — Wire EmailPanel State
-
-- Import EmailPanel
-- Add state: `const [emailOrder, setEmailOrder] = useState(null)`
-- Add handler: `const handleOpenEmail = (order) => setEmailOrder(order)`
-- Pass `onOpenEmail={handleOpenEmail}` to OrderCard
-- Render: `{emailOrder && <EmailPanel orderId={emailOrder.order_id} customerEmail={emailOrder.email} onClose={() => setEmailOrder(null)} onSent={() => { setEmailOrder(null); loadOrders(); }} />}`
-
-### 4. Render Environment Variable
-
-Flip `GMAIL_SEND_ENABLED=true` on Render for the sandbox backend to enable actual sending. This is currently `false`.
+### 3. Testing
+1. Hit `GET /email/templates` — verify 9 templates return
+2. Hit `POST /orders/{real_order}/preview-email` with `{"template_id": "payment_link"}` — verify real order data injection
+3. Hit `POST /orders/{real_order}/send-email` with `{"template_id": "payment_link", "to_email": "4wprince@gmail.com"}` — verify email arrives
+4. Hit `GET /orders/{real_order}/email-history` — verify event logged
+5. Test frontend: click 📧 Email Customer on an order card, verify panel opens
 
 ---
 
@@ -99,46 +76,32 @@ Flip `GMAIL_SEND_ENABLED=true` on Render for the sandbox backend to enable actua
 
 ---
 
-## DEPENDENCIES / INTEGRATION POINTS
-
-- **gmail_sync.py** — `get_gmail_access_token()` and `gmail_configured()` are imported by email_sender.py
-- **db_helpers.py** — `get_db()`, `get_order_by_id()` used for order lookup and event logging
-- **config.py** — `GMAIL_SEND_ENABLED` gate controls whether emails actually send
-- **Phase 3B (lifecycle_engine.py)** — Will call `send_order_email()` with lifecycle templates and `triggered_by="lifecycle_engine"` for auto-sends on days 6/29/44
-- **order_events table** — Already exists, no migration needed. Events stored with `event_type='email_sent'` and `source='system_generated'` for lifecycle emails
-
----
-
-## TESTING PLAN
-
-1. Hit `GET /email/templates` — verify 9 templates return
-2. Hit `GET /email/templates/payment_link/preview` — verify HTML renders
-3. Hit `POST /orders/{real_order}/preview-email` with `{"template_id": "payment_link"}` — verify real order data injection
-4. Flip `GMAIL_SEND_ENABLED=true` on Render
-5. Hit `POST /orders/{real_order}/send-email` with `{"template_id": "payment_link", "to_email": "4wprince@gmail.com"}` — verify email arrives
-6. Hit `GET /orders/{real_order}/email-history` — verify event logged
-7. Test lifecycle template send — verify `source='system_generated'` in order_events
+## ARCHITECTURE DECISIONS
+- **Source tagging:** Lifecycle emails get `source='system_generated'` in order_events → lifecycle engine excludes them from clock resets
+- **Event types:** `email_sent` (success) and `email_send_failed` (failure) in order_events
+- **Templates split:** 5 manual + 4 lifecycle (payment_reminder_day6, inactive_notice_day29, deletion_warning_day44, cancel_confirmation)
+- **Gmail send:** Uses existing OAuth token management from gmail_sync.py
+- **Wiring pattern:** email_wiring.py follows lifecycle_wiring.py pattern — 2-line addition to main.py
 
 ---
 
 ## NEXT SESSION STARTER PROMPT
 
 ```
-CFC Orders — Phase 4 Wiring & Testing
+CFC Orders — Phase 4 Final Wiring & Test
 Read cfc-orders:handoffs/SESSION_HANDOFF_EMAIL.md for full context.
 
-Phase 4 backend is BUILT (3 files committed). Frontend EmailPanel component is BUILT.
+Phase 4 is 99% done. All backend + frontend code is committed.
 
-Remaining work:
-1. Wire email_router into main.py (3 small insertions documented in handoff)
-2. Add "Email" button to OrderCard.jsx that opens EmailPanel
-3. Wire EmailPanel state in App.jsx
-4. Test endpoints on sandbox
-5. Flip GMAIL_SEND_ENABLED=true and test live email send
+Only remaining work:
+1. Apply 3 small paste-ins to main.py (documented in handoff)
+2. Push main.py
+3. Flip GMAIL_SEND_ENABLED=true on Render
+4. Test endpoints + frontend email button
+
+After Phase 4 is confirmed working, next up is Phase 5 (backend hardening: main.py decomposition, JWT auth, CORS lockdown).
 
 Key files:
-- cfc-orders: email_templates.py, email_sender.py, email_routes.py, main.py
+- cfc-orders: email_wiring.py, email_templates.py, email_sender.py, email_routes.py, main.py
 - cfc-orders-frontend: src/components/EmailPanel.jsx, src/components/OrderCard.jsx, src/App.jsx
-
-Rules: Don't break existing Gmail read sync. All lifecycle emails must have source='system_generated'.
 ```
