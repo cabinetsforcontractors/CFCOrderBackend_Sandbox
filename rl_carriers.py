@@ -77,7 +77,7 @@ def get_rate_quote(
     dest_city: str,
     dest_state: str,
     weight_lbs: int,
-    freight_class: str = "70",
+    freight_class: str = "85",
     pieces: int = 1,
     length: float = None,
     width: float = None,
@@ -96,7 +96,7 @@ def get_rate_quote(
         dest_city: Destination city name
         dest_state: Destination state (2-letter)
         weight_lbs: Total weight in pounds
-        freight_class: NMFC freight class (default "70")
+        freight_class: NMFC freight class (default "85" for RTA cabinets)
         pieces: Number of pieces/pallets
         length: Length in inches (optional)
         width: Width in inches (optional)
@@ -198,7 +198,7 @@ def get_simple_quote(
     origin_zip: str,
     dest_zip: str,
     weight_lbs: int,
-    freight_class: str = "70"
+    freight_class: str = "85"
 ) -> Dict:
     """
     Simplified rate quote - only requires ZIP codes and weight.
@@ -208,7 +208,7 @@ def get_simple_quote(
         origin_zip: Origin ZIP code
         dest_zip: Destination ZIP code
         weight_lbs: Total weight in pounds
-        freight_class: NMFC freight class (default "70")
+        freight_class: NMFC freight class (default "85" for RTA cabinets)
     
     Returns:
         Dict with quote details
@@ -319,7 +319,7 @@ def create_bol(
     weight_lbs: int,
     pieces: int = 1,
     description: str = "RTA Cabinets",
-    freight_class: str = "70",
+    freight_class: str = "85",
     # Optional
     shipper_address2: str = "",
     consignee_address2: str = "",
