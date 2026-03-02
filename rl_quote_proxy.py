@@ -158,7 +158,7 @@ def proxy_freight_quote(req: FreightQuoteRequest):
     Get R+L LTL freight quote via /quote/simple query params.
     Returns carrier price (before customer markup).
     """
-    result = _call_rl_sandbox("quote/simple", method="GET", params={
+    result = _call_rl_sandbox("quote/simple", method="POST", params={
         "origin_zip": req.origin_zip,
         "destination_zip": req.dest_zip,
         "weight_lbs": req.weight,
@@ -215,8 +215,8 @@ def proxy_auto_quote(req: AutoQuoteRequest):
         elif isinstance(addr.get("is_residential"), bool):
             is_residential = addr["is_residential"]
 
-    # Step 2: Get freight quote via /quote/simple with GET query params
-    quote_result = _call_rl_sandbox("quote/simple", method="GET", params={
+    # Step 2: Get freight quote via /quote/simple with POST + query params
+    quote_result = _call_rl_sandbox("quote/simple", method="POST", params={
         "origin_zip": req.origin_zip,
         "destination_zip": validated_zip,
         "weight_lbs": req.weight,
