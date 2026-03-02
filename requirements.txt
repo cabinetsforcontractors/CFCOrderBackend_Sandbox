@@ -1,5 +1,5 @@
 # CFC Order Workflow Backend v6.0.0
-# Updated 2026-03-01 — Phase 1 cleanup
+# Updated 2026-03-02 — Phase 3 (lifecycle + alerts)
 
 # Web framework
 fastapi
@@ -8,9 +8,21 @@ uvicorn[standard]
 # Database
 psycopg2-binary
 
-# Data models (FastAPI dependency, pinned for clarity)
+# Data models
 pydantic
 
 # Excel/data processing (RTA cabinet database)
 pandas
 openpyxl
+
+# HTTP client (checkout, B2BWave API, Square API, R+L Carriers)
+httpx
+
+# AI summary (Anthropic Claude)
+anthropic
+
+# Shipping (Shippo small package rates)
+shippo
+
+# Square payments SDK
+squareup
