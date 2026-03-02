@@ -234,7 +234,7 @@ def get_shipping_quote(origin_zip: str, dest_zip: str, weight: float, is_residen
                 origin_zip=origin_zip,
                 dest_zip=dest_zip,
                 weight_lbs=int(weight),
-                freight_class="70"
+                freight_class="85"
             )
             return {
                 'success': True,
@@ -259,15 +259,15 @@ def get_shipping_quote(origin_zip: str, dest_zip: str, weight: float, is_residen
 # =============================================================================
 # 
 # FUTURE RULES (placeholder for RTA database integration):
-# - Weight-based: under X lbs → small package, over → LTL
-# - Size-based: items over 96" length → LTL or manual
+# - Weight-based: under X lbs -> small package, over -> LTL
+# - Size-based: items over 96" length -> LTL or manual
 # - Product-based: trim items may need special handling
 # - Value-based: high-value orders may need signature/insurance
 # - Destination-based: some areas may have carrier restrictions
 #
 # For now: Simple 70 lb cutoff
-# Under 70 lbs → Shippo (UPS/USPS small package)
-# 70 lbs and over → R+L (LTL freight)
+# Under 70 lbs -> Shippo (UPS/USPS small package)
+# 70 lbs and over -> R+L (LTL freight)
 # =============================================================================
 
 SMALL_PACKAGE_WEIGHT_LIMIT = 70  # lbs - orders under this use Shippo
