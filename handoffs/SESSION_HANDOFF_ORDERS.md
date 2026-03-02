@@ -1,9 +1,9 @@
 # SESSION HANDOFF — CFC Orders (General)
 
-**Last Updated:** 2026-03-02 (Session 13 — RL proxy method fix GET→POST)
-**Latest Session:** Session 13 — Fixed rl_quote_proxy.py: /quote/simple requires POST not GET (405 Method Not Allowed resolved)
+**Last Updated:** 2026-03-02 (Session 14 — Phase 3C Frontend Alerts)
+**Latest Session:** Session 14 — Phase 3C: Frontend alerts bell badge, dropdown panel, per-order alerts, resolve/dismiss
+**Session Before:** Session 13 — Fixed rl_quote_proxy.py: /quote/simple requires POST not GET (405 resolved)
 **Session Before:** Session 12 — RL Fix + App.jsx v7.0 + BrainChat Header (all 3 complete)
-**Session Before:** Session 11 — RL proxy payload fix completed (276 lines)
 
 ---
 
@@ -14,6 +14,7 @@
 |-----------|---------|--------|
 | AlertsEngine (Phase 3A) | alerts_engine.py, alerts_routes.py | ✅ WIRED in main.py |
 | Lifecycle Engine (Phase 3B) | lifecycle_engine.py (535 lines), lifecycle_routes.py (188 lines), lifecycle_wiring.py (54 lines) | ✅ CODE COMPLETE — needs startup_wiring import in main.py |
+| **Frontend Alerts (Phase 3C)** | **App.jsx v7.1, index.css v7.1** | **✅ COMMITTED — bell badge, dropdown, per-order alerts, resolve/dismiss** |
 | Email Templates (Phase 4) | email_templates.py (513 lines, 9 templates) | ✅ COMMITTED |
 | Email Send (Phase 4) | email_sender.py, email_routes.py, email_wiring.py | ✅ COMMITTED — needs wiring in main.py |
 | Email Frontend (Phase 4) | EmailPanel.jsx, OrderCard.jsx v5.12 | ✅ COMMITTED (but OrderCard replaced by v7.0 table) |
@@ -21,7 +22,7 @@
 | Startup Wiring | startup_wiring.py | ✅ COMMITTED — wires lifecycle + email + AI config in one call |
 | RL Quote Proxy | rl_quote_proxy.py (276 lines) | ✅ WORKING — POST to /quote/simple, zip_code field correct |
 | Freight Class | checkout.py, rl_carriers.py, rl_quote_proxy.py | ✅ All "85" — main.py still has 3× "70" |
-| **Frontend v7.0** | App.jsx, index.css, BrainChat.jsx v2.0, index.html | ✅ DARK THEME TABLE LAYOUT LIVE |
+| **Frontend v7.1** | App.jsx, index.css, BrainChat.jsx v2.0, index.html | **✅ DARK THEME + ALERTS UI LIVE** |
 
 ### What's STILL NEEDED (William local + Render)
 | Task | Effort | Details |
@@ -35,19 +36,61 @@
 
 ---
 
-## APP.JSX V7.0 — DARK THEME TABLE LAYOUT (Session 12)
+## PHASE 3C — FRONTEND ALERTS (Session 14)
 
-Complete frontend rewrite committed to cfc-orders-frontend:
-- **7 metric cards** across top (clickable status filters)
-- **Active/Complete tabs**, search box in header
-- **Sortable table** columns: Order, Customer, Status, Total, Date, Age, Warehouse
-- **Slide-in detail panel** from right (440px) with 3 tabs: Details, AI Summary, Actions
-- **Status badges** with colored dots using CSS vars
-- **Age warnings** (7d yellow, 14d red)
-- **BrainChat v2.0** — prop-controlled from header button (no more floating purple button)
-- **Header order:** [Search] ... [🧠 Brain] [🟢 Open Live] [↻ Refresh] [Logout]
-- **Google Fonts:** DM Sans + JetBrains Mono added to index.html
-- **Removed imports:** StatusBar, OrderCard, OrderComments (files still in repo, cleanup in Phase 5)
+### What was built:
+1. **Header Bell Badge** — Between search and Brain button
+   - Shows total unresolved alert count with red badge
+   - Pulses when alerts > 0
+   - Highlighted border when alerts exist
+   
+2. **Alerts Dropdown Panel** — Opens below bell button
+   - Header: total count + "Run Check" button (triggers POST /alerts/check-all)
+   - Alerts grouped by alert_type with icons and labels
+   - Each alert shows: order link, message, timestamp, resolve checkmark
+   - Clicking order link opens detail panel for that order
+   - Click outside to close
+   
+3. **Per-Order Alerts** — In detail panel Details tab
+   - Red-bordered section at top of Details tab when alerts exist
+   - Each alert card: type icon, label, message, time, inline "✓ Resolve" button
+   - Loads via GET /alerts/?order_id=X when order selected
+   
+4. **Actions Tab** — Added "Check Alerts" button per order (POST /alerts/check/{id})
+
+5. **Refresh** — Both Refresh button and alert actions refresh alert summary
+
+### API endpoints used:
+- `GET /alerts/summary` — header badge count (loaded on login + refresh)
+- `GET /alerts/` — full list for dropdown
+- `GET /alerts/?order_id=X` — per-order alerts for detail panel
+- `POST /alerts/{id}/resolve` — resolve button
+- `POST /alerts/check-all` — "Run Check" button in dropdown
+- `POST /alerts/check/{order_id}` — per-order check in Actions tab
+
+### Alert type labels + icons:
+| alert_type | Label | Icon |
+|-----------|-------|------|
+| needs_invoice | Needs Invoice | 📋 |
+| awaiting_payment_long | Awaiting Payment | 💰 |
+| needs_warehouse_order | Needs Warehouse Order | 🏭 |
+| at_warehouse_long | At Warehouse Too Long | ⏳ |
+| needs_bol | Needs BOL | 📄 |
+| ready_ship_long | Ready to Ship Too Long | 🚛 |
+| tracking_not_sent | Tracking Not Sent | 📬 |
+| delivery_confirm_needed | Needs Delivery Confirm | ✅ |
+
+---
+
+## APP.JSX V7.1 — ALERTS + DARK THEME (Session 14)
+
+Everything from v7.0 plus:
+- **Alert state**: alertSummary, allAlerts, alertsOpen, orderAlerts, checkingAlerts
+- **Alert functions**: loadAlertSummary, loadAllAlerts, loadOrderAlerts, resolveAlert, runAlertCheck
+- **Outside click handler** via useRef for dropdown dismiss
+- **ALERT_LABELS** constant mapping alert_type → human label + icon
+- **fmtDateTime** helper for alert timestamps
+- **Header order:** [Search] [🔔 Bell] [🧠 Brain] [🟢 Open Live] [↻ Refresh] [Logout]
 
 ---
 
@@ -60,8 +103,6 @@ Complete frontend rewrite committed to cfc-orders-frontend:
 | Direct API | rl_carriers.py | ✅ Works |
 | Checkout | checkout.py | ✅ Works |
 | Proxy | rl_quote_proxy.py | ✅ WORKING — POST to /quote/simple (fixed Session 13) |
-
-**Session 13 bug fix:** rl-quote-sandbox defines `/quote/simple` as `@app.post`. The proxy was incorrectly calling it with `method="GET"`, causing 405 Method Not Allowed. Fixed both call sites (proxy_freight_quote line 161, proxy_auto_quote line 219) to `method="POST"`. Params still pass as query string — `_call_rl_sandbox` appends them to URL regardless of method.
 
 ---
 
@@ -78,7 +119,7 @@ Complete frontend rewrite committed to cfc-orders-frontend:
 | 7 | Duplicate endpoint | ✅ NOT A BUG — POST/GET/DELETE are different methods |
 | 8 | Freight class bug | ✅ PARTIAL — checkout.py + rl_carriers.py + proxy all "85". **3 spots in main.py still "70"** |
 | 9 | No authentication | OPEN — Phase 5 |
-| 10 | RL proxy 405 Method Not Allowed | ✅ RESOLVED Session 13 — was sending GET to POST-only endpoint |
+| 10 | RL proxy 405 Method Not Allowed | ✅ RESOLVED Session 13 |
 
 ---
 
@@ -91,10 +132,10 @@ Complete frontend rewrite committed to cfc-orders-frontend:
 | Audit | Full-stack audit + UI mockup | ✅ DONE |
 | 3A | AlertsEngine | ✅ WIRED in main.py |
 | 3B | Order Lifecycle | ✅ CODE COMPLETE — needs startup_wiring in main.py |
-| 3C | Frontend Alerts | NOT STARTED |
+| **3C** | **Frontend Alerts** | **✅ DONE — bell badge, dropdown, per-order, resolve/dismiss** |
 | 4 | Email Templates + Send | ✅ TEMPLATES + SEND CODE BUILT — needs main.py wiring + GMAIL flip |
 | 5 | Backend Hardening | NOT STARTED |
-| 6 | Frontend Redesign | ✅ PARTIAL — App.jsx v7.0 table layout + BrainChat header done |
+| 6 | Frontend Redesign | ✅ DONE — App.jsx v7.1 table layout + alerts + BrainChat |
 | 7 | Production Promotion | NOT STARTED |
 
 ---
@@ -105,9 +146,8 @@ Complete frontend rewrite committed to cfc-orders-frontend:
 2. **git push** sandbox backend
 3. **Run DB migration** — POST /add-lifecycle-fields + POST /backfill-lifecycle
 4. **Flip GMAIL_SEND_ENABLED=true** on Render
-5. **Test email endpoints** — GET /email/templates, POST /orders/{id}/send-email
-6. **Phase 3C** — Frontend alerts badge/panel (AlertsEngine backend ready)
-7. **Phase 5** — main.py decomposition, JWT auth, CORS, dead file cleanup
+5. **Test alert endpoints** — GET /alerts/summary, POST /alerts/check-all, verify bell badge populates
+6. **Phase 5** — main.py decomposition, JWT auth, CORS, dead file cleanup
 
 ---
 
@@ -122,14 +162,14 @@ Complete frontend rewrite committed to cfc-orders-frontend:
 | cfc-orders | email_templates.py / email_sender.py / email_routes.py / email_wiring.py | Phase 4 |
 | cfc-orders | rl_quote_proxy.py | R+L proxy (WORKING ✅) |
 | cfc-orders | ai_configure.py / ai_configure_wiring.py | AI Config Panel |
-| cfc-orders-frontend | src/App.jsx (v7.0) | Dark theme table layout |
+| cfc-orders-frontend | src/App.jsx (v7.1) | Dark theme + alerts UI |
 | cfc-orders-frontend | src/components/BrainChat.jsx (v2.0) | Header-triggered Brain chat |
-| cfc-orders-frontend | src/index.css (v7.0) | Dark theme CSS |
+| cfc-orders-frontend | src/index.css (v7.1) | Dark theme + alerts CSS |
 
 ## REPOS
 
 - Sandbox backend: github.com/4wprince/CFCOrderBackend_Sandbox (v6.0.0)
-- Sandbox frontend: github.com/4wprince/CFCOrdersFrontend_Sandbox (v7.0)
+- Sandbox frontend: github.com/4wprince/CFCOrdersFrontend_Sandbox (v7.1)
 - RL quote sandbox: github.com/4wprince/rl-quote-sandbox (MCP alias: `rl-quote`)
 
 ## DEPLOY URLS
