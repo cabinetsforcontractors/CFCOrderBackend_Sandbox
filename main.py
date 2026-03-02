@@ -143,6 +143,14 @@ except ImportError:
 # R+L Quote Sandbox proxy (Phase 2 — microservice integration)
 from rl_quote_proxy import router as rl_proxy_router
 
+# AlertsEngine (Phase 3A — ORD-A1 rules)
+try:
+    from alerts_routes import alerts_router
+    ALERTS_ENGINE_LOADED = True
+except ImportError:
+    ALERTS_ENGINE_LOADED = False
+    print("[STARTUP] alerts_routes module not found, AlertsEngine disabled")
+
 # =============================================================================
 # FASTAPI APP
 # =============================================================================
@@ -159,6 +167,10 @@ app.add_middleware(
 
 # Phase 2: RL-Quote proxy endpoints (/proxy/*)
 app.include_router(rl_proxy_router)
+
+# Phase 3A: AlertsEngine endpoints (/alerts/*)
+if ALERTS_ENGINE_LOADED:
+    app.include_router(alerts_router)
 
 # Global for tracking last sync
 last_auto_sync = None
@@ -262,6 +274,9 @@ def root():
         },
         "square_sync": {
             "enabled": square_configured()
+        },
+        "alerts_engine": {
+            "enabled": ALERTS_ENGINE_LOADED
         }
     }
 
@@ -910,44 +925,6 @@ def rl_cancel_pickup_by_pro(pro_number: str, reason: str = "Order cancelled"):
         from rl_carriers import cancel_pickup_by_pro
         result = cancel_pickup_by_pro(pro_number, reason)
         return {"status": "ok", "result": result}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-
-
-@app.post("/rl/pickup/pro/{pro_number}")
-def rl_pickup_for_pro(
-    pro_number: str,
-    pickup_date: Optional[str] = None,
-    ready_time: str = "09:00",
-    close_time: str = "17:00",
-    additional_instructions: Optional[str] = ""
-):
-    """
-    Schedule pickup for an existing BOL/PRO number.
-    Much simpler than creating a full pickup request.
-    
-    Args:
-        pro_number: R+L PRO number (e.g., WZ4947057)
-        pickup_date: Date in MM/dd/yyyy format (optional, defaults to tomorrow)
-        ready_time: Ready time in HH:MM format (default 09:00)
-        close_time: Close time in HH:MM format (default 17:00)
-    """
-    if not RL_CARRIERS_LOADED:
-        raise HTTPException(status_code=503, detail="rl_carriers module not loaded")
-    
-    if not rl_is_configured():
-        raise HTTPException(status_code=503, detail="RL_CARRIERS_API_KEY not configured")
-    
-    try:
-        from rl_carriers import create_pickup_for_pro
-        result = create_pickup_for_pro(
-            pro_number=pro_number,
-            pickup_date=pickup_date,
-            ready_time=ready_time,
-            close_time=close_time,
-            additional_instructions=additional_instructions
-        )
-        return {"status": "ok", "pickup": result}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
@@ -2498,51 +2475,12 @@ def is_trusted_customer(conn, customer_name: str, company_name: str = None) -> b
         return cur.fetchone() is not None
 
 # =============================================================================
-# ALERTS
+# ALERTS (Legacy basic endpoints removed — AlertsEngine router provides /alerts/*)
+# The AlertsEngine router (alerts_routes.py) now handles all /alerts/* endpoints
+# with richer functionality including:
+#   POST /alerts/check-all (cron), GET /alerts/summary, GET /alerts/,
+#   POST /alerts/check/{order_id}, POST /alerts/{id}/resolve
 # =============================================================================
-
-@app.get("/alerts")
-def list_alerts(include_resolved: bool = False):
-    """List order alerts"""
-    with get_db() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            query = """
-                SELECT a.*, o.customer_name, o.company_name, o.order_total
-                FROM order_alerts a
-                JOIN orders o ON a.order_id = o.order_id
-            """
-            if not include_resolved:
-                query += " WHERE NOT a.is_resolved"
-            query += " ORDER BY a.created_at DESC"
-            
-            cur.execute(query)
-            alerts = cur.fetchall()
-            return {"status": "ok", "alerts": alerts}
-
-@app.post("/alerts")
-def create_alert(order_id: str, alert_type: str, alert_message: str):
-    """Create an alert for an order"""
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                INSERT INTO order_alerts (order_id, alert_type, alert_message)
-                VALUES (%s, %s, %s)
-                RETURNING id
-            """, (order_id, alert_type, alert_message))
-            new_id = cur.fetchone()[0]
-            return {"status": "ok", "id": new_id}
-
-@app.patch("/alerts/{alert_id}/resolve")
-def resolve_alert(alert_id: int):
-    """Resolve an alert"""
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                UPDATE order_alerts 
-                SET is_resolved = TRUE, resolved_at = NOW()
-                WHERE id = %s
-            """, (alert_id,))
-            return {"status": "ok"}
 
 # =============================================================================
 # RL QUOTE DETECTION
@@ -3038,7 +2976,7 @@ def checkout_ui(order_id: str, token: str):
                     <div class="item">
                         <div class="item-name">${{item.name || item.product_name || item.sku}}</div>
                         <div class="item-qty">x${{qty}}</div>
-                        <div class="item-price">$${{(price * qty).toFixed(2)}}</div>
+                        <div class="item-price">${{(price * qty).toFixed(2)}}</div>
                     </div>
                 `;
             }});
@@ -3049,16 +2987,16 @@ def checkout_ui(order_id: str, token: str):
             if (shipping.shipments && shipping.shipments.length > 0) {{
                 shipping.shipments.forEach(ship => {{
                     const quoteOk = ship.quote && ship.quote.success;
-                    const methodLabel = ship.shipping_method === 'small_package' ? '📦 UPS/USPS' : '🚚 LTL Freight';
+                    const methodLabel = ship.shipping_method === 'small_package' ? '\\ud83d\\udce6 UPS/USPS' : '\\ud83d\\ude9a LTL Freight';
                     const methodNote = ship.shipping_method === 'small_package' ? 
                         (ship.quote && ship.quote.cheapest ? `via ${{ship.quote.cheapest.provider}} ${{ship.quote.cheapest.service}}` : '') :
                         '(R+L Carriers)';
                     html += `
                         <div class="shipment">
-                            <div class="shipment-header">📦 From: ${{ship.warehouse_name}} (${{ship.origin_zip}})</div>
+                            <div class="shipment-header">\\ud83d\\udce6 From: ${{ship.warehouse_name}} (${{ship.origin_zip}})</div>
                             <div class="shipment-detail">
-                                ${{ship.items.length}} item(s) · ${{ship.weight}} lbs
-                                ${{ship.is_oversized ? ' · <strong>Oversized</strong>' : ''}}
+                                ${{ship.items.length}} item(s) \\u00b7 ${{ship.weight}} lbs
+                                ${{ship.is_oversized ? ' \\u00b7 <strong>Oversized</strong>' : ''}}
                             </div>
                             <div class="shipment-detail" style="margin-top:8px;">
                                 ${{quoteOk ? 
@@ -3073,7 +3011,7 @@ def checkout_ui(order_id: str, token: str):
                 // Show residential note only for LTL shipments
                 const hasLtl = shipping.shipments.some(s => s.shipping_method === 'ltl');
                 if (hasLtl) {{
-                    html += `<div class="residential-note">🏠 Residential delivery includes liftgate service</div>`;
+                    html += `<div class="residential-note">\\ud83c\\udfe0 Residential delivery includes liftgate service</div>`;
                 }}
             }}
             
@@ -3147,4 +3085,3 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 10000))
     uvicorn.run(app, host="0.0.0.0", port=port)
-
