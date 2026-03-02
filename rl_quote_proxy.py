@@ -32,7 +32,7 @@ class AddressValidationRequest(BaseModel):
     street: str
     city: str = ""
     state: str = ""
-    zipcode: str = ""
+    zip_code: str = ""
 
 class FreightQuoteRequest(BaseModel):
     origin_zip: str
@@ -147,7 +147,7 @@ def proxy_validate_address(req: AddressValidationRequest):
         "street": req.street,
         "city": req.city,
         "state": req.state,
-        "zip_code": req.zipcode
+        "zip_code": req.zip_code
     })
     return result
 
@@ -158,7 +158,7 @@ def proxy_freight_quote(req: FreightQuoteRequest):
     Get R+L LTL freight quote via /quote/simple query params.
     Returns carrier price (before customer markup).
     """
-    result = _call_rl_sandbox("quote/simple", method="POST", params={
+    result = _call_rl_sandbox("quote/simple", method="GET", params={
         "origin_zip": req.origin_zip,
         "destination_zip": req.dest_zip,
         "weight_lbs": req.weight,
@@ -215,8 +215,8 @@ def proxy_auto_quote(req: AutoQuoteRequest):
         elif isinstance(addr.get("is_residential"), bool):
             is_residential = addr["is_residential"]
 
-    # Step 2: Get freight quote via /quote/simple with query params
-    quote_result = _call_rl_sandbox("quote/simple", method="POST", params={
+    # Step 2: Get freight quote via /quote/simple with GET query params
+    quote_result = _call_rl_sandbox("quote/simple", method="GET", params={
         "origin_zip": req.origin_zip,
         "destination_zip": validated_zip,
         "weight_lbs": req.weight,
