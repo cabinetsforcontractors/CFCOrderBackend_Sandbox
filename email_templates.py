@@ -9,9 +9,9 @@ CFC Orders Email Template Engine — Phase 4: Customer Communications
   4. delivery_confirmation  — Delivered confirmation
   5. trusted_payment_reminder — Gentle reminder for trusted customers
   6. payment_reminder_day6  — Lifecycle: order not paid (day 6)
-  7. inactive_notice_day29  — Lifecycle: marked inactive (day 29)
-  8. deletion_warning_day44 — Lifecycle: will be canceled tomorrow (day 44)
-  9. cancel_confirmation    — Lifecycle: order canceled
+  7. inactive_notice_day7   — Lifecycle: moved to inactive (day 7)
+  8. cancel_warning_day14   — Lifecycle: will be canceled in 7 days (day 14)
+  9. cancel_confirmation    — Lifecycle: order canceled (day 21 or manual)
 
 Usage:
     from email_templates import render_template, get_template_list
@@ -71,17 +71,17 @@ TEMPLATE_REGISTRY = {
         "category": "lifecycle",
         "is_lifecycle": True,
     },
-    "inactive_notice_day29": {
-        "name": "Inactive Notice (Day 29)",
-        "subject": "Your Order #{order_id} Has Been Marked Inactive",
-        "description": "Lifecycle: order moved to inactive due to no activity",
+    "inactive_notice_day7": {
+        "name": "Inactive Notice (Day 7)",
+        "subject": "Your Order #{order_id} Has Been Moved to Inactive",
+        "description": "Lifecycle: order moved to inactive due to 7 days of no activity",
         "category": "lifecycle",
         "is_lifecycle": True,
     },
-    "deletion_warning_day44": {
-        "name": "Deletion Warning (Day 44)",
-        "subject": "Your Order #{order_id} Will Be Canceled Tomorrow",
-        "description": "Lifecycle: final warning before auto-cancellation",
+    "cancel_warning_day14": {
+        "name": "Cancel Warning (Day 14)",
+        "subject": "Your Order #{order_id} Will Be Canceled in 7 Days",
+        "description": "Lifecycle: 14 days inactive, will be canceled in 7 more days",
         "category": "lifecycle",
         "is_lifecycle": True,
     },
@@ -291,11 +291,6 @@ def _render_shipping_notification(order: Dict) -> str:
     
     display_tracking = pro_number or tracking or "Pending"
     
-    # Build tracking URL if available
-    tracking_link = ""
-    if pro_number:
-        tracking_link = f"https://www2.rlcarriers.com/freight/shipping/shipment-tracing?pro={pro_number}"
-    
     tracking_html = f"""
     <div class="tracking-box">
         <p style="margin: 0 0 4px 0; color: #166534; font-size: 13px;">Carrier: {carrier}</p>
@@ -303,7 +298,8 @@ def _render_shipping_notification(order: Dict) -> str:
     </div>
     """
     
-    if tracking_link:
+    if pro_number:
+        tracking_link = f"https://www2.rlcarriers.com/freight/shipping/shipment-tracing?pro={pro_number}"
         tracking_html += f"""
         <p style="text-align: center;">
             <a href="{tracking_link}" class="cta-button" style="background: #16a34a;">Track Your Shipment</a>
@@ -391,48 +387,49 @@ def _render_payment_reminder_day6(order: Dict) -> str:
     return _wrap_email(_header("Payment Reminder", f"Order #{order_id}"), body)
 
 
-def _render_inactive_notice_day29(order: Dict) -> str:
-    """Template 7: Lifecycle — order marked inactive (day 29)."""
+def _render_inactive_notice_day7(order: Dict) -> str:
+    """Template 7: Lifecycle — order moved to inactive (day 7)."""
     customer = order.get("customer_name", "Valued Customer")
     first_name = customer.split()[0] if customer else "there"
     order_id = order.get("order_id", "")
     
     body = f"""
     <p>Hi {first_name},</p>
-    <p>Your Order #{order_id} has been marked <strong>inactive</strong> due to no recent activity.</p>
+    <p>Your Order #{order_id} has been moved to our <strong>inactive folder</strong> 
+    because we haven't heard from you in over a week.</p>
     {_order_summary_block(order)}
     <div class="warning-box">
-        <p><strong>What this means:</strong> Your order is still in our system but will be 
-        automatically canceled if we don't hear from you within 15 days.</p>
+        <p><strong>What this means:</strong> Your order is still in our system, but if we 
+        don't hear from you within 14 days, it will be automatically canceled.</p>
     </div>
-    <p>If you'd like to keep this order active, just reply to this email or give us a call. 
-    We're happy to help with any questions.</p>
+    <p>If you'd like to keep this order active, just reply to this email or give us a call 
+    at (770) 990-4885. We're happy to help with any questions.</p>
     <p>Thanks,<br>William Prince<br>Cabinets For Contractors</p>
     """
-    return _wrap_email(_header("Order Marked Inactive", f"Order #{order_id}"), body)
+    return _wrap_email(_header("Order Moved to Inactive", f"Order #{order_id}"), body)
 
 
-def _render_deletion_warning_day44(order: Dict) -> str:
-    """Template 8: Lifecycle — order will be canceled tomorrow (day 44)."""
+def _render_cancel_warning_day14(order: Dict) -> str:
+    """Template 8: Lifecycle — order will be canceled in 7 days (day 14)."""
     customer = order.get("customer_name", "Valued Customer")
     first_name = customer.split()[0] if customer else "there"
     order_id = order.get("order_id", "")
     
     body = f"""
     <p>Hi {first_name},</p>
-    <p><strong>This is a final notice.</strong></p>
-    <p>Your Order #{order_id} will be <strong>automatically canceled tomorrow</strong> 
-    due to extended inactivity.</p>
+    <p><strong>This is an important notice about your order.</strong></p>
+    <p>Your Order #{order_id} has been inactive for two weeks. If we don't hear from you 
+    in the next <strong>7 days</strong>, this order will be <strong>automatically canceled</strong>.</p>
     {_order_summary_block(order)}
     <div class="warning-box">
-        <p><strong>Action required:</strong> If you want to keep this order, 
-        please reply to this email or call us today at (770) 990-4885.</p>
+        <p><strong>Action required:</strong> If you want to keep this order, please reply 
+        to this email or call us at (770) 990-4885 within the next 7 days.</p>
     </div>
     <p>If you no longer need this order, no action is needed — it will be 
-    canceled automatically.</p>
+    canceled automatically after 7 days.</p>
     <p>Thanks,<br>William Prince<br>Cabinets For Contractors</p>
     """
-    return _wrap_email(_header("Order Will Be Canceled Tomorrow", f"Order #{order_id}"), body)
+    return _wrap_email(_header("Order Will Be Canceled in 7 Days", f"Order #{order_id}"), body)
 
 
 def _render_cancel_confirmation(order: Dict) -> str:
@@ -446,7 +443,7 @@ def _render_cancel_confirmation(order: Dict) -> str:
     if reason == "customer_request":
         reason_text = "<p>This cancellation was made per your request.</p>"
     elif reason == "inactivity":
-        reason_text = "<p>This order was canceled due to extended inactivity (45+ days with no response).</p>"
+        reason_text = "<p>This order was canceled due to 21 days of inactivity with no response.</p>"
     else:
         reason_text = f"<p>Reason: {reason}</p>" if reason else ""
     
@@ -473,8 +470,8 @@ _RENDERERS = {
     "delivery_confirmation": _render_delivery_confirmation,
     "trusted_payment_reminder": _render_trusted_payment_reminder,
     "payment_reminder_day6": _render_payment_reminder_day6,
-    "inactive_notice_day29": _render_inactive_notice_day29,
-    "deletion_warning_day44": _render_deletion_warning_day44,
+    "inactive_notice_day7": _render_inactive_notice_day7,
+    "cancel_warning_day14": _render_cancel_warning_day14,
     "cancel_confirmation": _render_cancel_confirmation,
 }
 
