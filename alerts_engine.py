@@ -112,14 +112,18 @@ def business_hours_elapsed(since: datetime, now: datetime = None) -> float:
     if now is None:
         now = datetime.now()
     
-    if since is None or since > now:
+    if since is None:
         return 0.0
     
-    # Strip timezone info for comparison if needed
+    # Strip timezone info BEFORE any comparison to avoid
+    # "can't compare offset-naive and offset-aware datetimes"
     if hasattr(since, 'tzinfo') and since.tzinfo:
         since = since.replace(tzinfo=None)
     if hasattr(now, 'tzinfo') and now.tzinfo:
         now = now.replace(tzinfo=None)
+    
+    if since > now:
+        return 0.0
     
     # Count business days between the two dates
     business_days = 0
