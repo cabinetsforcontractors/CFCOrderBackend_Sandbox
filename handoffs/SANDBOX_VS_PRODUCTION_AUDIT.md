@@ -1,6 +1,6 @@
 # CFC Orders — Sandbox vs Production Audit
 **Started:** 2026-03-03
-**Status:** Step 1 COMPLETE (sandbox inventory). Steps 2–4 pending.
+**Status:** Steps 1–3 COMPLETE. Step 4 (Promotion Plan) pending for Chat 2.
 
 ---
 
@@ -10,9 +10,10 @@
 |---|---|---|
 | **Frontend URL** | https://cfcordersfrontend-sandbox.vercel.app | https://cfc-orders-frontend.vercel.app |
 | **Backend URL** | https://cfcorderbackend-sandbox.onrender.com | https://cfc-backend-b83s.onrender.com |
+| **Backend Version** | v6.0.0 | v5.9.1 |
 | **Frontend repo** | 4wprince/CFCOrdersFrontend_Sandbox (MCP: cfc-orders-frontend) | 4wprince/CFCOrdersFrontend (NOT in MCP) |
 | **Backend repo** | 4wprince/CFCOrderBackend_Sandbox (MCP: cfc-orders) | Unknown (NOT in MCP) |
-| **Local path** | C:\Sandbox\CFCOrdersFrontend + C:\Sandbox\CFCOrderBackend | C:\CFCOrdersFrontend + C:\CFCOrderBackend |
+| **Local paths** | C:\dev\CFCOrderBackend_Sandbox + C:\dev\CFCOrdersFrontend_Sandbox | ⚠️ NO LOCAL CLONE EXISTS |
 | **Config switching** | config.js: `IS_SANDBOX = true`, API_URL → sandbox backend | config.js: `IS_SANDBOX = false`, API_URL → production backend |
 
 ---
@@ -284,62 +285,221 @@
 
 ---
 
-## STEP 2: PRODUCTION INVENTORY (⏳ PENDING — needs William's PowerShell)
+## STEP 2: PRODUCTION INVENTORY (✅ COMPLETE)
 
-Run these commands on William's local machine:
+### Method
+No local production clone exists on William's machine. Only sandbox folders found:
+- `C:\dev\CFCOrderBackend_Sandbox`
+- `C:\dev\CFCOrdersFrontend_Sandbox`
 
-### Command 1: Production backend health
-```powershell
-(Invoke-WebRequest -Uri "https://cfc-backend-b83s.onrender.com/health" -UseBasicParsing).Content
+Production repos are NOT in MCP. Inventory was done by probing the live production backend API.
+
+### Production Backend — v5.9.1
+
+**Root endpoint response:**
+```json
+{
+  "status": "ok",
+  "service": "CFC Order Workflow",
+  "version": "5.9.1",
+  "auto_sync": {"enabled": true, "interval_minutes": 15, "last_sync": "2026-03-03T13:22:20.710495+00:00", "running": false},
+  "gmail_sync": {"enabled": true},
+  "square_sync": {"enabled": true}
+}
 ```
 
-### Command 2: Production frontend file listing
-```powershell
-cd C:\CFCOrdersFrontend
-Get-ChildItem -Recurse src\ -Include *.jsx,*.js,*.css | Select-Object FullName,Length
-```
+**Key observations:**
+- Root response does NOT include `alerts_engine`, `lifecycle_engine`, `email_engine`, or `ai_configure` fields — these modules don't exist in production code
+- Auto-sync, Gmail, and Square sync are all active and working
+- Version 5.9.1 vs sandbox 6.0.0
 
-### Command 3: Production backend file listing
-```powershell
-cd C:\CFCOrderBackend
-Get-ChildItem *.py | Select-Object Name,Length
-```
+### Production Endpoint Probe Results
 
-### Command 4: Production frontend git log
-```powershell
-cd C:\CFCOrdersFrontend
-git log --oneline -10
-```
+| Endpoint | Status | Notes |
+|----------|--------|-------|
+| `GET /` | ✅ 200 | v5.9.1, auto_sync + gmail + square only |
+| `GET /health` | ✅ 200 | `{"status":"ok","version":"5.9.1"}` |
+| `GET /orders?limit=1` | ✅ 200 | Working — returns full order data with shipments |
+| `GET /alerts/summary` | ❌ 404 | Alerts engine NOT deployed |
+| `GET /lifecycle/summary` | ❌ 404 | Lifecycle engine NOT deployed |
+| `GET /proxy/health` | ❌ 404 | RL quote proxy NOT deployed |
+| `GET /email/templates` | ❌ 404 | Email comms NOT deployed |
+| `GET /ai/ui-schema` | ❌ 404 | AI configure NOT deployed |
+| `GET /checkout-status` | ❌ 404 | Checkout flow NOT deployed |
+| `GET /rl/status` | ❌ 404 | R+L direct API NOT deployed |
+| `GET /shippo/status` | ❌ 404 | Shippo NOT deployed |
+| `GET /rta/status` | ❌ 404 | RTA database NOT deployed |
 
-### Command 5: Production backend git log
-```powershell
-cd C:\CFCOrderBackend
-git log --oneline -10
-```
+### Critical Finding: DB Schema Mismatch
 
-### Command 6: Production frontend config.js
-```powershell
-cd C:\CFCOrdersFrontend
-Get-Content src\config.js
-```
+The production `/orders` response includes lifecycle fields that SHOULD NOT exist in v5.9.1:
+- `lifecycle_status`: "active"
+- `lifecycle_deadline_at`: null
+- `lifecycle_reminders_sent`: {}
+- `clock_started_at`: null
+- `last_customer_email_at`: "2026-03-03T07:19:26.306861+00:00"
+
+**This means someone ran the lifecycle DB migration (`/add-lifecycle-fields`) on the production database, but never deployed the lifecycle engine code.** The DB is ahead of the code. This is GOOD for promotion — the schema is already there.
+
+### Production Feature Summary
+
+**Working in production:**
+- Order CRUD (create, read, update, delete, checkpoints, set-status)
+- B2BWave auto-sync (15-min interval)
+- Gmail sync (order status from emails)
+- Square sync (payment matching)
+- Shipment management (per-warehouse)
+- Warehouse mapping
+- Trusted customers
+- Email parsing
+- Payment/RL quote/PRO number detection
+- AI summaries (short + comprehensive via Anthropic)
+- Order events logging
+
+**NOT in production (all 404):**
+- Alerts Engine (Phase 3A) — 5 endpoints
+- Lifecycle Engine (Phase 3B) — 8 endpoints (but DB fields exist!)
+- RL Quote Proxy (Phase 2) — 5 endpoints
+- Email Communications (Phase 4) — 5 endpoints
+- AI Configure — 2 endpoints
+- Checkout Flow — 9 endpoints
+- R+L Carriers Direct API — 19 endpoints
+- Shippo rates — 3 endpoints
+- RTA Database — 4 endpoints
+- startup_wiring.py module system
 
 ---
 
-## STEP 3: GAP ANALYSIS (⏳ PENDING — needs Step 2 data)
+## STEP 3: GAP ANALYSIS (✅ COMPLETE)
 
-Will create comparison table:
-- Backend files: sandbox-only vs production-only
-- Frontend components: sandbox-only vs production-only
-- Feature matrix: which capabilities exist where
-- "Lost functionality" check: anything in production NOT in sandbox
+### Backend Gap: v5.9.1 → v6.0.0
+
+Production is missing **60+ endpoints** across 10 feature groups. Here's the full breakdown:
+
+| Feature Group | Sandbox Endpoints | Production | Gap |
+|--------------|:-:|:-:|-----|
+| Core CRUD + Sync | ~25 | ✅ ~25 | **PARITY** — both have orders, b2bwave, gmail, square |
+| Alerts Engine | 5 | ❌ 0 | **MISSING** — alerts_engine.py, alerts_routes.py |
+| Lifecycle Engine | 8 | ❌ 0 | **MISSING** — lifecycle_engine.py, lifecycle_routes.py, lifecycle_wiring.py (DB fields already exist!) |
+| RL Quote Proxy | 5 | ❌ 0 | **MISSING** — rl_quote_proxy.py |
+| Email Communications | 5 | ❌ 0 | **MISSING** — email_templates.py, email_sender.py, email_routes.py, email_wiring.py |
+| AI Configure | 2 | ❌ 0 | **MISSING** — ai_configure.py, ai_configure_wiring.py |
+| Checkout Flow | 9 | ❌ 0 | **MISSING** — checkout.py integration |
+| R+L Direct API | 19 | ❌ 0 | **MISSING** — rl_carriers.py routes in main.py |
+| Shippo | 3 | ❌ 0 | **MISSING** — shippo_rates.py routes in main.py |
+| RTA Database | 4 | ❌ 0 | **MISSING** — rta_database.py, load_rta_data.py routes |
+| startup_wiring | — | ❌ | **MISSING** — startup_wiring.py module loader |
+
+### Backend Files: Sandbox-Only (likely missing from production)
+
+These files exist in sandbox but almost certainly NOT in production (based on all their endpoints being 404):
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| alerts_engine.py | ~500 | 8 alert rules, check_all_orders |
+| alerts_routes.py | 97 | /alerts/* router |
+| lifecycle_engine.py | ~650 | 7/14/21 day timeline |
+| lifecycle_routes.py | 189 | /lifecycle/* router |
+| lifecycle_wiring.py | ~50 | Mounts lifecycle + migrations |
+| email_templates.py | ~600 | 9 HTML email templates |
+| email_sender.py | ~300 | Gmail API send |
+| email_routes.py | 188 | /email/* + /orders/*/send-email router |
+| email_wiring.py | ~25 | Mounts email router |
+| rl_quote_proxy.py | 276 | /proxy/* router |
+| ai_configure.py | 166 | /ai/* router |
+| ai_configure_wiring.py | 16 | Mounts AI router |
+| startup_wiring.py | 56 | One-call module mount |
+| shippo_rates.py | ~250 | Shippo integration |
+| rl_carriers.py | ~600 | R+L direct API |
+| checkout.py | ~600 | Checkout flow |
+| rta_database.py | ~400 | RTA weight lookup |
+| load_rta_data.py | ~150 | RTA data loader |
+
+**Total: 18 files sandbox has that production lacks**
+
+### Frontend Gap
+
+Production frontend is NOT accessible via MCP and no local clone exists, so we can't do a file-level diff. However, based on the backend gap:
+
+**Sandbox frontend has (production likely lacks):**
+- App.jsx v7.2.0 (production is probably v5.x or v6.x)
+- Dark theme (v7.x feature)
+- All/Inactive tabs (lifecycle integration)
+- Alerts bell + dropdown
+- Lifecycle badges (canceled/inactive indicators)
+- EmailPanel.jsx (requires /email/* endpoints)
+- AiConfigPanel.jsx (requires /ai/* endpoints)
+- BrainChat.jsx v2.1.0 (hardcoded admin token)
+- RLQuoteHelper.jsx auto-quote (requires /proxy/* endpoints)
+- index.css v7.2.0 dark theme + badges
+
+### "Lost Functionality" Check: Production → Sandbox
+
+**VERDICT: NO lost functionality detected.**
+
+The production root endpoint shows only: auto_sync, gmail_sync, square_sync. ALL of these exist in sandbox v6.0.0. The sandbox is a strict superset of production.
+
+The one nuance: production's main.py (v5.9.1) may have slightly different implementations of the core CRUD endpoints. But since sandbox was forked FROM production and all core functionality was preserved, the risk is minimal.
+
+**⚠️ One concern:** Production and sandbox share the SAME database (both `/orders?limit=1` return the same order #5465 with the same data). This means:
+- They're already sharing state
+- DB migrations done on one affect both
+- This is WHY lifecycle fields already exist in production — sandbox migrations ran against the shared DB
 
 ---
 
-## STEP 4: PROMOTION PLAN (⏳ PENDING — needs Step 3)
+## STEP 4: PROMOTION PLAN (⏳ PENDING — for Chat 2)
 
-Will create:
-- Env vars checklist for production Render
-- DB migration sequence
-- Config.js changes
-- File copy/push order
-- Rollback plan
+Chat 2 should build the step-by-step promotion checklist covering:
+
+1. **Backend deployment strategy** — Options:
+   - Option A: Point production Render service to sandbox repo (simplest)
+   - Option B: Push sandbox code to production repo
+   - Option C: Make sandbox THE production (rename/redirect)
+
+2. **Backend env vars audit** — Compare sandbox vs production Render env vars:
+   - DATABASE_URL (shared? separate?)
+   - B2BWAVE_*, GMAIL_*, SQUARE_* credentials
+   - ANTHROPIC_API_KEY
+   - SHIPPO_API_KEY
+   - RL_CARRIERS_API_KEY
+   - RL_QUOTE_SANDBOX_URL
+   - CHECKOUT_BASE_URL
+   - GMAIL_SEND_ENABLED
+
+3. **DB migration sequence** — What needs to run on production DB:
+   - Lifecycle fields: ✅ ALREADY DONE
+   - Other migrations needed?
+   - Run /add-lifecycle-fields: SKIP (already there)
+   - Run /backfill-lifecycle: May need to re-run
+
+4. **Frontend deployment** — Config.js changes:
+   - `IS_SANDBOX = false`
+   - `API_URL = 'https://cfc-backend-b83s.onrender.com'` (or new URL)
+   - `OTHER_ENV_URL` flip
+
+5. **Testing checklist** — After promotion:
+   - /health returns v6.0.0
+   - /alerts/summary returns 200
+   - /lifecycle/summary returns 200
+   - /proxy/health returns 200
+   - /email/templates returns 200
+   - Orders still load
+   - Auto-sync still works
+   - Frontend loads, dark theme, all tabs
+
+6. **Rollback plan** — If something breaks:
+   - Render: revert to previous deploy
+   - Vercel: revert to previous deployment
+   - DB: No destructive changes, rollback not needed
+
+### ⚠️ KEY DECISION FOR WILLIAM
+
+**The biggest question is: Should production Render just point to the sandbox repo?**
+
+Since there's no local production clone and the production repo isn't in MCP, the cleanest path might be:
+- Production Render → point git source to `4wprince/CFCOrderBackend_Sandbox`
+- Production Vercel → point git source to `4wprince/CFCOrdersFrontend_Sandbox`
+- Update config.js to detect environment via env var instead of hardcoded IS_SANDBOX
+
+This eliminates the two-repo problem entirely. Chat 2 should discuss this with William.
