@@ -1,9 +1,9 @@
 # SESSION HANDOFF - CFC Orders (General)
 
-**Last Updated:** 2026-03-03 (Session 16 — DB migration + GMAIL flip COMPLETE)
-**Latest Session:** Session 16 — DB migration, backfill, alerts check-all, tz bug fix, GMAIL flip
+**Last Updated:** 2026-03-03 (Session 17 — Frontend UI bug fixes: text visibility + panel click-to-close)
+**Latest Session:** Session 17 — 2 frontend bugs fixed, 3 files pushed to cfc-orders-frontend
+**Session Before:** Session 16 — DB migration, backfill, alerts check-all, tz bug fix, GMAIL flip
 **Session Before:** Session 15 — Read main.py (3,088 lines), mapped all 3 edit locations precisely
-**Session Before:** Session 14 — Phase 3C Frontend alerts bell badge, dropdown, per-order alerts
 
 ---
 
@@ -14,14 +14,23 @@
 |-----------|---------|--------|
 | AlertsEngine (Phase 3A) | alerts_engine.py, alerts_routes.py | ✅ DEPLOYED, tz bug fixed (commit c051048) |
 | Lifecycle Engine (Phase 3B) | lifecycle_engine.py, lifecycle_routes.py, lifecycle_wiring.py | ✅ DEPLOYED, DB migrated, 15 orders backfilled |
-| Frontend Alerts (Phase 3C) | App.jsx v7.1, index.css v7.1 | ✅ LIVE |
+| Frontend Alerts (Phase 3C) | App.jsx v7.2.1, index.css v7.2 | ✅ LIVE |
 | Email Templates (Phase 4) | email_templates.py (9 templates) | ✅ DEPLOYED |
 | Email Send (Phase 4) | email_sender.py, email_routes.py, email_wiring.py | ✅ DEPLOYED, GMAIL_SEND_ENABLED=true |
 | AI Config Panel | ai_configure.py, ai_configure_wiring.py | ✅ DEPLOYED via startup_wiring |
 | Startup Wiring | startup_wiring.py | ✅ DEPLOYED — wires lifecycle + email + AI config |
 | RL Quote Proxy | rl_quote_proxy.py (276 lines) | ✅ WORKING |
 | Freight Class | main.py — all 3 spots updated to 85 | ✅ DEPLOYED |
-| Frontend v7.1 | App.jsx, index.css, BrainChat.jsx v2.0 | ✅ DARK THEME + ALERTS UI LIVE |
+| Frontend v7.2.1 | App.jsx, index.css, BrainChat.jsx v2.0 | ✅ DARK THEME + ALERTS UI + PANEL CLICK-CLOSE |
+
+### Session 17 Changes (Mar 3 — Frontend Bug Fixes)
+| Fix | File | SHA | Details |
+|-----|------|-----|---------|
+| Text visibility: Auto Quote | RLQuoteHelper.jsx | 98b15a3 | Added `color: '#111'` to auto-quote result div + `<strong>` on `#d4edda` light-green bg |
+| Text visibility: Bill To | CustomerAddress.jsx | 66eceac | Added `color: '#111'` to `<h4>` on `#e3f2fd` light-blue bg |
+| Panel click-to-close | App.jsx v7.2.1 | 9f8b620 | `onClick={handleContentAreaClick}` on `.content-area` + `e.stopPropagation()` on table rows |
+
+**Click-to-close behavior:** Clicking anywhere in the main content area (metrics, tabs, empty space) closes the detail panel. Clicking a table row uses `stopPropagation()` so it opens that order's detail instead. X button still works. CSS margin-right values already matched panel widths at all breakpoints (440px desktop, 380px tablet, 0 mobile).
 
 ### Deploy Verification (Mar 3)
 | Check | Result |
@@ -38,7 +47,7 @@
 | # | Task | Effort | Details |
 |---|------|--------|---------|
 | 1 | Phase 5: Backend Hardening | Full session | See `SESSION_HANDOFF_PHASE5.md` |
-| 2 | Frontend end-to-end test | Manual | Bell badge, dropdown, resolve, dismiss |
+| 2 | Frontend end-to-end test | Manual | Bell badge, dropdown, resolve, dismiss, panel click-close |
 | 3 | Phase 7: Production Promotion | TBD | Sandbox → production deploy |
 
 ---
@@ -54,7 +63,7 @@
 | 3C | Frontend Alerts | ✅ DONE |
 | 4 | Email Comms | ✅ DEPLOYED |
 | **5** | **Backend Hardening** | **NEXT — see SESSION_HANDOFF_PHASE5.md** |
-| 6 | Frontend Redesign | ✅ DONE v7.1 |
+| 6 | Frontend Redesign | ✅ DONE v7.2.1 |
 | 7 | Production Promotion | NOT STARTED |
 
 ---
@@ -69,7 +78,9 @@
 | cfc-orders | lifecycle_engine.py / lifecycle_routes.py / lifecycle_wiring.py | Phase 3B |
 | cfc-orders | email_templates.py / email_sender.py / email_routes.py / email_wiring.py | Phase 4 |
 | cfc-orders | rl_quote_proxy.py | R+L proxy |
-| cfc-orders-frontend | src/App.jsx (v7.1) | Dark theme + alerts UI |
+| cfc-orders-frontend | src/App.jsx (v7.2.1) | Dark theme + alerts UI + panel click-close |
+| cfc-orders-frontend | src/components/RLQuoteHelper.jsx | RL quote helper — text color fixed |
+| cfc-orders-frontend | src/components/CustomerAddress.jsx | Bill To address — text color fixed |
 | cfc-orders-frontend | src/components/BrainChat.jsx (v2.0) | Brain chat |
 
 ## REPOS
