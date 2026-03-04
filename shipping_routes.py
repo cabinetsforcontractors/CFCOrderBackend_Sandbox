@@ -3,6 +3,7 @@ shipping_routes.py
 FastAPI router for Shipping: R+L Carriers (direct API), Shippo, RTA Database.
 
 Phase 5: Extracted from main.py
+Phase 5C: require_admin wired to all write/delete endpoints
 
 Mount in main.py with:
     from shipping_routes import shipping_router
@@ -13,30 +14,30 @@ Endpoints — R+L Carriers (direct):
     GET    /rl/test
     GET    /rl/quote
     GET    /rl/track/{pro_number}
-    POST   /rl/bol
+    POST   /rl/bol                              [admin]
     GET    /rl/bol/{pro_number}
     GET    /rl/bol/{pro_number}/pdf
     GET    /rl/bol/{pro_number}/labels
-    POST   /rl/pickup
-    POST   /rl/pickup/pro/{pro_number}
+    POST   /rl/pickup                           [admin]
+    POST   /rl/pickup/pro/{pro_number}          [admin]
     GET    /rl/pickup/pro/{pro_number}
-    DELETE /rl/pickup/pro/{pro_number}
+    DELETE /rl/pickup/pro/{pro_number}          [admin]
     GET    /rl/pickup/{pickup_id}
-    DELETE /rl/pickup/{pickup_id}
-    POST   /rl/notify
+    DELETE /rl/pickup/{pickup_id}               [admin]
+    POST   /rl/notify                           [admin]
     GET    /rl/notify/{pro_number}
-    POST   /rl/order/{order_id}/create-bol
-    POST   /rl/order/{order_id}/pickup
+    POST   /rl/order/{order_id}/create-bol      [admin]
+    POST   /rl/order/{order_id}/pickup          [admin]
     GET    /rl/order/{order_id}/shipments
 
 Endpoints — Shippo:
     GET    /shippo/status
     GET    /shippo/rates
-    POST   /shippo/test
+    POST   /shippo/test                         [admin]
 
 Endpoints — RTA Database:
     GET    /rta/status
-    POST   /rta/init
+    POST   /rta/init                            [admin]
     GET    /rta/sku/{sku}
     POST   /rta/calculate-weight
 
@@ -46,9 +47,10 @@ NOTE: /proxy/* (rl-quote-sandbox microservice) is handled by rl_quote_proxy.py.
 import os
 from typing import Optional, List
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from auth import require_admin
 from config import SHIPPO_API_KEY
 
 # =============================================================================
@@ -237,8 +239,8 @@ def rl_track(pro_number: str):
 # =============================================================================
 
 @shipping_router.post("/rl/bol")
-def rl_create_bol(request: RLBolRequest):
-    """Create Bill of Lading with R+L Carriers."""
+def rl_create_bol(request: RLBolRequest, _: bool = Depends(require_admin)):
+    """Create Bill of Lading with R+L Carriers. [admin]"""
     if not RL_CARRIERS_LOADED:
         raise HTTPException(status_code=503, detail="rl_carriers module not loaded")
     if not rl_is_configured():
@@ -329,8 +331,9 @@ def rl_pickup_for_pro(
     close_time: str = "05:00 PM",
     contact_name: Optional[str] = "",
     contact_email: Optional[str] = "",
+    _: bool = Depends(require_admin),
 ):
-    """Schedule pickup for an existing BOL by PRO number."""
+    """Schedule pickup for an existing BOL by PRO number. [admin]"""
     if not RL_CARRIERS_LOADED:
         raise HTTPException(status_code=503, detail="rl_carriers module not loaded")
     if not rl_is_configured():
@@ -364,8 +367,8 @@ def rl_get_pickup_by_pro(pro_number: str):
 
 
 @shipping_router.delete("/rl/pickup/pro/{pro_number}")
-def rl_cancel_pickup_by_pro(pro_number: str, reason: str = "Order cancelled"):
-    """Cancel a pickup request by PRO number."""
+def rl_cancel_pickup_by_pro(pro_number: str, reason: str = "Order cancelled", _: bool = Depends(require_admin)):
+    """Cancel a pickup request by PRO number. [admin]"""
     if not RL_CARRIERS_LOADED:
         raise HTTPException(status_code=503, detail="rl_carriers module not loaded")
     try:
@@ -376,8 +379,8 @@ def rl_cancel_pickup_by_pro(pro_number: str, reason: str = "Order cancelled"):
 
 
 @shipping_router.post("/rl/pickup")
-def rl_create_pickup(request: RLPickupRequest):
-    """Create standalone pickup request with R+L Carriers."""
+def rl_create_pickup(request: RLPickupRequest, _: bool = Depends(require_admin)):
+    """Create standalone pickup request with R+L Carriers. [admin]"""
     if not RL_CARRIERS_LOADED:
         raise HTTPException(status_code=503, detail="rl_carriers module not loaded")
     if not rl_is_configured():
@@ -423,8 +426,8 @@ def rl_get_pickup(pickup_id: int):
 
 
 @shipping_router.delete("/rl/pickup/{pickup_id}")
-def rl_cancel_pickup(pickup_id: int, reason: str = "Order cancelled"):
-    """Cancel a pickup request by pickup ID."""
+def rl_cancel_pickup(pickup_id: int, reason: str = "Order cancelled", _: bool = Depends(require_admin)):
+    """Cancel a pickup request by pickup ID. [admin]"""
     if not RL_CARRIERS_LOADED:
         raise HTTPException(status_code=503, detail="rl_carriers module not loaded")
     try:
@@ -439,8 +442,8 @@ def rl_cancel_pickup(pickup_id: int, reason: str = "Order cancelled"):
 # =============================================================================
 
 @shipping_router.post("/rl/notify")
-def rl_setup_notification(request: RLNotificationRequest):
-    """Set up shipment notifications."""
+def rl_setup_notification(request: RLNotificationRequest, _: bool = Depends(require_admin)):
+    """Set up shipment notifications. [admin]"""
     if not RL_CARRIERS_LOADED:
         raise HTTPException(status_code=503, detail="rl_carriers module not loaded")
     try:
@@ -478,10 +481,11 @@ def rl_create_order_bol(
     include_pickup: bool = False,
     pickup_date: Optional[str] = None,
     special_instructions: Optional[str] = "",
+    _: bool = Depends(require_admin),
 ):
     """
     Create BOL for a specific warehouse shipment from an order.
-    Uses warehouse addresses from checkout.py and customer info from B2BWave.
+    Uses warehouse addresses from checkout.py and customer info from B2BWave. [admin]
     """
     if not RL_CARRIERS_LOADED:
         raise HTTPException(status_code=503, detail="rl_carriers module not loaded")
@@ -591,8 +595,9 @@ def rl_create_order_pickup(
     ready_time: str = "09:00",
     close_time: str = "17:00",
     additional_instructions: Optional[str] = "",
+    _: bool = Depends(require_admin),
 ):
-    """Create pickup request for a warehouse shipment from an order."""
+    """Create pickup request for a warehouse shipment from an order. [admin]"""
     if not RL_CARRIERS_LOADED:
         raise HTTPException(status_code=503, detail="rl_carriers module not loaded")
     if not rl_is_configured():
@@ -775,8 +780,8 @@ def get_shippo_rates(
 
 
 @shipping_router.post("/shippo/test")
-def test_shippo_api():
-    """Test Shippo API connection."""
+def test_shippo_api(_: bool = Depends(require_admin)):
+    """Test Shippo API connection. [admin]"""
     if not SHIPPO_ENABLED:
         raise HTTPException(status_code=503, detail="Shippo API not configured")
     return _test_shippo()
@@ -798,8 +803,8 @@ def rta_status():
 
 
 @shipping_router.post("/rta/init")
-def rta_init_table():
-    """Initialize the RTA products table."""
+def rta_init_table(_: bool = Depends(require_admin)):
+    """Initialize the RTA products table. [admin]"""
     if not RTA_DB_ENABLED:
         raise HTTPException(status_code=503, detail="RTA database module not loaded")
     return init_rta_table()
