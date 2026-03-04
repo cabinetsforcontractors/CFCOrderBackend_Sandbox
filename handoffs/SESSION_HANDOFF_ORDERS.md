@@ -1,98 +1,81 @@
-# SESSION HANDOFF - CFC Orders (General)
+# WS6 — CFC Orders Session Handoff
+**Date:** 2026-03-04
+**Task:** Phase 5B Backend Hardening — main.py full decomposition + auth wiring
 
-**Last Updated:** 2026-03-03 (Session 17 — Frontend UI bug fixes: text visibility + panel click-to-close)
-**Latest Session:** Session 17 — 2 frontend bugs fixed, 3 files pushed to cfc-orders-frontend
-**Session Before:** Session 16 — DB migration, backfill, alerts check-all, tz bug fix, GMAIL flip
-**Session Before:** Session 15 — Read main.py (3,088 lines), mapped all 3 edit locations precisely
+## ✅ What Was Done This Session
 
----
+### Phase 5B COMPLETE — main.py fully decomposed
 
-## CURRENT STATE SUMMARY
+| File | Lines | What It Contains |
+|------|-------|-----------------|
+| `main.py` v6.1.0 | ~175 | App init, CORS, router mounts, startup, health |
+| `migration_routes.py` | ~130 | All 9 DB migration endpoints + `/debug/orders-columns` + `/init-db` — all admin-gated |
+| `sync_routes.py` | ~140 | B2BWave test/sync/order + Gmail sync + Square sync/status — all admin-gated |
+| `detection_routes.py` | ~220 | `/parse-email`, `/detect-payment-link`, `/detect-payment-received`, `/detect-rl-quote`, `/detect-pro-number`, `/check-payment-alerts` — all admin-gated |
+| `checkout_routes.py` | ~290 | Full checkout flow + debug endpoints (admin-gated) + public webhook/checkout UI |
 
-### What's DONE (all deployed and verified on Render)
-| Component | File(s) | Status |
-|-----------|---------|--------|
-| AlertsEngine (Phase 3A) | alerts_engine.py, alerts_routes.py | ✅ DEPLOYED, tz bug fixed (commit c051048) |
-| Lifecycle Engine (Phase 3B) | lifecycle_engine.py, lifecycle_routes.py, lifecycle_wiring.py | ✅ DEPLOYED, DB migrated, 15 orders backfilled |
-| Frontend Alerts (Phase 3C) | App.jsx v7.2.1, index.css v7.2 | ✅ LIVE |
-| Email Templates (Phase 4) | email_templates.py (9 templates) | ✅ DEPLOYED |
-| Email Send (Phase 4) | email_sender.py, email_routes.py, email_wiring.py | ✅ DEPLOYED, GMAIL_SEND_ENABLED=true |
-| AI Config Panel | ai_configure.py, ai_configure_wiring.py | ✅ DEPLOYED via startup_wiring |
-| Startup Wiring | startup_wiring.py | ✅ DEPLOYED — wires lifecycle + email + AI config |
-| RL Quote Proxy | rl_quote_proxy.py (276 lines) | ✅ WORKING |
-| Freight Class | main.py — all 3 spots updated to 85 | ✅ DEPLOYED |
-| Frontend v7.2.1 | App.jsx, index.css, BrainChat.jsx v2.0 | ✅ DARK THEME + ALERTS UI + PANEL CLICK-CLOSE |
+**main.py shrank from 1,233 → ~175 lines.**
 
-### Session 17 Changes (Mar 3 — Frontend Bug Fixes)
-| Fix | File | SHA | Details |
-|-----|------|-----|---------|
-| Text visibility: Auto Quote | RLQuoteHelper.jsx | 98b15a3 | Added `color: '#111'` to auto-quote result div + `<strong>` on `#d4edda` light-green bg |
-| Text visibility: Bill To | CustomerAddress.jsx | 66eceac | Added `color: '#111'` to `<h4>` on `#e3f2fd` light-blue bg |
-| Panel click-to-close | App.jsx v7.2.1 | 9f8b620 | `onClick={handleContentAreaClick}` on `.content-area` + `e.stopPropagation()` on table rows |
+### Auth Wiring Applied
+`require_admin` (from `auth.py`) is now wired into:
+- ALL migration endpoints (destructive DB ops)
+- ALL B2BWave/Gmail/Square sync endpoints
+- ALL email parsing + payment detection endpoints
+- ALL checkout debug endpoints (`/debug/*`, `/checkout-status`)
 
-**Click-to-close behavior:** Clicking anywhere in the main content area (metrics, tabs, empty space) closes the detail panel. Clicking a table row uses `stopPropagation()` so it opens that order's detail instead. X button still works. CSS margin-right values already matched panel widths at all breakpoints (440px desktop, 380px tablet, 0 mobile).
+Public endpoints (no auth required):
+- `GET /` and `GET /health`
+- `GET /square/status`
+- `POST /webhook/b2bwave-order`
+- `GET/POST /checkout/*` (token-gated instead)
+- `GET /checkout-ui/*` (token-gated instead)
 
-### Deploy Verification (Mar 3)
-| Check | Result |
-|-------|--------|
-| GET / — lifecycle_engine | true ✅ |
-| GET / — email_engine | true ✅ |
-| GET / — ai_configure | true ✅ |
-| POST /add-lifecycle-fields | 6 fields + 2 indexes ✅ |
-| POST /backfill-lifecycle | 15 orders, 0 errors ✅ |
-| POST /alerts/check-all | 15 orders, 0 alerts, 0 errors ✅ |
-| GET /checkout-status — gmail_send_enabled | true ✅ |
+## 🏗️ Architecture Summary (Phase 5 Complete)
 
-### What's NEXT
-| # | Task | Effort | Details |
-|---|------|--------|---------|
-| 1 | Phase 5: Backend Hardening | Full session | See `SESSION_HANDOFF_PHASE5.md` |
-| 2 | Frontend end-to-end test | Manual | Bell badge, dropdown, resolve, dismiss, panel click-close |
-| 3 | Phase 7: Production Promotion | TBD | Sandbox → production deploy |
+```
+main.py (175 lines — app entry only)
+├── rl_quote_proxy.py     — /proxy/*
+├── alerts_routes.py      — /alerts/*
+├── startup_wiring.py     — lifecycle + email + ai_configure
+├── orders_routes.py      — /orders /shipments /warehouse-mapping /trusted-customers
+├── shipping_routes.py    — /rl /shippo /rta
+├── detection_routes.py   — /parse-email /detect-* /check-payment-alerts  [NEW Phase 5B]
+├── sync_routes.py        — /b2bwave/* /gmail/* /square/*                  [NEW Phase 5B]
+├── migration_routes.py   — /init-db /add-* /fix-* /debug/*               [NEW Phase 5B]
+└── checkout_routes.py    — /checkout* /checkout-ui/* /webhook/*           [NEW Phase 5B]
+```
 
----
+## What's Next
 
-## BATTLE PLAN STATUS
+### Phase 5C — Auth Wiring in orders_routes.py
+`require_admin` is NOT yet applied to destructive endpoints in `orders_routes.py`:
+- `DELETE /orders/{order_id}` — should require admin
+- `DELETE /trusted-customers/{customer_id}` — should require admin
+- `POST /trusted-customers` — should require admin (or at minimum log)
 
-| Phase | Focus | Status |
-|-------|-------|--------|
-| 1 | Cleanup | ✅ DONE |
-| 2 | RL-Quote Integration | ✅ DONE |
-| 3A | AlertsEngine | ✅ DEPLOYED |
-| 3B | Order Lifecycle | ✅ DEPLOYED |
-| 3C | Frontend Alerts | ✅ DONE |
-| 4 | Email Comms | ✅ DEPLOYED |
-| **5** | **Backend Hardening** | **NEXT — see SESSION_HANDOFF_PHASE5.md** |
-| 6 | Frontend Redesign | ✅ DONE v7.2.1 |
-| 7 | Production Promotion | NOT STARTED |
+**Steps:**
+1. Read `orders_routes.py`
+2. Add `from fastapi import Depends` + `from auth import require_admin`
+3. Add `_: bool = Depends(require_admin)` to the 3 endpoints above
+4. Push and test
 
----
+### Phase 7 — Production Promotion (Sandbox → Prod)
+After Phase 5C, sandbox is clean and ready. Promote to prod.
+- Set `ADMIN_API_KEY` env var on Render (change from default CFC2025)
+- Optionally set `ADMIN_JWT_SECRET` for rotating tokens
+- Update frontend `VITE_API_URL` to prod backend URL
+- Set `CORS_ORIGINS` on prod if different domain
 
-## KEY FILES
+### R+L Test Harness (Priority #4 globally)
+- `cfc-orders:tests/rl_test_harness.py` (sha 3fd9f79, 521 lines)
+- POC: 5 orders ±5% variance → scale to 100
+- William has real orders CSV ready
 
-| Repo | File | Purpose |
-|------|------|---------|
-| cfc-orders | main.py (3,101 lines) | App factory — all wiring live |
-| cfc-orders | startup_wiring.py | Wires lifecycle + email + AI config |
-| cfc-orders | alerts_engine.py | Phase 3A — 8 rules, tz bug fixed |
-| cfc-orders | lifecycle_engine.py / lifecycle_routes.py / lifecycle_wiring.py | Phase 3B |
-| cfc-orders | email_templates.py / email_sender.py / email_routes.py / email_wiring.py | Phase 4 |
-| cfc-orders | rl_quote_proxy.py | R+L proxy |
-| cfc-orders-frontend | src/App.jsx (v7.2.1) | Dark theme + alerts UI + panel click-close |
-| cfc-orders-frontend | src/components/RLQuoteHelper.jsx | RL quote helper — text color fixed |
-| cfc-orders-frontend | src/components/CustomerAddress.jsx | Bill To address — text color fixed |
-| cfc-orders-frontend | src/components/BrainChat.jsx (v2.0) | Brain chat |
-
-## REPOS
-- Backend: github.com/4wprince/CFCOrderBackend_Sandbox
-- Frontend: github.com/4wprince/CFCOrdersFrontend_Sandbox
-- RL quote: github.com/4wprince/rl-quote-sandbox (MCP alias rl-quote)
-
-## DEPLOY URLS
-- Backend: cfcorderbackend-sandbox.onrender.com
-- RL-quote: rl-quote-sandbox.onrender.com
-- Frontend: cfcordersfrontend-sandbox.vercel.app
-
-## LOCAL REPOS
-- C:\dev\CFCOrderBackend_Sandbox
-- C:\dev\CFCOrdersFrontend_Sandbox
+## Key Files (Phase 5 Complete)
+- `cfc-orders:main.py` (v6.1.0, ~175 lines)
+- `cfc-orders:auth.py` (built, HS256 JWT + API key fallback)
+- `cfc-orders:migration_routes.py` (sha 0edbfef)
+- `cfc-orders:sync_routes.py` (sha e7abb56)
+- `cfc-orders:detection_routes.py` (sha cb17813)
+- `cfc-orders:checkout_routes.py` (sha c9edfeb)
+- `cfc-orders-frontend:src/App.jsx` (v7.2.0 — no changes this session)
