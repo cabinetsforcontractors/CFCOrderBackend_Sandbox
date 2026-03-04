@@ -4,6 +4,7 @@ FastAPI router for Order CRUD, Shipment Management, Warehouse Mapping,
 Trusted Customers, and the is_trusted_customer helper.
 
 Phase 5: Extracted from main.py (was ~900 lines inline)
+Phase 5C: require_admin wired to all write/delete endpoints
 
 Mount in main.py with:
     from orders_routes import orders_router, is_trusted_customer
@@ -17,33 +18,34 @@ Endpoints:
     POST   /orders/{order_id}/comprehensive-summary — full AI summary
     POST   /orders/{order_id}/add-email-snippet     — store email snippet
     GET    /orders/{order_id}/supplier-sheet-data   — per-warehouse sheet data
-    PATCH  /orders/{order_id}                       — update order fields
-    PATCH  /orders/{order_id}/checkpoint            — mark checkpoint done
-    PATCH  /orders/{order_id}/set-status            — set full workflow status
+    PATCH  /orders/{order_id}                       — update order fields          [admin]
+    PATCH  /orders/{order_id}/checkpoint            — mark checkpoint done         [admin]
+    PATCH  /orders/{order_id}/set-status            — set full workflow status     [admin]
     GET    /orders/{order_id}/shipments             — per-order shipments
     GET    /orders/{order_id}/events                — event history
-    DELETE /orders/{order_id}                       — delete order
+    DELETE /orders/{order_id}                       — delete order                 [admin]
 
     GET    /shipments                               — all shipments (with order info)
-    PATCH  /shipments/{shipment_id}                 — update shipment fields
+    PATCH  /shipments/{shipment_id}                 — update shipment fields       [admin]
     GET    /shipments/{shipment_id}/rl-quote-data   — pre-fill RL quote data
 
     GET    /warehouse-mapping                       — all SKU→warehouse mappings
-    POST   /warehouse-mapping                       — add/update mapping
+    POST   /warehouse-mapping                       — add/update mapping           [admin]
 
     GET    /trusted-customers                       — list trusted customers
-    POST   /trusted-customers                       — add trusted customer
-    DELETE /trusted-customers/{customer_id}         — remove trusted customer
+    POST   /trusted-customers                       — add trusted customer         [admin]
+    DELETE /trusted-customers/{customer_id}         — remove trusted customer      [admin]
 """
 
 import json
 from datetime import datetime, timezone, timedelta
 from typing import Optional, List
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from psycopg2.extras import RealDictCursor
 
+from auth import require_admin
 from db_helpers import get_db
 from config import SUPPLIER_INFO, WAREHOUSE_ZIPS, OVERSIZED_KEYWORDS
 
@@ -418,8 +420,8 @@ def get_supplier_sheet_data(order_id: str):
 
 
 @orders_router.patch("/orders/{order_id}")
-def update_order(order_id: str, update: OrderUpdate):
-    """Update order fields."""
+def update_order(order_id: str, update: OrderUpdate, _: bool = Depends(require_admin)):
+    """Update order fields. [admin]"""
     with get_db() as conn:
         with conn.cursor() as cur:
             fields = []
@@ -446,8 +448,8 @@ def update_order(order_id: str, update: OrderUpdate):
 
 
 @orders_router.patch("/orders/{order_id}/checkpoint")
-def update_checkpoint(order_id: str, update: CheckpointUpdate):
-    """Update order checkpoint."""
+def update_checkpoint(order_id: str, update: CheckpointUpdate, _: bool = Depends(require_admin)):
+    """Update order checkpoint. [admin]"""
     valid_checkpoints = [
         "payment_link_sent",
         "payment_received",
@@ -520,10 +522,10 @@ def update_checkpoint(order_id: str, update: CheckpointUpdate):
 
 
 @orders_router.patch("/orders/{order_id}/set-status")
-def set_order_status(order_id: str, status: str, source: str = "web_ui"):
+def set_order_status(order_id: str, status: str, source: str = "web_ui", _: bool = Depends(require_admin)):
     """
     Set order to a specific status by resetting all checkpoints and setting appropriate ones.
-    Allows moving orders backwards in the workflow.
+    Allows moving orders backwards in the workflow. [admin]
     """
     status_checkpoints = {
         "needs_payment_link": {},
@@ -639,8 +641,8 @@ def get_order_events(order_id: str):
 
 
 @orders_router.delete("/orders/{order_id}")
-def delete_order(order_id: str):
-    """Delete an order and its shipments."""
+def delete_order(order_id: str, _: bool = Depends(require_admin)):
+    """Delete an order and its shipments. [admin]"""
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -711,8 +713,9 @@ def update_shipment(
     tracking_number: Optional[str] = None,
     quote_price: Optional[float] = None,
     customer_price: Optional[float] = None,
+    _: bool = Depends(require_admin),
 ):
-    """Update shipment fields."""
+    """Update shipment fields. [admin]"""
     valid_statuses = [
         "needs_order",
         "at_warehouse",
@@ -997,8 +1000,8 @@ def get_warehouse_mapping():
 
 
 @orders_router.post("/warehouse-mapping")
-def add_warehouse_mapping(mapping: WarehouseMappingUpdate):
-    """Add or update warehouse mapping."""
+def add_warehouse_mapping(mapping: WarehouseMappingUpdate, _: bool = Depends(require_admin)):
+    """Add or update warehouse mapping. [admin]"""
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -1037,8 +1040,9 @@ def add_trusted_customer(
     customer_name: str,
     company_name: Optional[str] = None,
     notes: Optional[str] = None,
+    _: bool = Depends(require_admin),
 ):
-    """Add a trusted customer."""
+    """Add a trusted customer. [admin]"""
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -1054,8 +1058,8 @@ def add_trusted_customer(
 
 
 @orders_router.delete("/trusted-customers/{customer_id}")
-def remove_trusted_customer(customer_id: int):
-    """Remove a trusted customer."""
+def remove_trusted_customer(customer_id: int, _: bool = Depends(require_admin)):
+    """Remove a trusted customer. [admin]"""
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
