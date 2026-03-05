@@ -1,5 +1,5 @@
 # Payments & Checkout — Session Handoff
-**Last Updated:** 2026-02-28
+**Last Updated:** 2026-03-05
 **Workstream:** CFC Orders
 **Status:** Paused — needs Render health check
 
@@ -21,13 +21,13 @@ Square payment link generation, payment sync/matching against orders, the checko
 - `CFCOrderBackend_Sandbox/config.py` — 155 lines, env vars including GMAIL_SEND_ENABLED
 
 ## Active Bugs / Blockers
-- GMAIL_SEND_ENABLED=false — customer tracking emails can't send
+- GMAIL_SEND_ENABLED=true ✅ live on Render (flipped Phase 4 deploy, Mar 4).
 - Email template for payment confirmations not built
 - No automated payment reminder system
-- Production checkout still uses old monolithic code
+- Phase 5B complete — main.py decomposed to ~175 lines; checkout_routes.py is now the separate module (~290 lines, sha c9edfeb).
 
 ## Next Steps
-1. Check Render health — confirm Square integration still connected
+1. Confirm Square integration still connected (services are on paid Render plan, do NOT cold start).
 2. Enable GMAIL_SEND_ENABLED and build payment confirmation template
 3. Build automated payment reminder workflow
 4. Promote checkout module to production
