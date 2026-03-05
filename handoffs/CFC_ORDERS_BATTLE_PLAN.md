@@ -12,7 +12,7 @@
 | Service | URL | Version | Status |
 |---------|-----|---------|--------|
 | Sandbox Backend | cfcorderbackend-sandbox.onrender.com | v6.0.0 | ✅ Running |
-| Sandbox Frontend | cfcordersfrontend-sandbox.vercel.app | **v7.2.1** | ✅ Live — dark theme + alerts + panel click-close |
+| Sandbox Frontend | cfcordersfrontend-sandbox.vercel.app | **v7.2.2** | ✅ Live — dark theme + alerts + panel click-close |
 | rl-quote-sandbox | rl-quote-sandbox.onrender.com | v0.1.0 | ✅ Running |
 | Production Backend | (Render) | ~v5.7 | ✅ Running but 2mo behind |
 | Production Frontend | cfc-orders-frontend.vercel.app | ~v5.10 | ✅ Running |
@@ -64,8 +64,8 @@ Clock starts from last customer email activity.
 | Phase 3B: Lifecycle | ✅ DEPLOYED | DB migrated, 15 orders backfilled |
 | Phase 3C: Frontend Alerts | ✅ DONE | Bell badge, dropdown, resolve/dismiss |
 | Phase 4: Email Comms | ✅ DEPLOYED | GMAIL_SEND_ENABLED=true live |
-| **Phase 5: Backend Hardening** | **NEXT** | main.py decomposition, JWT, CORS |
-| Phase 6: Frontend Redesign | ✅ DONE | App.jsx v7.2.1 live |
+| **Phase 5: Backend Hardening** | **🔥 IN PROGRESS — 5B DONE (main.py → ~175 lines), 5C DONE (api.js sha 0c498013). NEXT: sandbox verify → rate limiting (5B slowapi) → JWT rotation.** | main.py decomposition, JWT, CORS |
+| Phase 6: Frontend Redesign | ✅ DONE | App.jsx v7.2.2 live |
 | Phase 7: Production Promotion | NOT STARTED | After Phase 5 complete |
 
 ---
@@ -73,11 +73,7 @@ Clock starts from last customer email activity.
 ## PHASE 5: BACKEND HARDENING (NEXT)
 
 ### Code Quality
-1. **main.py decomposition** — 3,101 lines → route modules:
-   - order_routes.py, shipment_routes.py, sync_routes.py, checkout_routes.py, admin_routes.py
-   - lifecycle_routes.py ✅ already separate
-   - alerts_routes.py ✅ already separate
-   - email_routes.py ✅ already separate
+1. **main.py decomposition** — ✅ DONE (Phase 5B). main.py = ~175 lines. All route modules live: detection_routes.py, sync_routes.py, migration_routes.py, checkout_routes.py. See SESSION_HANDOFF_ORDERS.md for full module list.
 2. Config consolidation — checkout.py and gmail_sync.py bypass config.py
 3. Fix bare except clauses (2 found)
 4. Update Anthropic API version in ai_summary.py
@@ -85,7 +81,7 @@ Clock starts from last customer email activity.
 6. Delete unused frontend components — StatusBar.jsx, OrderCard.jsx, OrderComments.jsx
 
 ### Security
-7. JWT authentication — replace hardcoded password
+7. JWT authentication — api.js centralized ✅ (sha 0c498013). Token rotation = one-line change in api.js. Full JWT (Option C) is next.
 8. CORS whitelist — only sandbox/production frontends
 9. Rate limiting on public endpoints
 10. API key middleware for service-to-service calls
