@@ -47,17 +47,9 @@ main.py (175 lines — app entry only)
 
 ## What's Next
 
-### Phase 5C — Auth Wiring in orders_routes.py
-`require_admin` is NOT yet applied to destructive endpoints in `orders_routes.py`:
-- `DELETE /orders/{order_id}` — should require admin
-- `DELETE /trusted-customers/{customer_id}` — should require admin
-- `POST /trusted-customers` — should require admin (or at minimum log)
-
-**Steps:**
-1. Read `orders_routes.py`
-2. Add `from fastapi import Depends` + `from auth import require_admin`
-3. Add `_: bool = Depends(require_admin)` to the 3 endpoints above
-4. Push and test
+### Phase 5C — ✅ DONE (2026-03-04) — api.js centralized all 29 fetch() calls (sha 0c498013)
+Phase 5 remaining: sandbox verify (PATCH /orders/{id} + Run Check + Reactivate Order
+→ 200 not 401) → rate limiting 5B (slowapi) → JWT rotation (Option C).
 
 ### Phase 7 — Production Promotion (Sandbox → Prod)
 After Phase 5C, sandbox is clean and ready. Promote to prod.
@@ -78,4 +70,5 @@ After Phase 5C, sandbox is clean and ready. Promote to prod.
 - `cfc-orders:sync_routes.py` (sha e7abb56)
 - `cfc-orders:detection_routes.py` (sha cb17813)
 - `cfc-orders:checkout_routes.py` (sha c9edfeb)
-- `cfc-orders-frontend:src/App.jsx` (v7.2.0 — no changes this session)
+- `cfc-orders-frontend:src/App.jsx` (v7.2.2 — no changes this session)
+- `cfc-orders-frontend:src/api.js` | 0c498013 | Phase 5C — apiFetch() wrapper, injects X-Admin-Token: CFC2025 on every request. Token rotation = one-line change here.
