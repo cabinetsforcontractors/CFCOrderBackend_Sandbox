@@ -1,7 +1,7 @@
 # SESSION HANDOFF — Phase 4: Customer Communications
 **Date:** 2026-03-02 (Session 2)
 **Session:** Phase 4 Wiring Complete
-**Status:** ALL CODE COMMITTED — only 3 paste-ins to main.py remain
+**Status:** ✅ FULLY DEPLOYED — all code committed, main.py wired, GMAIL_SEND_ENABLED=true live.
 
 ---
 
@@ -26,41 +26,11 @@
 
 ---
 
-## WHAT STILL NEEDS DOING
-
-### 1. main.py — 3 Small Paste-Ins (THE ONLY REMAINING CODE WORK)
-
-**CHANGE 1** — After line ~152 (`print("[STARTUP] alerts_routes module not found..."`):
-```python
-
-# Email Communications (Phase 4)
-from email_wiring import wire_email
-```
-
-**CHANGE 2** — After line ~174 (`app.include_router(alerts_router)`):
-```python
-
-# Phase 4: Email Communications
-EMAIL_ROUTES_LOADED = wire_email(app)
-```
-
-**CHANGE 3** — In root() function, after `"alerts_engine": {"enabled": ALERTS_ENGINE_LOADED}`:
-```python
-        ,
-        "email_communications": {
-            "enabled": EMAIL_ROUTES_LOADED if 'EMAIL_ROUTES_LOADED' in dir() else False
-        }
-```
-
-### 2. Render Environment Variable
-Flip `GMAIL_SEND_ENABLED=true` on Render sandbox backend to enable actual sending.
-
-### 3. Testing
-1. Hit `GET /email/templates` — verify 9 templates return
-2. Hit `POST /orders/{real_order}/preview-email` with `{"template_id": "payment_link"}` — verify real order data injection
-3. Hit `POST /orders/{real_order}/send-email` with `{"template_id": "payment_link", "to_email": "4wprince@gmail.com"}` — verify email arrives
-4. Hit `GET /orders/{real_order}/email-history` — verify event logged
-5. Test frontend: click 📧 Email Customer on an order card, verify panel opens
+## DEPLOYMENT STATUS — COMPLETE
+- main.py paste-ins: ✅ DONE
+- GMAIL_SEND_ENABLED: ✅ flipped to true on Render
+- Email routes live: GET /email/templates, POST /orders/{id}/send-email, etc.
+- Phase 5 (backend hardening) is the current active sprint.
 
 ---
 
@@ -88,20 +58,7 @@ Flip `GMAIL_SEND_ENABLED=true` on Render sandbox backend to enable actual sendin
 ## NEXT SESSION STARTER PROMPT
 
 ```
-CFC Orders — Phase 4 Final Wiring & Test
-Read cfc-orders:handoffs/SESSION_HANDOFF_EMAIL.md for full context.
-
-Phase 4 is 99% done. All backend + frontend code is committed.
-
-Only remaining work:
-1. Apply 3 small paste-ins to main.py (documented in handoff)
-2. Push main.py
-3. Flip GMAIL_SEND_ENABLED=true on Render
-4. Test endpoints + frontend email button
-
-After Phase 4 is confirmed working, next up is Phase 5 (backend hardening: main.py decomposition, JWT auth, CORS lockdown).
-
-Key files:
-- cfc-orders: email_wiring.py, email_templates.py, email_sender.py, email_routes.py, main.py
-- cfc-orders-frontend: src/components/EmailPanel.jsx, src/components/OrderCard.jsx, src/App.jsx
+Phase 4 is complete. Phase 5 Backend Hardening is the current sprint.
+See cfc-orders:handoffs/SESSION_HANDOFF_ORDERS.md and SESSION_HANDOFF_PHASE5C.md
+for current state.
 ```
