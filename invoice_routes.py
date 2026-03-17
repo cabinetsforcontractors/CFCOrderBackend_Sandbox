@@ -78,7 +78,7 @@ _MIGRATION_STATEMENTS = [
         created_at      TIMESTAMPTZ DEFAULT NOW()
     )
     """,
-    "CREATE INDEX IF NOT EXISTS idx_invoice_att_email   ON invoice_attachments(email_id)",
+    "CREATE INDEX IF NOT EXISTS idx_invoice_att_email    ON invoice_attachments(email_id)",
     "CREATE INDEX IF NOT EXISTS idx_invoice_att_unparsed ON invoice_attachments(parsed) WHERE NOT parsed",
 
     # invoice_line_items
@@ -114,9 +114,6 @@ _MIGRATION_STATEMENTS = [
         updated_at      TIMESTAMPTZ DEFAULT NOW()
     )
     """,
-
-    # Seed supplier_pricing_rules — each INSERT is a separate statement
-    # to avoid semicolons inside string literals causing split issues
     "INSERT INTO supplier_pricing_rules (supplier, method, notes) VALUES ('GHI', 'net', 'Use invoice price directly') ON CONFLICT (supplier) DO NOTHING",
     "INSERT INTO supplier_pricing_rules (supplier, method, notes) VALUES ('LI', 'wsf_floor', 'WSP baseline - floor for all LI door lines') ON CONFLICT (supplier) DO NOTHING",
     "INSERT INTO supplier_pricing_rules (supplier, method, notes) VALUES ('Go Bravura', 'net', 'COGS = box+door combined - each door line has own SKU list and own COGS') ON CONFLICT (supplier) DO NOTHING",
@@ -163,13 +160,17 @@ _token_expires: Optional[datetime] = None
 
 
 def _get_access_token() -> str:
+    """Refresh and return a Gmail API access token. Raises RuntimeError on failure."""
     global _access_token, _token_expires
     if _access_token and _token_expires and datetime.now(timezone.utc) < _token_expires:
         return _access_token
     if not (GMAIL_CLIENT_ID and GMAIL_CLIENT_SECRET and GMAIL_REFRESH_TOKEN):
-        raise RuntimeError("Gmail not configured — GMAIL_CLIENT_ID/SECRET/REFRESH_TOKEN missing")
+        raise RuntimeError(
+            "Gmail not configured — GMAIL_CLIENT_ID / GMAIL_CLIENT_SECRET / "
+            "GMAIL_REFRESH_TOKEN env vars not set on cfc-orders"
+        )
 
-    import urllib.request, urllib.parse
+    import urllib.request, urllib.parse, urllib.error
     data = urllib.parse.urlencode({
         "client_id":     GMAIL_CLIENT_ID,
         "client_secret": GMAIL_CLIENT_SECRET,
@@ -177,18 +178,37 @@ def _get_access_token() -> str:
         "grant_type":    "refresh_token",
     }).encode()
     req = urllib.request.Request("https://oauth2.googleapis.com/token", data=data)
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        payload = json.loads(resp.read().decode())
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            payload = json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        body = ""
+        try:
+            body = e.read().decode()
+        except Exception:
+            pass
+        raise RuntimeError(
+            f"Gmail token refresh failed (HTTP {e.code}): {body[:200]}"
+        )
+    except Exception as e:
+        raise RuntimeError(f"Gmail token refresh error: {e}")
+
     if "access_token" not in payload:
-        raise RuntimeError(f"Token refresh failed: {payload}")
+        raise RuntimeError(f"Gmail token refresh: no access_token in response: {payload}")
+
     _access_token  = payload["access_token"]
     _token_expires = datetime.now(timezone.utc) + timedelta(minutes=50)
     return _access_token
 
 
 def _gmail_get(endpoint: str, params: dict = None) -> Optional[dict]:
+    """Make an authenticated GET to the Gmail API. Returns None on any failure."""
     import urllib.request, urllib.parse, urllib.error
-    token = _get_access_token()
+    try:
+        token = _get_access_token()
+    except RuntimeError as e:
+        print(f"[WS17:invoice] Auth error: {e}")
+        raise   # re-raise so caller can surface the real error message
     url = f"https://gmail.googleapis.com/gmail/v1/users/me/{endpoint}"
     if params:
         url += "?" + urllib.parse.urlencode(params)
@@ -198,11 +218,16 @@ def _gmail_get(endpoint: str, params: dict = None) -> Optional[dict]:
         with urllib.request.urlopen(req, timeout=30) as resp:
             return json.loads(resp.read().decode())
     except urllib.error.HTTPError as e:
-        print(f"[WS17:invoice] HTTP {e.code} on {endpoint}: {e.read().decode()[:200]}")
-        return None
+        body = ""
+        try:
+            body = e.read().decode()
+        except Exception:
+            pass
+        print(f"[WS17:invoice] Gmail API HTTP {e.code} on /{endpoint}: {body[:300]}")
+        raise RuntimeError(f"Gmail API error {e.code} on /{endpoint}: {body[:200]}")
     except Exception as e:
-        print(f"[WS17:invoice] Request error: {e}")
-        return None
+        print(f"[WS17:invoice] Gmail API request error: {e}")
+        raise RuntimeError(f"Gmail API request error: {e}")
 
 # =============================================================================
 # SUPPLIER CONFIG (confirmed 2026-03-17)
@@ -372,6 +397,7 @@ def _fetch_message(message_id: str) -> Optional[dict]:
 
 
 def _search_messages(query: str, max_results: int = 100) -> list:
+    """Search Gmail. Returns empty list (not raises) if query returns no results."""
     results, page_token = [], None
     while True:
         params = {"q": query, "maxResults": min(max_results - len(results), 100)}
@@ -421,31 +447,55 @@ def _insert_attachment(conn, email_id, filename, file_type):
 def _run_phase1(days_back: int = 30, hours_back: int = None, dry_run: bool = False) -> dict:
     time_filter = f"newer_than:{hours_back}h" if hours_back else f"newer_than:{days_back}d"
 
+    # Gmail search query rules:
+    # - No trailing @ in -from: operator (invalid syntax -> 400)
+    # - Quoted phrases use plain double quotes; no backslash escaping needed
+    # - Each query is independently safe to fail (try/except per query)
     queries = [
+        # Confirmed supplier addresses — domain-based and full Gmail addresses
         ("supplier_addresses",
-         f"{time_filter} (from:ghicabinets.com OR from:dlcabinetry.com OR "
-         f"from:roccabinetry.com OR from:gobravura.com OR from:cabinetstonellc.com OR "
-         f"from:durastoneusa.com OR from:cabinetrydistribution@gmail.com OR "
-         f"from:lovetoucheskitchen@gmail.com OR from:cfcinvoices42@gmail.com)"),
+         f"{time_filter} "
+         f"(from:ghicabinets.com OR from:dlcabinetry.com OR from:roccabinetry.com "
+         f"OR from:gobravura.com OR from:cabinetstonellc.com OR from:durastoneusa.com "
+         f"OR from:cabinetrydistribution@gmail.com OR from:lovetoucheskitchen@gmail.com "
+         f"OR from:cfcinvoices42@gmail.com)"),
+
+        # Keyword catch-all for any supplier not yet in address list
+        # Note: -from:squareup.com only, no trailing-@ operators
         ("keyword_subject",
-         f"{time_filter} (subject:invoice OR subject:\"order confirmation\" OR "
-         f"subject:\"sales order\" OR subject:\"re: po\" OR subject:\"invoice attached\") "
-         f"-from:squareup.com -from:noreply@"),
+         f"{time_filter} "
+         f"(subject:invoice OR subject:\"order confirmation\" OR subject:\"sales order\" "
+         f"OR subject:\"re: po\" OR subject:\"invoice attached\") "
+         f"-from:squareup.com"),
+
+        # Internal forwarded order emails (Type 4 — INTERNAL_ORDER)
         ("internal_fwd",
          f"{time_filter} subject:\"fwd: order\""),
     ]
 
     seen: set = set()
     all_msgs: list = []
-    for qname, q in queries:
-        msgs = _search_messages(q)
-        new  = [m for m in msgs if m["id"] not in seen]
-        print(f"[WS17:scan] {qname}: {len(msgs)} found, {len(new)} new")
-        for m in new:
-            seen.add(m["id"])
-            all_msgs.append(m)
+    query_errors: list = []
 
-    print(f"[WS17:scan] Total: {len(all_msgs)}")
+    for qname, q in queries:
+        try:
+            msgs = _search_messages(q)
+            new  = [m for m in msgs if m["id"] not in seen]
+            print(f"[WS17:scan] {qname}: {len(msgs)} found, {len(new)} new")
+            for m in new:
+                seen.add(m["id"])
+                all_msgs.append(m)
+        except RuntimeError as e:
+            # Log query error but continue with remaining queries
+            msg = f"{qname}: {e}"
+            print(f"[WS17:scan] QUERY ERROR — {msg}")
+            query_errors.append(msg)
+
+    print(f"[WS17:scan] Total unique messages: {len(all_msgs)}")
+
+    if not all_msgs and query_errors:
+        # All queries failed — surface the first error clearly
+        raise RuntimeError(f"All Gmail queries failed. First error: {query_errors[0]}")
 
     counts = {
         "INVOICE": 0, "ORDER_CONFIRMATION": 0, "ESTIMATE": 0,
@@ -473,7 +523,8 @@ def _run_phase1(days_back: int = 30, hours_back: int = None, dry_run: bool = Fal
                 })
             except Exception as e:
                 counts["errors"] += 1
-        return {"dry_run": True, "counts": counts, "results": results}
+        return {"dry_run": True, "counts": counts, "results": results,
+                "query_errors": query_errors}
 
     with get_db() as conn:
         for m in all_msgs:
@@ -515,7 +566,7 @@ def _run_phase1(days_back: int = 30, hours_back: int = None, dry_run: bool = Fal
                 print(f"[WS17:scan] ERROR on {m['id']}: {e}")
                 counts["errors"] += 1
 
-    return {"dry_run": False, "counts": counts}
+    return {"dry_run": False, "counts": counts, "query_errors": query_errors}
 
 # =============================================================================
 # ROUTES
@@ -525,8 +576,7 @@ def _run_phase1(days_back: int = 30, hours_back: int = None, dry_run: bool = Fal
 def migrate(admin=require_admin):
     """
     Run WS17 DB migration — creates 5 invoice intelligence tables.
-    Each SQL statement is a separate Python string — no semicolon splitting,
-    no risk of breaking on semicolons inside string literals.
+    Each SQL statement is a separate Python string — no semicolon splitting.
     Safe to run multiple times.
     """
     executed = 0
