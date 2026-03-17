@@ -1,6 +1,7 @@
 """
-CFC Order Workflow Backend - v6.1.0
+CFC Order Workflow Backend - v6.2.0
 Phase 5B Backend Hardening: main.py fully decomposed into route modules.
+WS17: invoice_routes added (/invoice/scan /status /emails /flags).
 
 Module Map:
   orders_routes.py    — /orders /shipments /warehouse-mapping /trusted-customers
@@ -10,6 +11,7 @@ Module Map:
   sync_routes.py      — /b2bwave/* /gmail/* /square/*
   migration_routes.py — /init-db /add-* /fix-* /debug/orders-columns
   checkout_routes.py  — /checkout* /checkout-ui/* /webhook/*
+  invoice_routes.py   — /invoice/scan /invoice/status /invoice/emails /invoice/flags
   auth.py             — require_admin Depends() — X-Admin-Token or Bearer JWT
 
 CORS: whitelist only (no wildcard). Add origins via CORS_ORIGINS env var.
@@ -104,6 +106,14 @@ from sync_routes import sync_router
 from migration_routes import migration_router
 from checkout_routes import checkout_router
 
+# WS17: Invoice Intelligence (/invoice/*)
+try:
+    from invoice_routes import invoice_router
+    INVOICE_LOADED = True
+except ImportError:
+    INVOICE_LOADED = False
+    print("[STARTUP] invoice_routes module not found, Invoice Intelligence disabled")
+
 
 # =============================================================================
 # FASTAPI APP  — CORS whitelist (no wildcard)
@@ -115,13 +125,14 @@ _extra_origins = [o.strip() for o in _cors_env.split(",") if o.strip()] if _cors
 ALLOWED_ORIGINS = [
     "https://cfc-orders-frontend.vercel.app",
     "https://cfcorderbackend-sandbox.onrender.com",   # checkout self-reference
+    "https://brain-backend-6uhk.onrender.com",        # Brain UI proxy
     "http://localhost:3000",
     "http://localhost:5173",
     "http://127.0.0.1:3000",
     "http://127.0.0.1:5173",
 ] + _extra_origins
 
-app = FastAPI(title="CFC Order Workflow", version="6.1.0")
+app = FastAPI(title="CFC Order Workflow", version="6.2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -150,6 +161,9 @@ app.include_router(sync_router)               # Phase 5B: /b2bwave/* /gmail/* /s
 app.include_router(migration_router)          # Phase 5B: /init-db /add-* /fix-* /debug/orders-columns
 app.include_router(checkout_router)           # Phase 5B: /checkout* /checkout-ui/* /webhook/*
 
+if INVOICE_LOADED:
+    app.include_router(invoice_router)        # WS17: /invoice/scan /status /emails /flags
+
 
 # =============================================================================
 # STARTUP EVENT
@@ -173,7 +187,7 @@ def root():
     return {
         "status": "ok",
         "service": "CFC Order Workflow",
-        "version": "6.1.0",
+        "version": "6.2.0",
         "auto_sync": get_sync_status(),
         "gmail_sync": {"enabled": gmail_configured()},
         "square_sync": {"enabled": square_configured()},
@@ -181,12 +195,13 @@ def root():
         "lifecycle_engine": {"enabled": WIRING_STATUS.get("lifecycle", False)},
         "email_engine": {"enabled": WIRING_STATUS.get("email", False)},
         "ai_configure": {"enabled": WIRING_STATUS.get("ai_configure", False)},
+        "invoice_intel": {"enabled": INVOICE_LOADED},
     }
 
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": "6.1.0"}
+    return {"status": "ok", "version": "6.2.0"}
 
 
 # =============================================================================
