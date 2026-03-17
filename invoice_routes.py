@@ -38,118 +38,117 @@ from auth import require_admin
 invoice_router = APIRouter(prefix="/invoice", tags=["WS17 Invoice Intelligence"])
 
 # =============================================================================
-# MIGRATION SQL — embedded so no GitHub fetch needed from cfc-orders
-# Mirrors migrations/004_invoice_intel_tables.sql in cfc-data repo exactly.
-# Safe to run multiple times (IF NOT EXISTS / ON CONFLICT DO NOTHING everywhere).
+# MIGRATION STATEMENTS
+# Each statement is a separate string — avoids semicolon-splitting bugs
+# that occur when SQL string literals contain semicolons.
+# Safe to run multiple times (IF NOT EXISTS / ON CONFLICT DO NOTHING).
 # =============================================================================
 
-_MIGRATION_SQL = """
-CREATE TABLE IF NOT EXISTS invoice_emails (
-    id                  SERIAL PRIMARY KEY,
-    gmail_message_id    VARCHAR(255) UNIQUE NOT NULL,
-    supplier            VARCHAR(100),
-    sender_email        VARCHAR(255),
-    subject             TEXT,
-    received_at         TIMESTAMPTZ,
-    email_type          VARCHAR(50),
-    classifier_score    INTEGER,
-    has_attachment      BOOLEAN DEFAULT FALSE,
-    processed           BOOLEAN DEFAULT FALSE,
-    created_at          TIMESTAMPTZ DEFAULT NOW()
-);
+_MIGRATION_STATEMENTS = [
+    # invoice_emails
+    """
+    CREATE TABLE IF NOT EXISTS invoice_emails (
+        id                  SERIAL PRIMARY KEY,
+        gmail_message_id    VARCHAR(255) UNIQUE NOT NULL,
+        supplier            VARCHAR(100),
+        sender_email        VARCHAR(255),
+        subject             TEXT,
+        received_at         TIMESTAMPTZ,
+        email_type          VARCHAR(50),
+        classifier_score    INTEGER,
+        has_attachment      BOOLEAN DEFAULT FALSE,
+        processed           BOOLEAN DEFAULT FALSE,
+        created_at          TIMESTAMPTZ DEFAULT NOW()
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_invoice_emails_type     ON invoice_emails(email_type)",
+    "CREATE INDEX IF NOT EXISTS idx_invoice_emails_supplier ON invoice_emails(supplier)",
+    "CREATE INDEX IF NOT EXISTS idx_invoice_emails_received ON invoice_emails(received_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_invoice_emails_unproc   ON invoice_emails(processed) WHERE NOT processed",
 
-CREATE INDEX IF NOT EXISTS idx_invoice_emails_type
-    ON invoice_emails(email_type);
-CREATE INDEX IF NOT EXISTS idx_invoice_emails_supplier
-    ON invoice_emails(supplier);
-CREATE INDEX IF NOT EXISTS idx_invoice_emails_received
-    ON invoice_emails(received_at DESC);
-CREATE INDEX IF NOT EXISTS idx_invoice_emails_unprocessed
-    ON invoice_emails(processed) WHERE NOT processed;
+    # invoice_attachments
+    """
+    CREATE TABLE IF NOT EXISTS invoice_attachments (
+        id              SERIAL PRIMARY KEY,
+        email_id        INTEGER REFERENCES invoice_emails(id) ON DELETE CASCADE,
+        filename        VARCHAR(255),
+        file_type       VARCHAR(20),
+        storage_path    TEXT,
+        parsed          BOOLEAN DEFAULT FALSE,
+        created_at      TIMESTAMPTZ DEFAULT NOW()
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_invoice_att_email   ON invoice_attachments(email_id)",
+    "CREATE INDEX IF NOT EXISTS idx_invoice_att_unparsed ON invoice_attachments(parsed) WHERE NOT parsed",
 
-CREATE TABLE IF NOT EXISTS invoice_attachments (
-    id              SERIAL PRIMARY KEY,
-    email_id        INTEGER REFERENCES invoice_emails(id) ON DELETE CASCADE,
-    filename        VARCHAR(255),
-    file_type       VARCHAR(20),
-    storage_path    TEXT,
-    parsed          BOOLEAN DEFAULT FALSE,
-    created_at      TIMESTAMPTZ DEFAULT NOW()
-);
+    # invoice_line_items
+    """
+    CREATE TABLE IF NOT EXISTS invoice_line_items (
+        id                  SERIAL PRIMARY KEY,
+        attachment_id       INTEGER REFERENCES invoice_attachments(id) ON DELETE CASCADE,
+        supplier            VARCHAR(100) NOT NULL,
+        invoice_number      VARCHAR(100),
+        invoice_date        DATE,
+        sku                 VARCHAR(100),
+        description         TEXT,
+        quantity            NUMERIC(10,2),
+        unit_price_raw      NUMERIC(12,4),
+        net_cost            NUMERIC(12,4),
+        pricing_method      VARCHAR(50),
+        created_at          TIMESTAMPTZ DEFAULT NOW()
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_invoice_li_supplier ON invoice_line_items(supplier)",
+    "CREATE INDEX IF NOT EXISTS idx_invoice_li_sku      ON invoice_line_items(sku)",
+    "CREATE INDEX IF NOT EXISTS idx_invoice_li_att      ON invoice_line_items(attachment_id)",
 
-CREATE INDEX IF NOT EXISTS idx_invoice_att_email
-    ON invoice_attachments(email_id);
-CREATE INDEX IF NOT EXISTS idx_invoice_att_unparsed
-    ON invoice_attachments(parsed) WHERE NOT parsed;
+    # supplier_pricing_rules
+    """
+    CREATE TABLE IF NOT EXISTS supplier_pricing_rules (
+        id              SERIAL PRIMARY KEY,
+        supplier        VARCHAR(100) UNIQUE NOT NULL,
+        method          VARCHAR(50) NOT NULL,
+        multiplier      NUMERIC(6,4),
+        discount_pct    NUMERIC(6,4),
+        notes           TEXT,
+        updated_at      TIMESTAMPTZ DEFAULT NOW()
+    )
+    """,
 
-CREATE TABLE IF NOT EXISTS invoice_line_items (
-    id                  SERIAL PRIMARY KEY,
-    attachment_id       INTEGER REFERENCES invoice_attachments(id) ON DELETE CASCADE,
-    supplier            VARCHAR(100) NOT NULL,
-    invoice_number      VARCHAR(100),
-    invoice_date        DATE,
-    sku                 VARCHAR(100),
-    description         TEXT,
-    quantity            NUMERIC(10,2),
-    unit_price_raw      NUMERIC(12,4),
-    net_cost            NUMERIC(12,4),
-    pricing_method      VARCHAR(50),
-    created_at          TIMESTAMPTZ DEFAULT NOW()
-);
+    # Seed supplier_pricing_rules — each INSERT is a separate statement
+    # to avoid semicolons inside string literals causing split issues
+    "INSERT INTO supplier_pricing_rules (supplier, method, notes) VALUES ('GHI', 'net', 'Use invoice price directly') ON CONFLICT (supplier) DO NOTHING",
+    "INSERT INTO supplier_pricing_rules (supplier, method, notes) VALUES ('LI', 'wsf_floor', 'WSP baseline - floor for all LI door lines') ON CONFLICT (supplier) DO NOTHING",
+    "INSERT INTO supplier_pricing_rules (supplier, method, notes) VALUES ('Go Bravura', 'net', 'COGS = box+door combined - each door line has own SKU list and own COGS') ON CONFLICT (supplier) DO NOTHING",
+    "INSERT INTO supplier_pricing_rules (supplier, method, notes) VALUES ('DL', 'tbd', 'SKUs in body HTML no PDF - verify pricing from first invoice') ON CONFLICT (supplier) DO NOTHING",
+    "INSERT INTO supplier_pricing_rules (supplier, method, notes) VALUES ('ROC', 'tbd', 'Verify pricing method from first invoice') ON CONFLICT (supplier) DO NOTHING",
+    "INSERT INTO supplier_pricing_rules (supplier, method, notes) VALUES ('Cabinet & Stone', 'tbd', 'Verify pricing method from first invoice') ON CONFLICT (supplier) DO NOTHING",
+    "INSERT INTO supplier_pricing_rules (supplier, method, notes) VALUES ('DuraStone', 'tbd', 'Verify pricing method from first invoice') ON CONFLICT (supplier) DO NOTHING",
+    "INSERT INTO supplier_pricing_rules (supplier, method, notes) VALUES ('Love-Milestone', 'tbd', 'Verify pricing method from first invoice') ON CONFLICT (supplier) DO NOTHING",
 
-CREATE INDEX IF NOT EXISTS idx_invoice_li_supplier
-    ON invoice_line_items(supplier);
-CREATE INDEX IF NOT EXISTS idx_invoice_li_sku
-    ON invoice_line_items(sku);
-CREATE INDEX IF NOT EXISTS idx_invoice_li_att
-    ON invoice_line_items(attachment_id);
-
-CREATE TABLE IF NOT EXISTS supplier_pricing_rules (
-    id              SERIAL PRIMARY KEY,
-    supplier        VARCHAR(100) UNIQUE NOT NULL,
-    method          VARCHAR(50) NOT NULL,
-    multiplier      NUMERIC(6,4),
-    discount_pct    NUMERIC(6,4),
-    notes           TEXT,
-    updated_at      TIMESTAMPTZ DEFAULT NOW()
-);
-
-INSERT INTO supplier_pricing_rules (supplier, method, notes) VALUES
-    ('GHI',             'net',       'Use invoice price directly'),
-    ('LI',              'wsf_floor', 'WSP baseline — floor for all LI door lines'),
-    ('Go Bravura',      'net',       'COGS = box+door combined; each door line has own SKU list + own COGS'),
-    ('DL',              'tbd',       'SKUs in body HTML, no PDF — verify pricing method from first invoice'),
-    ('ROC',             'tbd',       'Verify pricing method from first invoice'),
-    ('Cabinet & Stone', 'tbd',       'Verify pricing method from first invoice'),
-    ('DuraStone',       'tbd',       'Verify pricing method from first invoice'),
-    ('Love-Milestone',  'tbd',       'Verify pricing method from first invoice')
-ON CONFLICT (supplier) DO NOTHING;
-
-CREATE TABLE IF NOT EXISTS invoice_flags (
-    id              SERIAL PRIMARY KEY,
-    line_item_id    INTEGER REFERENCES invoice_line_items(id) ON DELETE CASCADE,
-    flag_type       VARCHAR(50) NOT NULL,
-    sku             VARCHAR(100),
-    supplier        VARCHAR(100),
-    invoice_number  VARCHAR(100),
-    order_id        VARCHAR(100),
-    master_cogs     NUMERIC(12,4),
-    invoice_cost    NUMERIC(12,4),
-    delta_pct       NUMERIC(8,4),
-    detail          TEXT,
-    resolved        BOOLEAN DEFAULT FALSE,
-    created_at      TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_flags_unresolved
-    ON invoice_flags(resolved) WHERE NOT resolved;
-CREATE INDEX IF NOT EXISTS idx_flags_supplier
-    ON invoice_flags(supplier);
-CREATE INDEX IF NOT EXISTS idx_flags_sku
-    ON invoice_flags(sku);
-CREATE INDEX IF NOT EXISTS idx_flags_type
-    ON invoice_flags(flag_type);
-"""
+    # invoice_flags
+    """
+    CREATE TABLE IF NOT EXISTS invoice_flags (
+        id              SERIAL PRIMARY KEY,
+        line_item_id    INTEGER REFERENCES invoice_line_items(id) ON DELETE CASCADE,
+        flag_type       VARCHAR(50) NOT NULL,
+        sku             VARCHAR(100),
+        supplier        VARCHAR(100),
+        invoice_number  VARCHAR(100),
+        order_id        VARCHAR(100),
+        master_cogs     NUMERIC(12,4),
+        invoice_cost    NUMERIC(12,4),
+        delta_pct       NUMERIC(8,4),
+        detail          TEXT,
+        resolved        BOOLEAN DEFAULT FALSE,
+        created_at      TIMESTAMPTZ DEFAULT NOW()
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_flags_unresolved ON invoice_flags(resolved) WHERE NOT resolved",
+    "CREATE INDEX IF NOT EXISTS idx_flags_supplier   ON invoice_flags(supplier)",
+    "CREATE INDEX IF NOT EXISTS idx_flags_sku        ON invoice_flags(sku)",
+    "CREATE INDEX IF NOT EXISTS idx_flags_type       ON invoice_flags(flag_type)",
+]
 
 # =============================================================================
 # GMAIL AUTH — reuses same env vars as gmail_sync.py
@@ -274,7 +273,6 @@ def _classify(msg: dict) -> tuple:
     has_pdf   = any(a["type"] == "pdf"  for a in atts)
     has_excel = any(a["type"] == "xlsx" for a in atts)
 
-    # Hard excludes
     if ("square.link" in body or "squareup.com/pay" in body or
             "noreply@messaging.squareup.com" in sender):
         return "PAYMENT_LINK", 0
@@ -304,7 +302,6 @@ def _classify(msg: dict) -> tuple:
     if "intuit" in body or "quickbooks" in body:                          score += 1
     if "cfcinvoices42" in sender:                                         score += 1
 
-    # Negative
     if "sample" in subject:           score -= 2
     if re.search(r'\$[0-9]\b', body): score -= 1
     if "unsubscribe" in body:         score -= 1
@@ -478,7 +475,6 @@ def _run_phase1(days_back: int = 30, hours_back: int = None, dry_run: bool = Fal
                 counts["errors"] += 1
         return {"dry_run": True, "counts": counts, "results": results}
 
-    # Live run — write to DB
     with get_db() as conn:
         for m in all_msgs:
             try:
@@ -529,25 +525,24 @@ def _run_phase1(days_back: int = 30, hours_back: int = None, dry_run: bool = Fal
 def migrate(admin=require_admin):
     """
     Run WS17 DB migration — creates 5 invoice intelligence tables.
-    SQL is embedded directly (no GitHub fetch needed).
-    Safe to run multiple times — IF NOT EXISTS / ON CONFLICT DO NOTHING everywhere.
+    Each SQL statement is a separate Python string — no semicolon splitting,
+    no risk of breaking on semicolons inside string literals.
+    Safe to run multiple times.
     """
+    executed = 0
     try:
         with get_db() as conn:
-            conn.autocommit = False
             with conn.cursor() as cur:
-                # Split on semicolons and run each statement individually
-                # to avoid issues with psycopg2 multi-statement execution
-                statements = [s.strip() for s in _MIGRATION_SQL.split(";") if s.strip()]
-                for stmt in statements:
+                for stmt in _MIGRATION_STATEMENTS:
                     cur.execute(stmt)
+                    executed += 1
             conn.commit()
     except Exception as e:
-        raise HTTPException(500, f"Migration failed: {e}")
+        raise HTTPException(500, f"Migration failed at statement {executed + 1}: {e}")
 
     return {
         "status": "ok",
-        "message": "WS17 migration complete — 5 tables created/verified",
+        "message": f"WS17 migration complete — {executed} statements executed",
         "tables": [
             "invoice_emails",
             "invoice_attachments",
@@ -555,7 +550,7 @@ def migrate(admin=require_admin):
             "supplier_pricing_rules",
             "invoice_flags",
         ],
-        "note": "Safe to run again — all statements use IF NOT EXISTS / ON CONFLICT DO NOTHING",
+        "note": "Safe to run again — IF NOT EXISTS / ON CONFLICT DO NOTHING everywhere",
     }
 
 
@@ -566,10 +561,7 @@ def scan(
     dry_run: bool = Query(False, description="Classify without writing to DB"),
     admin=require_admin,
 ):
-    """
-    Run Phase 1 Gmail scan — classify supplier invoice emails and write to DB.
-    dry_run=true prints results without writing.
-    """
+    """Run Phase 1 Gmail scan — classify supplier invoice emails and write to DB."""
     try:
         result = _run_phase1(days_back=days, hours_back=hours, dry_run=dry_run)
         return {"status": "ok", **result}
