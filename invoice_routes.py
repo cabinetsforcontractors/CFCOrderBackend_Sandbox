@@ -9,6 +9,7 @@ Execution lives here because cfc-orders already has:
   - psycopg2, httpx, BeautifulSoup (or graceful fallback)
 
 Endpoints:
+  POST /invoice/migrate — one-shot DB migration (tables for WS17)
   POST /invoice/scan    — run Phase 1 Gmail scan (classify + write to DB)
   GET  /invoice/status  — summary counts per email_type + flag counts
   GET  /invoice/flags   — unresolved invoice_flags rows
@@ -35,6 +36,120 @@ from db_helpers import get_db
 from auth import require_admin
 
 invoice_router = APIRouter(prefix="/invoice", tags=["WS17 Invoice Intelligence"])
+
+# =============================================================================
+# MIGRATION SQL — embedded so no GitHub fetch needed from cfc-orders
+# Mirrors migrations/004_invoice_intel_tables.sql in cfc-data repo exactly.
+# Safe to run multiple times (IF NOT EXISTS / ON CONFLICT DO NOTHING everywhere).
+# =============================================================================
+
+_MIGRATION_SQL = """
+CREATE TABLE IF NOT EXISTS invoice_emails (
+    id                  SERIAL PRIMARY KEY,
+    gmail_message_id    VARCHAR(255) UNIQUE NOT NULL,
+    supplier            VARCHAR(100),
+    sender_email        VARCHAR(255),
+    subject             TEXT,
+    received_at         TIMESTAMPTZ,
+    email_type          VARCHAR(50),
+    classifier_score    INTEGER,
+    has_attachment      BOOLEAN DEFAULT FALSE,
+    processed           BOOLEAN DEFAULT FALSE,
+    created_at          TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_invoice_emails_type
+    ON invoice_emails(email_type);
+CREATE INDEX IF NOT EXISTS idx_invoice_emails_supplier
+    ON invoice_emails(supplier);
+CREATE INDEX IF NOT EXISTS idx_invoice_emails_received
+    ON invoice_emails(received_at DESC);
+CREATE INDEX IF NOT EXISTS idx_invoice_emails_unprocessed
+    ON invoice_emails(processed) WHERE NOT processed;
+
+CREATE TABLE IF NOT EXISTS invoice_attachments (
+    id              SERIAL PRIMARY KEY,
+    email_id        INTEGER REFERENCES invoice_emails(id) ON DELETE CASCADE,
+    filename        VARCHAR(255),
+    file_type       VARCHAR(20),
+    storage_path    TEXT,
+    parsed          BOOLEAN DEFAULT FALSE,
+    created_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_invoice_att_email
+    ON invoice_attachments(email_id);
+CREATE INDEX IF NOT EXISTS idx_invoice_att_unparsed
+    ON invoice_attachments(parsed) WHERE NOT parsed;
+
+CREATE TABLE IF NOT EXISTS invoice_line_items (
+    id                  SERIAL PRIMARY KEY,
+    attachment_id       INTEGER REFERENCES invoice_attachments(id) ON DELETE CASCADE,
+    supplier            VARCHAR(100) NOT NULL,
+    invoice_number      VARCHAR(100),
+    invoice_date        DATE,
+    sku                 VARCHAR(100),
+    description         TEXT,
+    quantity            NUMERIC(10,2),
+    unit_price_raw      NUMERIC(12,4),
+    net_cost            NUMERIC(12,4),
+    pricing_method      VARCHAR(50),
+    created_at          TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_invoice_li_supplier
+    ON invoice_line_items(supplier);
+CREATE INDEX IF NOT EXISTS idx_invoice_li_sku
+    ON invoice_line_items(sku);
+CREATE INDEX IF NOT EXISTS idx_invoice_li_att
+    ON invoice_line_items(attachment_id);
+
+CREATE TABLE IF NOT EXISTS supplier_pricing_rules (
+    id              SERIAL PRIMARY KEY,
+    supplier        VARCHAR(100) UNIQUE NOT NULL,
+    method          VARCHAR(50) NOT NULL,
+    multiplier      NUMERIC(6,4),
+    discount_pct    NUMERIC(6,4),
+    notes           TEXT,
+    updated_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+INSERT INTO supplier_pricing_rules (supplier, method, notes) VALUES
+    ('GHI',             'net',       'Use invoice price directly'),
+    ('LI',              'wsf_floor', 'WSP baseline — floor for all LI door lines'),
+    ('Go Bravura',      'net',       'COGS = box+door combined; each door line has own SKU list + own COGS'),
+    ('DL',              'tbd',       'SKUs in body HTML, no PDF — verify pricing method from first invoice'),
+    ('ROC',             'tbd',       'Verify pricing method from first invoice'),
+    ('Cabinet & Stone', 'tbd',       'Verify pricing method from first invoice'),
+    ('DuraStone',       'tbd',       'Verify pricing method from first invoice'),
+    ('Love-Milestone',  'tbd',       'Verify pricing method from first invoice')
+ON CONFLICT (supplier) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS invoice_flags (
+    id              SERIAL PRIMARY KEY,
+    line_item_id    INTEGER REFERENCES invoice_line_items(id) ON DELETE CASCADE,
+    flag_type       VARCHAR(50) NOT NULL,
+    sku             VARCHAR(100),
+    supplier        VARCHAR(100),
+    invoice_number  VARCHAR(100),
+    order_id        VARCHAR(100),
+    master_cogs     NUMERIC(12,4),
+    invoice_cost    NUMERIC(12,4),
+    delta_pct       NUMERIC(8,4),
+    detail          TEXT,
+    resolved        BOOLEAN DEFAULT FALSE,
+    created_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_flags_unresolved
+    ON invoice_flags(resolved) WHERE NOT resolved;
+CREATE INDEX IF NOT EXISTS idx_flags_supplier
+    ON invoice_flags(supplier);
+CREATE INDEX IF NOT EXISTS idx_flags_sku
+    ON invoice_flags(sku);
+CREATE INDEX IF NOT EXISTS idx_flags_type
+    ON invoice_flags(flag_type);
+"""
 
 # =============================================================================
 # GMAIL AUTH — reuses same env vars as gmail_sync.py
@@ -190,10 +305,10 @@ def _classify(msg: dict) -> tuple:
     if "cfcinvoices42" in sender:                                         score += 1
 
     # Negative
-    if "sample" in subject:        score -= 2
+    if "sample" in subject:           score -= 2
     if re.search(r'\$[0-9]\b', body): score -= 1
-    if "unsubscribe" in body:      score -= 1
-    if "free shipping" in body:    score -= 1
+    if "unsubscribe" in body:         score -= 1
+    if "free shipping" in body:       score -= 1
 
     if score >= SCORE_INVOICE:            return "INVOICE", score
     if score >= SCORE_ORDER_CONFIRMATION: return "ORDER_CONFIRMATION", score
@@ -410,6 +525,40 @@ def _run_phase1(days_back: int = 30, hours_back: int = None, dry_run: bool = Fal
 # ROUTES
 # =============================================================================
 
+@invoice_router.post("/migrate")
+def migrate(admin=require_admin):
+    """
+    Run WS17 DB migration — creates 5 invoice intelligence tables.
+    SQL is embedded directly (no GitHub fetch needed).
+    Safe to run multiple times — IF NOT EXISTS / ON CONFLICT DO NOTHING everywhere.
+    """
+    try:
+        with get_db() as conn:
+            conn.autocommit = False
+            with conn.cursor() as cur:
+                # Split on semicolons and run each statement individually
+                # to avoid issues with psycopg2 multi-statement execution
+                statements = [s.strip() for s in _MIGRATION_SQL.split(";") if s.strip()]
+                for stmt in statements:
+                    cur.execute(stmt)
+            conn.commit()
+    except Exception as e:
+        raise HTTPException(500, f"Migration failed: {e}")
+
+    return {
+        "status": "ok",
+        "message": "WS17 migration complete — 5 tables created/verified",
+        "tables": [
+            "invoice_emails",
+            "invoice_attachments",
+            "invoice_line_items",
+            "supplier_pricing_rules",
+            "invoice_flags",
+        ],
+        "note": "Safe to run again — all statements use IF NOT EXISTS / ON CONFLICT DO NOTHING",
+    }
+
+
 @invoice_router.post("/scan")
 def scan(
     days:    int  = Query(30,    description="Days back to scan"),
@@ -442,7 +591,7 @@ def status(admin=require_admin):
         """)
         if cur.fetchone()["count"] == 0:
             return {"status": "migration_not_run",
-                    "message": "Run POST /invoice/migrate or POST /ws17/migrate first"}
+                    "message": "Run POST /invoice/migrate first"}
 
         cur.execute("SELECT email_type, COUNT(*) cnt FROM invoice_emails GROUP BY email_type ORDER BY cnt DESC")
         email_counts = {r["email_type"]: r["cnt"] for r in cur.fetchall()}
