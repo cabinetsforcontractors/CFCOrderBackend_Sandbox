@@ -1,97 +1,98 @@
 # WS6 — CFC Orders Session Handoff
-**Date:** 2026-03-07
-**Task:** Scope audit — discovered 9 missing lanes from chat history; all added to WS6_CFC_ORDERS.md
+**Date:** 2026-03-19
+**Task:** Phase 7 — Production Promotion (Option A execution)
 
 ---
 
-## ✅ What Was Done This Session
+## What Was Done (Phase 5 + Phase 7 Step 1)
 
-### Scope Audit Complete
-Searched 15+ past chats (Dec 2025 → Mar 2026) and found 9 lanes built or spec'd but never tracked in WS6. All added to `brain:workstreams/WS6_CFC_ORDERS.md` (sha c51bb0ba).
+### Phase 5 Hardening — COMPLETE
+- Phase 5B: slowapi rate limiting wired (rate_limit.py sha 10e3aa8f, main.py sha 46d7c63a, routes/audit.py sha a6a70380)
+- Phase 5C: PATCH /orders/{id}, POST /orders/{id}/run-check, POST /orders/{id}/reactivate all return 200 with CFC2025
+- Sandbox smoke test: all green (rate_limiting.enabled:true in GET /)
 
-| Lane | Priority | Finding |
-|------|----------|---------|
-| A — Shippo Small Package | P1 | BUILT + LIVE — untested in checkout flow |
-| B — Payment Automation Triggers | P1 | Partial — triggers not wired |
-| C — RTA Weight Integration | P2 | ⛔ BLOCKED on WS5 canonical master |
-| D — Production Promotion (Phase 7) | P2 | Full checklist written — Option A chosen |
-| E — Warehouse Portal | P3 | Spec'd, not built |
-| F — Customer Tracking Portal | P3 | Spec'd, not built |
-| G — Multi-Warehouse Unified Checkout | P3 | Design agreed, not built |
-| H — DYLT / CA Carrier | P4 | Noted, not started |
-| I — Frontend UX Bugs | P4 | 2 bugs noted, may already be fixed |
+### Phase 7 Step 1 — DONE
+- api.js updated: CFC2025 to CFC2026
+- SHA: 68019f6e (cfc-orders-frontend repo, branch main)
 
-### Key Decisions Made This Session
-| Decision | Detail |
-|----------|--------|
-| Phase 7 strategy | **Option A** — repoint production Render/Vercel to sandbox repos (`4wprince/CFCOrderBackend_Sandbox` + `4wprince/CFCOrdersFrontend_Sandbox`) |
-| Production API key | **`ADMIN_API_KEY=CFC2026`** — set on Render prod; update `api.js` X-Admin-Token from CFC2025 → CFC2026 before frontend deploy |
-| Lane C blocked | Depends on WS5 canonical master cleanup — do not touch until WS5 signals complete |
+### PS5 curl rule (permanent)
+Write JSON to body.json with Set-Content, pass with -d "@body.json". Never use backslash-quote escapes in PowerShell 5.x.
 
 ---
 
-## What's Next (priority order)
+## Next Steps — Phase 7 Steps 2 through 6
 
-1. **Phase 5 sandbox verify** — PATCH /orders/{id}, Run Check POST, Reactivate POST all → 200 not 401
-2. **Phase 5B** — rate limiting (slowapi)
-3. **R+L end-to-end test** — /rl/test → /rl/order/{id}/shipments → /rl/order/{id}/create-bol → PDF/labels → pickup → track → notify → emails
-4. **Phase 7 (Lane D)** — execute Option A checklist in dedicated session after Phase 5 complete
-5. **Lane A (Shippo)** — test full checkout flow for a <70 lb order
-6. **Lane B (Payment Automation)** — verify all 4 triggers fire in sandbox
+Step 2 — Render: env var and repoint backend
+- Render → cfc-backend-b83s.onrender.com
+- Add env var: ADMIN_API_KEY=CFC2026
+- Verify: GMAIL_SEND_ENABLED=true, RL_QUOTE_SANDBOX_URL=https://rl-quote-sandbox.onrender.com, ANTHROPIC_API_KEY, SHIPPO_API_KEY, RL_CARRIERS_API_KEY
+- Settings → Build and Deploy → change repo to 4wprince/CFCOrderBackend_Sandbox, branch main
+- Manual deploy → watch logs
+
+Step 3 — Vercel: repoint frontend
+- cfc-orders-frontend → Settings → Git → disconnect → reconnect to 4wprince/CFCOrdersFrontend_Sandbox, branch main
+- Deploy → watch logs
+
+Step 4 — Smoke test
+- curl https://cfc-backend-b83s.onrender.com/health (expect v6.0.0)
+- curl https://cfc-backend-b83s.onrender.com/ (expect auto_sync.running=true)
+- Set-Content -Path body.json -Value '{"current_status":"pending"}'
+- curl -X PATCH .../orders/YOUR_ID -H "Content-Type: application/json" -H "X-Admin-Token: CFC2026" -d "@body.json" (expect 200)
+
+Step 5 — DB migrations (idempotent)
+- POST /add-rl-fields with X-Admin-Token: CFC2026
+- POST /add-weight-column with X-Admin-Token: CFC2026
+- POST /backfill-lifecycle with X-Admin-Token: CFC2026
+- SKIP /add-lifecycle-fields — already done
+
+Step 6 — Full smoke checklist
+- /health → v6.0.0
+- /alerts/summary → 200
+- /lifecycle/summary → 200
+- /proxy/health → 200
+- /email/templates → 200
+- /orders → loads correctly
+- / → auto_sync.running=true
+- Frontend loads at cfc-orders-frontend.vercel.app — dark theme, all 8 tabs, alerts bell
+
+Step 7 — R+L end-to-end (after Step 6 passes)
+- /rl/test → /rl/order/{id}/shipments → /rl/order/{id}/create-bol → PDF/labels → pickup → track → notify → emails
 
 ---
 
-## Phase Completion Summary
+## Phase Status
 
-| Phase | Status | Key Deliverables |
-|-------|--------|----------------|
-| Phase 1: Cleanup | ✅ DONE | Dead files removed |
-| Phase 2: RL-Quote | ✅ DONE | MCP v2.6, 12 warehouses, LI zip fixed |
-| Phase 3A: AlertsEngine | ✅ DEPLOYED | 8 rules, tz bug fixed |
-| Phase 3B: Lifecycle | ✅ DEPLOYED | DB migrated, 15 orders backfilled, 7/14/21 days |
-| Phase 3C: Frontend Alerts | ✅ DONE | Bell badge, dropdown, resolve/dismiss |
-| Phase 4: Email Comms | ✅ DEPLOYED | 9 templates, GMAIL_SEND_ENABLED=true |
-| Phase 5B: Decompose main.py | ✅ DONE | 1,233 → 175 lines, 4 route modules |
-| Phase 5C: api.js | ✅ DONE | All 29 fetch() centralized, sha 0c498013 |
-| Phase 5 Hardening | 🔥 IN PROGRESS | Sandbox verify + rate limiting + JWT rotation |
-| Phase 6: Frontend Redesign | ✅ DONE | App.jsx v7.2.2 dark theme live |
-| Phase 7: Production Promotion | NOT STARTED | Option A + CFC2026 key — awaiting Phase 5 completion |
-
----
-
-## Architecture (Phase 5 Complete)
-
-```
-main.py (~175 lines — app init only)
-├── rl_quote_proxy.py     — /proxy/*
-├── alerts_routes.py      — /alerts/*
-├── startup_wiring.py     — lifecycle + email + ai_configure
-├── orders_routes.py      — /orders /shipments /warehouse-mapping /trusted-customers
-├── shipping_routes.py    — /rl /shippo /rta
-├── detection_routes.py   — /parse-email /detect-*          [Phase 5B]
-├── sync_routes.py        — /b2bwave/* /gmail/* /square/*   [Phase 5B]
-├── migration_routes.py   — /init-db /add-* /fix-* /debug/* [Phase 5B]
-└── checkout_routes.py    — /checkout* /webhook/*            [Phase 5B]
-```
+Phase 1 through 6: ALL DEPLOYED
+Phase 5 Hardening (5B rate limiting + 5C sandbox verify): DONE
+Phase 7 Step 1: DONE — api.js sha 68019f6e, token CFC2026
+Phase 7 Steps 2 through 6: NEXT
+Phase 7 Step 7 R+L e2e: AFTER Steps 2 through 6 complete
 
 ---
 
 ## Key Files
 
-| File | SHA | Purpose |
-|------|-----|---------|
-| `cfc-orders-frontend:src/api.js` | 0c498013 | apiFetch() — X-Admin-Token: CFC2025 (→ CFC2026 at Phase 7) |
-| `cfc-orders-frontend:src/App.jsx` | e020e868 | v7.2.2 dark theme |
-| `cfc-orders:main.py` | 93db3a0b | ~175 lines app init |
-| `cfc-orders:tests/rl_test_harness.py` | 3fd9f79 | 521 lines — R+L validation harness |
-| `cfc-orders:handoffs/SANDBOX_VS_PRODUCTION_AUDIT.md` | a139452f | Full sandbox vs prod gap analysis |
-| `brain:workstreams/WS6_CFC_ORDERS.md` | c51bb0ba | Full 14-lane WS6 workstream file |
+cfc-orders-frontend:src/api.js — sha 68019f6e — X-Admin-Token: CFC2026 (updated 2026-03-19)
+cfc-orders-frontend:src/App.jsx — sha e020e868 — v7.2.2 dark theme
+cfc-orders:main.py — sha 46d7c63a — v6.2.0 243 lines app init
+cfc-orders:rate_limit.py — sha 10e3aa8f — shared slowapi Limiter
+cfc-orders:routes/audit.py — sha a6a70380 — rate-limited audit log endpoints
+cfc-orders:orders_routes.py — sha 0ac6a8e3 — run-check + reactivate added
+cfc-orders:rl_carriers.py — sha b92c627a — 719 lines R+L API
+cfc-orders:handoffs/SANDBOX_VS_PRODUCTION_AUDIT.md — sha a139452f — Sandbox vs prod gap analysis
+brain:workstreams/WS6_CFC_ORDERS.md — sha 6ef6d4c6 — Full 14-lane workstream file (updated 2026-03-19)
 
 ---
 
 ## Critical Reminders
-- `api.js` token is still `CFC2025` in sandbox — must flip to `CFC2026` as part of Phase 7 Step 3, not before
-- Sandbox and production **share the same PostgreSQL DB** — migrations in sandbox hit production
-- Do NOT point real orders at production until Phase 7 checklist is complete
-- Lane C (RTA Weight) is blocked on WS5 — do not attempt to re-test until WS5 signals complete
-- Blind shipping via R+L = $106/shipment — rejected, do not revisit
+- Prod backend: cfc-backend-b83s.onrender.com. Prod frontend: cfc-orders-frontend.vercel.app.
+- Sandbox and prod share the SAME PostgreSQL DB — migrations hit production.
+- Set ADMIN_API_KEY=CFC2026 on Render BEFORE repointing the branch.
+- api.js already has CFC2026 (sha 68019f6e) — do NOT revert, frontend deploy picks it up automatically.
+- Rollback: Render or Vercel one-click revert. DB unchanged.
+- Lane C (RTA Weight) blocked on WS5 — do not touch until WS5 complete.
+- Blind R+L shipping = $106/shipment — rejected, do not revisit.
+- PS5 curl: NEVER inline quote escapes. Always Set-Content body.json then -d "@body.json".
+- Audit log is in-memory only — resets on Render restart.
+- Rate limiter keyed by IP — admin token does not bypass limits.
+- NEVER suggest cold start or wake-up — Render is PAID, servers never sleep.
