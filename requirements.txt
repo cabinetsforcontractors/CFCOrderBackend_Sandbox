@@ -1,5 +1,5 @@
-# CFC Order Workflow Backend v6.0.0
-# Updated 2026-03-02 — Phase 3 (lifecycle + alerts)
+# CFC Order Workflow Backend v6.2.0
+# Updated 2026-03-19 — Phase 5B (rate limiting)
 
 # Web framework
 fastapi
@@ -26,3 +26,7 @@ shippo
 
 # Square payments SDK
 squareup
+
+# Rate limiting
+slowapi
+limits
