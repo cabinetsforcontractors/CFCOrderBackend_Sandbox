@@ -3,6 +3,7 @@ CFC Order Workflow Backend - v6.2.0
 Phase 5B Backend Hardening: main.py fully decomposed into route modules.
 WS17: invoice_routes added (/invoice/scan /status /emails /flags).
 Phase 5 Hardening: routes/audit.py added (/audit/log POST + GET).
+Phase 5B Rate Limiting: slowapi wired (200/min global default).
 
 Module Map:
   orders_routes.py    — /orders /shipments /warehouse-mapping /trusted-customers
@@ -15,10 +16,12 @@ Module Map:
   invoice_routes.py   — /invoice/scan /invoice/status /invoice/emails /invoice/flags
   routes/audit.py     — /audit/log (POST write, GET read)
   auth.py             — require_admin Depends() — X-Admin-Token or Bearer JWT
+  rate_limit.py       — shared slowapi Limiter instance
 
 CORS: whitelist only (no wildcard). Add origins via CORS_ORIGINS env var.
 Auth: set ADMIN_JWT_SECRET on Render to enable signed JWTs.
       Generate token: python -c "from auth import create_admin_token; print(create_admin_token())"
+Rate limits: global default 200/minute per IP. Override per-route with @limiter.limit().
 """
 
 import os
@@ -26,6 +29,11 @@ from contextlib import contextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
+from rate_limit import limiter
 
 # =============================================================================
 # CONFIG + DB
@@ -126,7 +134,7 @@ except ImportError:
 
 
 # =============================================================================
-# FASTAPI APP  — CORS whitelist (no wildcard)
+# FASTAPI APP — CORS whitelist (no wildcard)
 # =============================================================================
 
 _cors_env = os.environ.get("CORS_ORIGINS", "")
@@ -143,6 +151,11 @@ ALLOWED_ORIGINS = [
 ] + _extra_origins
 
 app = FastAPI(title="CFC Order Workflow", version="6.2.0")
+
+# Phase 5B: Rate limiting — must be wired before routers are mounted
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(SlowAPIMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
@@ -210,6 +223,7 @@ def root():
         "ai_configure": {"enabled": WIRING_STATUS.get("ai_configure", False)},
         "invoice_intel": {"enabled": INVOICE_LOADED},
         "audit_log": {"enabled": AUDIT_LOADED},
+        "rate_limiting": {"enabled": True, "default_limit": "200/minute"},
     }
 
 
