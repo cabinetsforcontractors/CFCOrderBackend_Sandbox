@@ -257,8 +257,9 @@ def process_order_lifecycle(order_id: str, now: Optional[datetime] = None) -> Di
     with get_db() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             # Fetch order with lifecycle fields
+            # NOTE: current_status is on order_status table, not orders — do not select it here
             cur.execute("""
-                SELECT order_id, is_complete, current_status,
+                SELECT order_id, is_complete,
                        last_customer_email_at, lifecycle_status, 
                        lifecycle_deadline_at, lifecycle_reminders_sent,
                        email, customer_name, company_name, order_total, order_date
