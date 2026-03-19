@@ -142,6 +142,7 @@ _extra_origins = [o.strip() for o in _cors_env.split(",") if o.strip()] if _cors
 
 ALLOWED_ORIGINS = [
     "https://cfc-orders-frontend.vercel.app",
+    "https://cfcordersfrontend-sandbox.vercel.app",   # sandbox frontend
     "https://cfcorderbackend-sandbox.onrender.com",   # checkout self-reference
     "https://brain-backend-6uhk.onrender.com",        # Brain UI proxy
     "http://localhost:3000",
