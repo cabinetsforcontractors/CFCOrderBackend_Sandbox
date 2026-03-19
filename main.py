@@ -2,6 +2,7 @@
 CFC Order Workflow Backend - v6.2.0
 Phase 5B Backend Hardening: main.py fully decomposed into route modules.
 WS17: invoice_routes added (/invoice/scan /status /emails /flags).
+Phase 5 Hardening: routes/audit.py added (/audit/log POST + GET).
 
 Module Map:
   orders_routes.py    — /orders /shipments /warehouse-mapping /trusted-customers
@@ -12,6 +13,7 @@ Module Map:
   migration_routes.py — /init-db /add-* /fix-* /debug/orders-columns
   checkout_routes.py  — /checkout* /checkout-ui/* /webhook/*
   invoice_routes.py   — /invoice/scan /invoice/status /invoice/emails /invoice/flags
+  routes/audit.py     — /audit/log (POST write, GET read)
   auth.py             — require_admin Depends() — X-Admin-Token or Bearer JWT
 
 CORS: whitelist only (no wildcard). Add origins via CORS_ORIGINS env var.
@@ -114,6 +116,14 @@ except ImportError:
     INVOICE_LOADED = False
     print("[STARTUP] invoice_routes module not found, Invoice Intelligence disabled")
 
+# Phase 5 Hardening: Audit Log (/audit/log)
+try:
+    from routes.audit import audit_router
+    AUDIT_LOADED = True
+except ImportError:
+    AUDIT_LOADED = False
+    print("[STARTUP] routes.audit module not found, audit log disabled")
+
 
 # =============================================================================
 # FASTAPI APP  — CORS whitelist (no wildcard)
@@ -164,6 +174,9 @@ app.include_router(checkout_router)           # Phase 5B: /checkout* /checkout-u
 if INVOICE_LOADED:
     app.include_router(invoice_router)        # WS17: /invoice/scan /status /emails /flags
 
+if AUDIT_LOADED:
+    app.include_router(audit_router)          # Phase 5: /audit/log
+
 
 # =============================================================================
 # STARTUP EVENT
@@ -196,6 +209,7 @@ def root():
         "email_engine": {"enabled": WIRING_STATUS.get("email", False)},
         "ai_configure": {"enabled": WIRING_STATUS.get("ai_configure", False)},
         "invoice_intel": {"enabled": INVOICE_LOADED},
+        "audit_log": {"enabled": AUDIT_LOADED},
     }
 
 
