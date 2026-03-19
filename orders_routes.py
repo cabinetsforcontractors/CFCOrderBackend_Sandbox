@@ -5,6 +5,7 @@ Trusted Customers, and the is_trusted_customer helper.
 
 Phase 5: Extracted from main.py (was ~900 lines inline)
 Phase 5C: require_admin wired to all write/delete endpoints
+Phase 5C: run-check + reactivate endpoints added
 
 Mount in main.py with:
     from orders_routes import orders_router, is_trusted_customer
@@ -24,6 +25,8 @@ Endpoints:
     GET    /orders/{order_id}/shipments             — per-order shipments
     GET    /orders/{order_id}/events                — event history
     DELETE /orders/{order_id}                       — delete order                 [admin]
+    POST   /orders/{order_id}/run-check             — trigger lifecycle check      [admin]
+    POST   /orders/{order_id}/reactivate            — reactivate inactive order    [admin]
 
     GET    /shipments                               — all shipments (with order info)
     PATCH  /shipments/{shipment_id}                 — update shipment fields       [admin]
@@ -654,6 +657,48 @@ def delete_order(order_id: str, _: bool = Depends(require_admin)):
             cur.execute("DELETE FROM orders WHERE order_id = %s", (order_id,))
             conn.commit()
     return {"status": "ok", "message": f"Order {order_id} deleted"}
+
+
+@orders_router.post("/orders/{order_id}/run-check")
+def run_lifecycle_check(order_id: str, _: bool = Depends(require_admin)):
+    """
+    Trigger lifecycle check for a single order. [admin]
+    Evaluates inactivity thresholds and sends reminder emails if due.
+    Wraps lifecycle_engine.process_order_lifecycle().
+    """
+    try:
+        from lifecycle_engine import process_order_lifecycle
+        result = process_order_lifecycle(order_id)
+        if result.get("error"):
+            raise HTTPException(status_code=404, detail=result["error"])
+        return {"status": "ok", **result}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Lifecycle check error: {str(e)}")
+
+
+@orders_router.post("/orders/{order_id}/reactivate")
+def reactivate_order(order_id: str, _: bool = Depends(require_admin)):
+    """
+    Reactivate an inactive order — resets lifecycle clock to now. [admin]
+    Sets last_customer_email_at = NOW(), lifecycle_status = active,
+    clears all sent reminders so they re-fire from new baseline.
+    Wraps lifecycle_engine.extend_deadline().
+    """
+    try:
+        from lifecycle_engine import extend_deadline
+        result = extend_deadline(order_id)
+        if not result.get("success"):
+            raise HTTPException(
+                status_code=404,
+                detail=result.get("error", "Order not found"),
+            )
+        return {"status": "ok", **result}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Reactivate error: {str(e)}")
 
 
 # =============================================================================
