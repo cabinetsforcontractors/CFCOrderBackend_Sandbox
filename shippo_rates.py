@@ -13,10 +13,19 @@ from typing import Optional, Dict, List, Any
 SHIPPO_API_KEY = os.environ.get("SHIPPO_API_KEY", "").strip()
 SHIPPO_API_URL = "https://api.goshippo.com"
 
-# Default parcel dimensions for cabinets (can be overridden)
+# Default parcel dimensions for standard cabinet items
 DEFAULT_PARCEL = {
     "length": "24",
     "width": "18",
+    "height": "6",
+    "distance_unit": "in",
+    "mass_unit": "lb"
+}
+
+# Long parcel dimensions for trim items (96" molding, scribe, crown, etc.)
+LONG_PARCEL = {
+    "length": "98",
+    "width": "9",
     "height": "6",
     "distance_unit": "in",
     "mass_unit": "lb"
@@ -76,26 +85,15 @@ def get_shipping_rates(
     Returns:
         {
             'success': True/False,
-            'rates': [
-                {
-                    'provider': 'UPS',
-                    'service': 'Ground',
-                    'amount': 12.50,
-                    'currency': 'USD',
-                    'estimated_days': 5,
-                    'rate_id': 'xxx'  # For purchasing label later
-                },
-                ...
-            ],
-            'cheapest': {...},  # Cheapest rate
-            'fastest': {...},   # Fastest rate
+            'rates': [...],
+            'cheapest': {...},
+            'fastest': {...},
             'error': None or error message
         }
     """
     if not SHIPPO_API_KEY:
         return {'success': False, 'error': 'Shippo API not configured', 'rates': []}
 
-    # Build shipment request
     shipment_data = {
         "address_from": {
             "name": origin_name,
@@ -122,10 +120,10 @@ def get_shipping_rates(
             "weight": str(weight_lbs),
             "mass_unit": DEFAULT_PARCEL["mass_unit"]
         }],
-        "async": False  # Wait for rates synchronously
+        "async": False
     }
 
-    print(f"[SHIPPO] Getting rates: {origin_zip} -> {dest_zip}, {weight_lbs} lbs, length={length or DEFAULT_PARCEL['length']}\"")
+    print(f"[SHIPPO] Getting rates: {origin_zip} -> {dest_zip}, {weight_lbs} lbs, {length or DEFAULT_PARCEL['length']}\"x{width or DEFAULT_PARCEL['width']}\"x{height or DEFAULT_PARCEL['height']}\"")
 
     result = shippo_request("shipments", method="POST", data=shipment_data)
 
@@ -137,7 +135,6 @@ def get_shipping_rates(
         error_msg = messages[0].get('text') if messages else 'Unknown error'
         return {'success': False, 'error': error_msg, 'rates': []}
 
-    # Parse rates
     raw_rates = result.get('rates', [])
 
     if not raw_rates:
@@ -158,13 +155,9 @@ def get_shipping_rates(
         }
         rates.append(rate)
 
-    # Sort by price
     rates.sort(key=lambda x: x['amount'])
 
-    # Find cheapest and fastest
     cheapest = rates[0] if rates else None
-
-    # Find fastest (lowest estimated_days, excluding None)
     rates_with_days = [r for r in rates if r['estimated_days'] is not None]
     fastest = min(rates_with_days, key=lambda x: x['estimated_days']) if rates_with_days else cheapest
 
@@ -187,28 +180,45 @@ def get_simple_rate(
 ) -> Dict:
     """
     Simplified rate lookup using just ZIP codes and weight.
-    Uses placeholder addresses since Shippo requires full addresses.
 
-    Pass length (inches) for long items like trim molding (e.g. length=96).
-    If not provided, uses default parcel dimensions (24x18x6 in).
-
-    Returns the cheapest rate found.
+    If length >= 84 (long item like trim molding), uses LONG_PARCEL dims (98x9x6).
+    Otherwise uses DEFAULT_PARCEL dims (24x18x6).
     """
-    return get_shipping_rates(
-        origin_name="Warehouse",
-        origin_street="123 Warehouse St",
-        origin_city="City",
-        origin_state="FL",
-        origin_zip=origin_zip,
-        dest_name="Customer",
-        dest_street="456 Customer St",
-        dest_city="City",
-        dest_state="FL",
-        dest_zip=dest_zip,
-        weight_lbs=weight_lbs,
-        length=str(int(length)) if length else None,
-        is_residential=is_residential,
-    )
+    if length and length >= 84:
+        # Long parcel: 98x9x6 — hardcoded box for trim/molding items
+        return get_shipping_rates(
+            origin_name="Warehouse",
+            origin_street="123 Warehouse St",
+            origin_city="City",
+            origin_state="FL",
+            origin_zip=origin_zip,
+            dest_name="Customer",
+            dest_street="456 Customer St",
+            dest_city="City",
+            dest_state="FL",
+            dest_zip=dest_zip,
+            weight_lbs=weight_lbs,
+            length=LONG_PARCEL["length"],
+            width=LONG_PARCEL["width"],
+            height=LONG_PARCEL["height"],
+            is_residential=is_residential,
+        )
+    else:
+        # Standard parcel: 24x18x6
+        return get_shipping_rates(
+            origin_name="Warehouse",
+            origin_street="123 Warehouse St",
+            origin_city="City",
+            origin_state="FL",
+            origin_zip=origin_zip,
+            dest_name="Customer",
+            dest_street="456 Customer St",
+            dest_city="City",
+            dest_state="FL",
+            dest_zip=dest_zip,
+            weight_lbs=weight_lbs,
+            is_residential=is_residential,
+        )
 
 
 def purchase_label(rate_id: str) -> Dict:
@@ -260,17 +270,7 @@ def validate_address(
     zip_code: str,
     country: str = "US"
 ) -> Dict:
-    """
-    Validate an address using Shippo.
-
-    Returns:
-        {
-            'valid': True/False,
-            'is_residential': True/False,
-            'suggested_address': {...} or None,
-            'messages': [...]
-        }
-    """
+    """Validate an address using Shippo."""
     address_data = {
         "name": name,
         "street1": street,
@@ -304,12 +304,10 @@ def validate_address(
     }
 
 
-# Quick test function
 def test_shippo():
     """Test Shippo API connection and get sample rates"""
     print(f"[SHIPPO] Testing with API key: {SHIPPO_API_KEY[:10]}..." if SHIPPO_API_KEY else "[SHIPPO] No API key!")
 
-    # Test rate lookup: ROC warehouse (30071) to Lake Wales FL (33859)
     result = get_simple_rate(
         origin_zip="30071",
         dest_zip="33859",
