@@ -197,7 +197,12 @@ def debug_test_checkout(order_id: str, _: bool = Depends(require_admin)):
 
 @checkout_router.post("/webhook/b2bwave-order")
 def b2bwave_order_webhook(payload: dict):
-    """Webhook endpoint for B2BWave — triggered when an order is placed."""
+    """
+    Webhook endpoint for B2BWave — triggered when an order is placed.
+
+    Trigger 1: Generates checkout token, stores in DB, then emails the customer
+    their payment link using the payment_link template.
+    """
     if not CHECKOUT_ENABLED:
         return {"status": "error", "message": "Checkout module not enabled"}
 
@@ -208,8 +213,8 @@ def b2bwave_order_webhook(payload: dict):
         raise HTTPException(status_code=400, detail="Missing order_id")
 
     token = generate_checkout_token(str(order_id))
-    base = CHECKOUT_BASE_URL or ""
-    checkout_url = f"{base}/checkout?order={order_id}&token={token}"
+    base = CHECKOUT_BASE_URL or "https://cfcorderbackend-sandbox.onrender.com"
+    checkout_url = f"{base}/checkout-ui/{order_id}?token={token}"
 
     with get_db() as conn:
         with conn.cursor() as cur:
@@ -225,11 +230,34 @@ def b2bwave_order_webhook(payload: dict):
                 (str(order_id), customer_email, token),
             )
 
+    # Trigger 1: Email payment link to customer
+    email_result = None
+    if customer_email:
+        try:
+            from email_sender import send_order_email
+            order_data = fetch_b2bwave_order(str(order_id))
+            if order_data:
+                order_data['payment_link'] = checkout_url
+                email_result = send_order_email(
+                    order_id=str(order_id),
+                    template_id='payment_link',
+                    to_email=customer_email,
+                    order_data=order_data,
+                    triggered_by='b2bwave_webhook'
+                )
+                print(f"[WEBHOOK] Payment link email sent to {customer_email} for order {order_id}: {email_result.get('success')}")
+            else:
+                print(f"[WEBHOOK] Could not fetch B2BWave order {order_id} for email — skipping")
+        except Exception as e:
+            print(f"[WEBHOOK] Email send failed for order {order_id}: {e}")
+            email_result = {'success': False, 'error': str(e)}
+
     return {
         "status": "ok",
         "order_id": order_id,
         "checkout_url": checkout_url,
         "message": "Checkout link generated",
+        "email_sent": email_result.get('success') if email_result else False,
     }
 
 
