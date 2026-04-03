@@ -4,6 +4,7 @@ B2BWave order checkout with R+L shipping quotes and Square payment
 """
 
 import os
+import re
 import json
 import base64
 import urllib.request
@@ -135,7 +136,7 @@ SKU_WAREHOUSE_MAP = {
     # DL
     'RW': 'DL', 'UFS': 'DL', 'CS': 'DL', 'EBK': 'DL',
     # ROC
-    'EWD': 'ROC', 'EGD': 'ROC', 'EMB': 'ROC', 'BC': 'ROC', 
+    'EWD': 'ROC', 'EGD': 'ROC', 'EMB': 'ROC', 'BC': 'ROC',
     'DCW': 'ROC', 'DCT': 'ROC', 'DCH': 'ROC', 'NJGR': 'ROC', 'EJG': 'ROC',
     # GHI
     'APW': 'GHI', 'AKS': 'GHI', 'GRSH': 'GHI', 'NOR': 'GHI', 'SNS': 'GHI', 'SNW': 'GHI',
@@ -144,7 +145,7 @@ SKU_WAREHOUSE_MAP = {
     'WWW': 'Go Bravura', 'NDG': 'Go Bravura', 'NCC': 'Go Bravura', 'NBW': 'Go Bravura',
     'BX': 'Go Bravura', 'URW': 'Go Bravura',
     # Love-Milestone (preferred for these door styles, ARTISAN is fallback)
-    'HSS': 'Love', 'LGS': 'Love', 'LGSS': 'Love', 'DG': 'Love', 
+    'HSS': 'Love', 'LGS': 'Love', 'LGSS': 'Love', 'DG': 'Love',
     'EOK': 'Love', 'EWT': 'Love',
     # Cabinet & Stone (TX default, CA for MSCS)
     'BSN': 'Cabinet & Stone', 'SGCS': 'Cabinet & Stone', 'WOCS': 'Cabinet & Stone',
@@ -161,13 +162,44 @@ SKU_WAREHOUSE_MAP = {
 OVERSIZED_KEYWORDS = ['PANTRY', 'OVEN', 'TALL', '96', 'BROOM', 'LINEN', 'UTILITY']
 
 
+def detect_item_dimensions(name: str):
+    """
+    Parse product name to detect shipping dimension type.
+
+    Rules (checked in order):
+    1. X-separated numbers/dimensions → LTL truck shipping
+       Examples: "1.5X96X.75 Ref Filler", "24WX84HX3D Refrigerator Panel", "1.5WX96H Refrigerator Panel"
+    2. Single standalone number >= 84 → long package (small package, real length passed to Shippo)
+       Examples: "96 Inside Corner Molding", "96 Crown Molding", "96 Outside Corner Molding"
+    3. Otherwise → standard small package
+
+    Returns:
+        ('ltl', None)
+        ('long_package', length_inches)
+        ('standard', None)
+    """
+    name_upper = name.upper()
+
+    # X-separated dimensions → LTL (e.g. "1.5X96X.75", "24WX84HX3D", "1.5WX96H")
+    if re.search(r'\d+\.?\d*[WHD]?X\d+', name_upper):
+        return ('ltl', None)
+
+    # Single standalone number >= 84 → long package (Shippo with real length)
+    numbers = re.findall(r'\b(\d+(?:\.\d+)?)\b', name)
+    large_numbers = [float(n) for n in numbers if float(n) >= 84]
+    if len(large_numbers) == 1:
+        return ('long_package', int(large_numbers[0]))
+
+    return ('standard', None)
+
+
 def get_warehouse_for_sku(sku: str) -> Optional[str]:
     """Get warehouse code from SKU prefix"""
     # Extract prefix (first part before dash or numbers)
     prefix = sku.split('-')[0] if '-' in sku else sku
     # Remove trailing numbers
     prefix = ''.join(c for c in prefix if not c.isdigit()).upper()
-    
+
     return SKU_WAREHOUSE_MAP.get(prefix)
 
 
@@ -180,47 +212,47 @@ def is_oversized(product_name: str) -> bool:
 def group_items_by_warehouse(line_items: list) -> Dict[str, list]:
     """Group order items by their source warehouse"""
     groups = {}
-    
+
     for item in line_items:
         sku = item.get('sku', '') or item.get('product_sku', '')
         warehouse = get_warehouse_for_sku(sku)
-        
+
         if not warehouse:
             warehouse = 'UNKNOWN'
-        
+
         if warehouse not in groups:
             groups[warehouse] = []
-        
+
         groups[warehouse].append(item)
-    
+
     return groups
 
 
 def calculate_shipment_weight(items: list, order_total_weight: float = 0) -> float:
     """
     Calculate total weight for items.
-    
+
     Priority:
     1. Use B2BWave's total_weight if available (for single-warehouse orders)
     2. Fall back to estimate: 30 lbs per cabinet
-    
+
     Args:
         items: List of line items
         order_total_weight: B2BWave's total_weight for the order (0 if not available)
-    
+
     Returns:
         Weight in lbs (minimum 1 lb)
     """
     # If B2BWave provided a weight, use it
     if order_total_weight and order_total_weight > 0:
         return max(order_total_weight, 1)
-    
+
     # Fall back to estimate: 30 lbs per cabinet
     total_weight = 0
     for item in items:
         qty = item.get('quantity', 1)
         total_weight += qty * 30
-    
+
     return max(total_weight, 1)  # Minimum 1 lb (removed 100 lb minimum)
 
 
@@ -257,30 +289,28 @@ def get_shipping_quote(origin_zip: str, dest_zip: str, weight: float, is_residen
 # =============================================================================
 # SHIPPING METHOD SELECTION
 # =============================================================================
-# 
-# FUTURE RULES (placeholder for RTA database integration):
-# - Weight-based: under X lbs -> small package, over -> LTL
-# - Size-based: items over 96" length -> LTL or manual
-# - Product-based: trim items may need special handling
-# - Value-based: high-value orders may need signature/insurance
-# - Destination-based: some areas may have carrier restrictions
 #
-# For now: Simple 70 lb cutoff
-# Under 70 lbs -> Shippo (UPS/USPS small package)
-# 70 lbs and over -> R+L (LTL freight)
+# Rules (checked in order):
+# 1. Item name has X-separated dimensions (e.g. "24WX84HX3D") → LTL
+# 2. Weight >= 70 lbs → LTL
+# 3. Item name has single number >= 84 (e.g. "96 Crown Molding") → small_package, pass real length to Shippo
+# 4. Otherwise → small_package, standard dimensions
+#
+# Under 70 lbs → Shippo (UPS/USPS small package)
+# 70 lbs and over → R+L (LTL freight)
 # =============================================================================
 
 SMALL_PACKAGE_WEIGHT_LIMIT = 70  # lbs - orders under this use Shippo
 
 
-def get_shippo_quote(origin_zip: str, dest_zip: str, weight: float, is_residential: bool = True) -> Dict:
+def get_shippo_quote(origin_zip: str, dest_zip: str, weight: float, is_residential: bool = True, length: int = None) -> Dict:
     """Get small package shipping quote from Shippo API"""
     try:
         shippo_url = os.environ.get("SHIPPO_API_URL", "").strip()
         if not shippo_url:
             # Use our backend's Shippo endpoint
             shippo_url = os.environ.get("CFC_BACKEND_URL", "https://cfcorderbackend-sandbox.onrender.com").strip()
-        
+
         url = f"{shippo_url}/shippo/rates"
         params = {
             'origin_zip': origin_zip,
@@ -288,49 +318,64 @@ def get_shippo_quote(origin_zip: str, dest_zip: str, weight: float, is_residenti
             'weight_lbs': weight,
             'is_residential': 'true' if is_residential else 'false'
         }
-        
+        if length:
+            params['length'] = length
+
         query_string = '&'.join(f"{k}={v}" for k, v in params.items())
         full_url = f"{url}?{query_string}"
-        
+
         req = urllib.request.Request(full_url)
-        
+
         with urllib.request.urlopen(req, timeout=30) as resp:
             data = json.loads(resp.read().decode())
             return data
-            
+
     except Exception as e:
         return {'success': False, 'error': str(e)}
 
 
-def select_shipping_method(weight: float, items: list) -> str:
+def select_shipping_method(weight: float, items: list):
     """
-    Determine which shipping method to use based on weight and items.
-    
-    Returns: 'small_package' or 'ltl'
-    
-    FUTURE: Add rules for:
-    - Oversized items (96"+ length)
-    - Specific product codes
-    - Fragile items
-    - etc.
+    Determine shipping method and parcel length.
+
+    Returns: (method, parcel_length)
+        method: 'small_package' or 'ltl'
+        parcel_length: None for standard dims, int inches for long items
+
+    Rules (checked in order):
+    1. Item name has X-separated dimensions → LTL
+    2. Weight >= 70 lbs → LTL
+    3. Item name has single number >= 84 → small_package, use that length for Shippo
+    4. Otherwise → small_package, standard dims
     """
-    # Simple rule for now: 70 lb cutoff
-    if weight < SMALL_PACKAGE_WEIGHT_LIMIT:
-        return 'small_package'
-    else:
-        return 'ltl'
+    max_length = None
+    for item in items:
+        name = item.get('name', '')
+        dim_type, length = detect_item_dimensions(name)
+        if dim_type == 'ltl':
+            print(f"[CHECKOUT] LTL forced by item dimensions in name: {name!r}")
+            return ('ltl', None)
+        if dim_type == 'long_package':
+            if max_length is None or length > max_length:
+                max_length = length
+                print(f"[CHECKOUT] Long package detected ({length}\") from name: {name!r}")
+
+    if weight >= SMALL_PACKAGE_WEIGHT_LIMIT:
+        return ('ltl', None)
+
+    return ('small_package', max_length)
 
 
 def calculate_order_shipping(order_data: dict, dest_address: dict) -> Dict:
     """
     Calculate shipping for an entire order, grouped by warehouse.
     Uses Shippo for small packages (<70 lbs) and R+L for LTL (70+ lbs).
-    
+
     Weight Priority:
     1. RTA database (SKU-level weights) - most accurate for split orders
     2. B2BWave total_weight - good for single warehouse orders
     3. Estimate at 30 lbs per item - fallback
-    
+
     Returns:
         {
             'shipments': [
@@ -343,10 +388,10 @@ def calculate_order_shipping(order_data: dict, dest_address: dict) -> Dict:
         }
     """
     line_items = order_data.get('line_items', []) or order_data.get('products', [])
-    
+
     # Get B2BWave's total weight (if available) as fallback
     b2bwave_total_weight = order_data.get('total_weight', 0)
-    
+
     # Try to get weights from RTA database
     rta_weight_info = None
     try:
@@ -355,24 +400,24 @@ def calculate_order_shipping(order_data: dict, dest_address: dict) -> Dict:
         print(f"[CHECKOUT] RTA weight lookup: {rta_weight_info.get('total_weight')} lbs, long_pallet: {rta_weight_info.get('has_long_pallet_item')}")
     except Exception as e:
         print(f"[CHECKOUT] RTA database not available: {e}")
-    
+
     # Group by warehouse
     warehouse_groups = group_items_by_warehouse(line_items)
-    
+
     # Determine if residential
     is_residential = True  # Default to residential, could be overridden by Smarty validation
-    
+
     dest_zip = dest_address.get('zip', '') or dest_address.get('postal_code', '')
-    
+
     shipments = []
     total_shipping = 0
-    
+
     # Build SKU to RTA info lookup
     sku_to_rta = {}
     if rta_weight_info and rta_weight_info.get('items'):
         for item_info in rta_weight_info['items']:
             sku_to_rta[item_info.get('sku', '')] = item_info
-    
+
     for warehouse_code, items in warehouse_groups.items():
         if warehouse_code == 'UNKNOWN':
             shipments.append({
@@ -384,19 +429,19 @@ def calculate_order_shipping(order_data: dict, dest_address: dict) -> Dict:
                 'shipping_method': 'unknown'
             })
             continue
-        
+
         warehouse = WAREHOUSES.get(warehouse_code)
         if not warehouse:
             continue
-        
+
         # Calculate weight for this warehouse's shipment using RTA data
         warehouse_weight = 0
         has_long_pallet = False
-        
+
         for item in items:
             sku = item.get('sku', '')
             qty = item.get('quantity', 1)
-            
+
             rta_info = sku_to_rta.get(sku)
             if rta_info:
                 warehouse_weight += rta_info.get('line_weight', 0)
@@ -405,35 +450,34 @@ def calculate_order_shipping(order_data: dict, dest_address: dict) -> Dict:
             else:
                 # Fallback: estimate 30 lbs per item
                 warehouse_weight += 30 * qty
-        
+
         # If no RTA data available at all, use B2BWave weight for single warehouse
         if warehouse_weight == 0 and b2bwave_total_weight > 0 and len(warehouse_groups) == 1:
             warehouse_weight = b2bwave_total_weight
-        
+
         # Minimum 1 lb
         weight = max(warehouse_weight, 1)
-        
+
         # Check for oversized using RTA long pallet flag OR keyword detection
         oversized = has_long_pallet or any(is_oversized(item.get('name', '')) for item in items)
-        
-        # Select shipping method based on weight (and future rules)
-        shipping_method = select_shipping_method(weight, items)
-        
+
+        # Select shipping method — returns (method, parcel_length)
+        shipping_method, parcel_length = select_shipping_method(weight, items)
+
         # Get quote from appropriate carrier
         if shipping_method == 'small_package':
-            # Use Shippo for small packages
+            # Use Shippo for small packages; pass real length for long items (e.g. 96" trim)
             quote = get_shippo_quote(
                 origin_zip=warehouse['zip'],
                 dest_zip=dest_zip,
                 weight=weight,
-                is_residential=is_residential
+                is_residential=is_residential,
+                length=parcel_length
             )
-            
+
             shipping_cost = 0
             if quote.get('success') and quote.get('cheapest'):
                 shipping_cost = quote['cheapest'].get('amount', 0)
-                # Add markup for small package (optional - adjust as needed)
-                # shipping_cost = shipping_cost * 1.1  # 10% markup
         else:
             # Use R+L for LTL freight
             quote = get_shipping_quote(
@@ -443,32 +487,33 @@ def calculate_order_shipping(order_data: dict, dest_address: dict) -> Dict:
                 is_residential=is_residential,
                 is_oversized=oversized
             )
-            
+
             shipping_cost = 0
             if quote.get('success') and quote.get('quote'):
                 shipping_cost = quote['quote'].get('customer_price', 0)
-        
+
         shipments.append({
             'warehouse': warehouse_code,
             'warehouse_name': warehouse['name'],
             'origin_zip': warehouse['zip'],
             'items': items,
             'weight': weight,
+            'parcel_length': parcel_length,
             'is_oversized': oversized,
             'shipping_method': shipping_method,
             'quote': quote,
             'shipping_cost': shipping_cost
         })
-        
+
         total_shipping += shipping_cost
-    
+
     # Calculate item total
     total_items = 0
     for item in line_items:
         price = float(item.get('price', 0) or item.get('unit_price', 0) or 0)
         qty = int(item.get('quantity', 1) or 1)
         total_items += price * qty
-    
+
     return {
         'shipments': shipments,
         'total_shipping': round(total_shipping, 2),
@@ -482,25 +527,25 @@ def fetch_b2bwave_order(order_id: str) -> Optional[Dict]:
     """Fetch order details from B2BWave API"""
     if not B2BWAVE_URL or not B2BWAVE_API_KEY:
         return None
-    
+
     try:
         # Use list endpoint with filter (same as main.py)
         url = f"{B2BWAVE_URL}/api/orders.json?id_eq={order_id}"
-        
+
         # Basic auth
         credentials = f"{B2BWAVE_USERNAME}:{B2BWAVE_API_KEY}"
         encoded_credentials = base64.b64encode(credentials.encode()).decode()
-        
+
         req = urllib.request.Request(url)
         req.add_header('Authorization', f'Basic {encoded_credentials}')
-        
+
         with urllib.request.urlopen(req, timeout=30) as resp:
             data = json.loads(resp.read().decode())
             # API returns a list of {order: {...}} objects
             if isinstance(data, list) and len(data) > 0:
                 # Extract the order from the nested structure
                 raw_order = data[0].get('order', data[0])
-                
+
                 # Normalize the data structure for our checkout flow
                 order_products = raw_order.get('order_products', [])
                 line_items = []
@@ -512,14 +557,14 @@ def fetch_b2bwave_order(order_id: str) -> Optional[Dict]:
                         'quantity': int(float(product.get('quantity', 1))),
                         'price': float(product.get('price', 0)),
                     })
-                
+
                 # Get total_weight from B2BWave (may be string like "8.0")
                 total_weight_raw = raw_order.get('total_weight', 0)
                 try:
                     total_weight = float(total_weight_raw) if total_weight_raw else 0
                 except (ValueError, TypeError):
                     total_weight = 0
-                
+
                 return {
                     'id': raw_order.get('id'),
                     'customer_name': raw_order.get('customer_name'),
@@ -540,7 +585,7 @@ def fetch_b2bwave_order(order_id: str) -> Optional[Dict]:
                     'comments': raw_order.get('comments_customer', ''),
                 }
             return None
-            
+
     except Exception as e:
         print(f"[B2BWAVE] Error fetching order {order_id}: {e}")
         return None
@@ -551,16 +596,16 @@ def create_square_payment_link(amount_cents: int, order_id: str, customer_email:
     if not SQUARE_ACCESS_TOKEN:
         print("[SQUARE] No access token configured")
         return None
-    
+
     if not SQUARE_LOCATION_ID:
         print("[SQUARE] No location ID configured")
         return None
-    
+
     try:
         # Square Checkout API
         base_url = "https://connect.squareupsandbox.com" if SQUARE_ENVIRONMENT == "sandbox" else "https://connect.squareup.com"
         url = f"{base_url}/v2/online-checkout/payment-links"
-        
+
         payload = {
             "idempotency_key": f"order-{order_id}-{datetime.now().timestamp()}",
             "quick_pay": {
@@ -575,29 +620,29 @@ def create_square_payment_link(amount_cents: int, order_id: str, customer_email:
                 "buyer_email": customer_email
             } if customer_email else {}
         }
-        
+
         # Only add redirect_url if CHECKOUT_BASE_URL is set
         if CHECKOUT_BASE_URL:
             payload["checkout_options"] = {
                 "redirect_url": f"{CHECKOUT_BASE_URL}/payment-complete?order={order_id}",
                 "ask_for_shipping_address": False
             }
-        
+
         data = json.dumps(payload).encode()
-        
+
         print(f"[SQUARE] Creating payment link: {url}")
         print(f"[SQUARE] Payload: {payload}")
-        
+
         req = urllib.request.Request(url, data=data, method='POST')
         req.add_header('Authorization', f'Bearer {SQUARE_ACCESS_TOKEN}')
         req.add_header('Content-Type', 'application/json')
         req.add_header('Square-Version', '2024-01-18')
-        
+
         with urllib.request.urlopen(req, timeout=30) as resp:
             result = json.loads(resp.read().decode())
             print(f"[SQUARE] Response: {result}")
             return result.get('payment_link', {}).get('url')
-            
+
     except urllib.error.HTTPError as e:
         error_body = e.read().decode()
         print(f"[SQUARE] HTTP Error {e.code}: {error_body}")
