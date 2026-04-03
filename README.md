@@ -1,7 +1,7 @@
 # CFC Order Workflow Backend — Sandbox
 
-**Version:** 6.0.0  
-**Service URL:** https://cfcorderbackend-sandbox.onrender.com  
+**Version:** 6.2.0
+**Service URL:** https://cfcorderbackend-sandbox.onrender.com
 **Frontend:** https://cfcordersfrontend-sandbox.vercel.app
 
 ## Overview
@@ -52,7 +52,7 @@ needs_payment_link → awaiting_payment → needs_warehouse_order → awaiting_w
 ## Environment Variables
 
 | Variable | Required | Purpose |
-|----------|----------|---------|
+|----------|----------|---------| 
 | `DATABASE_URL` | Yes | PostgreSQL connection string |
 | `B2BWAVE_URL` | Yes | B2BWave API base URL |
 | `B2BWAVE_USERNAME` | Yes | B2BWave API username |
