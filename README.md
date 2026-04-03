@@ -4,6 +4,11 @@
 **Service URL:** https://cfcorderbackend-sandbox.onrender.com
 **Frontend:** https://cfcordersfrontend-sandbox.vercel.app
 
+## ⛔ Session Rules — ALL Claude Sessions
+- READ this README before doing any work in this repo
+- DO NOT write or rewrite any file unless William explicitly says to in that session
+- Report only and stop unless William says otherwise
+
 ## Overview
 
 FastAPI backend for managing CFC (Cabinets For Contractors) wholesale order workflow — from B2BWave order ingestion through payment, warehouse fulfillment, freight quoting, and delivery.
@@ -52,7 +57,7 @@ needs_payment_link → awaiting_payment → needs_warehouse_order → awaiting_w
 ## Environment Variables
 
 | Variable | Required | Purpose |
-|----------|----------|---------| 
+|----------|----------|---------|
 | `DATABASE_URL` | Yes | PostgreSQL connection string |
 | `B2BWAVE_URL` | Yes | B2BWave API base URL |
 | `B2BWAVE_USERNAME` | Yes | B2BWave API username |
