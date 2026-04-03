@@ -706,6 +706,7 @@ def rl_get_order_shipments(order_id: str):
                         "phone": wh_info.get("phone", ""),
                     },
                     "weight": s.get("weight", 0),
+                    "parcel_length": s.get("parcel_length"),
                     "items_count": len(s.get("items", [])),
                     "shipping_method": s.get("shipping_method"),
                     "shipping_cost": s.get("shipping_cost", 0),
@@ -763,10 +764,12 @@ def get_shippo_rates(
     dest_zip: str,
     weight_lbs: float,
     is_residential: bool = True,
+    length: Optional[float] = None,
 ):
     """
     Get small package shipping rates from Shippo.
     Example: /shippo/rates?origin_zip=30071&dest_zip=33859&weight_lbs=10
+    Optional: &length=96 for long items (e.g. trim molding)
     """
     if not SHIPPO_ENABLED:
         raise HTTPException(status_code=503, detail="Shippo API not configured")
@@ -776,6 +779,7 @@ def get_shippo_rates(
         dest_zip=dest_zip,
         weight_lbs=weight_lbs,
         is_residential=is_residential,
+        length=length,
     )
 
 
