@@ -1,5 +1,5 @@
 # WS6 — CFC Orders Session Handoff
-**Date:** 2026-04-03 (updated — audit corrections applied)
+**Date:** 2026-04-03 (updated — SQUARE_ENVIRONMENT deferred, ADMIN_API_KEY clarified)
 **Task:** Phase 7 — Production Promotion (Option A execution)
 
 ---
@@ -13,9 +13,8 @@
 - App.jsx in repo is v5.10.0 — local is v5.10.5, NOT YET PUSHED. Push before Step 3.
 - config.js has hardcoded sandbox API_URL and IS_SANDBOX=true — must flip before Step 3.
 - /health returns v6.2.0 — NOT v6.0.0 as written below. Smoke test checklists are wrong on this.
-- SQUARE_ENVIRONMENT defaults to "sandbox" — set SQUARE_ENVIRONMENT=production on Render at Step 2.
-- square_sync.py hardcodes production Square URL regardless of env — checkout and sync talk to different Square environments. Needs a code fix in square_sync.py (deferred, but do not consider Square integration functional until resolved).
-- ADMIN_API_KEY env var was stripped from Render — sandbox backend currently returns 401 on all writes.
+- SQUARE_ENVIRONMENT: NOT being set at Step 2 — Square promotion is deferred. square_sync.py hardcodes production Square URL regardless of env — checkout and sync talk to different Square environments. Needs a code fix in square_sync.py before Square is considered functional.
+- ADMIN_API_KEY env var was stripped from Render — auth.py falls back to default "CFC2025" (NOT hardcoded, it is os.environ.get("ADMIN_API_KEY", "CFC2025")). Frontend sends CFC2026 → mismatch → 401 on all writes. Fix: add ADMIN_API_KEY=CFC2026 to Render env.
 - App.jsx sha e020e868 / v7.2.2 referenced in Key Files below is STALE — actual sha is 345b244572 / v5.10.0.
 
 ---
@@ -24,14 +23,14 @@
 
 **Phase 7 Step 2: Set ADMIN_API_KEY=CFC2026 on prod Render.**
 
-The frontend already sends `CFC2026` (api.js sha 68019f6e). The prod backend still has
-`ADMIN_API_KEY=CFC2025`. Every write endpoint is rejecting requests until this is flipped.
+The frontend already sends `CFC2026` (api.js sha 68019f6e). The env var was stripped from Render so auth.py is falling back to `CFC2025`. Every write endpoint is rejecting requests until this is added.
 
 1. Render dashboard → `cfc-backend-b83s.onrender.com` → Environment
-2. Change `ADMIN_API_KEY` from `CFC2025` → `CFC2026`
-3. Also add: `SQUARE_ENVIRONMENT=production` (missing — will run Square in sandbox mode if absent)
-4. Save → Manual deploy → watch logs
-5. Then continue with Steps 3–6 below
+2. Add `ADMIN_API_KEY=CFC2026`
+3. Save → Manual deploy → watch logs
+4. Then continue with Steps 3–6 below
+
+⛔ Do NOT set SQUARE_ENVIRONMENT at this step — Square promotion is deferred.
 
 **Do not start Step 3 (Vercel repoint) until Step 2 is confirmed live.**
 
@@ -70,10 +69,11 @@ Write JSON to body.json with Set-Content, pass with -d "@body.json". Never use b
 
 ## Next Steps — Phase 7 Steps 2 through 6
 
-Step 2 — Render: env vars and repoint backend ← **DO THIS FIRST**
+Step 2 — Render: add ADMIN_API_KEY and repoint backend ← **DO THIS FIRST**
 - Render → cfc-backend-b83s.onrender.com
-- Add env vars: ADMIN_API_KEY=CFC2026, SQUARE_ENVIRONMENT=production
+- Add env var: ADMIN_API_KEY=CFC2026
 - Verify present: GMAIL_SEND_ENABLED=true, RL_QUOTE_SANDBOX_URL=https://rl-quote-sandbox.onrender.com, ANTHROPIC_API_KEY, SHIPPO_API_KEY, RL_CARRIERS_API_KEY
+- ⛔ Do NOT set SQUARE_ENVIRONMENT=production — deferred
 - Settings → Build and Deploy → change repo to 4wprince/CFCOrderBackend_Sandbox, branch main
 - Manual deploy → watch logs
 
@@ -133,7 +133,7 @@ cfc-orders:rate_limit.py — sha 10e3aa8f — shared slowapi Limiter
 cfc-orders:routes/audit.py — sha a6a70380 — rate-limited audit log endpoints
 cfc-orders:orders_routes.py — sha 0ac6a8e3 — run-check + reactivate added
 cfc-orders:rl_carriers.py — sha b92c627a — 719 lines R+L API
-cfc-orders:auth.py — sha 795a0a76 — ⚠️ defaults to CFC2025 if ADMIN_API_KEY env var missing
+cfc-orders:auth.py — sha 795a0a76 — ⚠️ NOT hardcoded — os.environ.get("ADMIN_API_KEY", "CFC2025") — env var stripped → fallback CFC2025 → 401
 cfc-orders:checkout.py — sha 4e2bfaab — ⚠️ SQUARE_ENVIRONMENT controls Square API base URL
 cfc-orders:square_sync.py — sha 10eeee1b — ⚠️ hardcodes connect.squareup.com regardless of SQUARE_ENVIRONMENT
 cfc-orders:handoffs/SANDBOX_VS_PRODUCTION_AUDIT.md — sha a139452f — Sandbox vs prod gap analysis
@@ -145,12 +145,12 @@ brain:workstreams/WS6_CFC_ORDERS.md — sha 6ef6d4c6 — Full workstream file
 ## Critical Reminders
 - Prod backend: cfc-backend-b83s.onrender.com. Prod frontend: cfc-orders-frontend.vercel.app.
 - Sandbox and prod share the SAME PostgreSQL DB — migrations hit production.
-- Set ADMIN_API_KEY=CFC2026 AND SQUARE_ENVIRONMENT=production on Render BEFORE repointing.
-- auth.py falls back to CFC2025 if ADMIN_API_KEY env var is absent — all writes 401.
+- Set ADMIN_API_KEY=CFC2026 on Render at Step 2. Do NOT set SQUARE_ENVIRONMENT — deferred.
+- auth.py is NOT hardcoded — uses os.environ.get("ADMIN_API_KEY", "CFC2025"). Env var was stripped → fallback to CFC2025 → 401. Fix = add the env var.
 - api.js already has CFC2026 (sha 68019f6e) — do NOT revert.
 - Rollback: Render or Vercel one-click revert. DB unchanged.
 - /health returns v6.2.0 — NOT v6.0.0. Smoke test checklists corrected above.
-- square_sync.py hardcodes production Square URL — Square integration not fully functional until fixed.
+- square_sync.py hardcodes production Square URL — Square integration not fully functional until fixed. Deferred.
 - Lane C (RTA Weight) blocked on WS5 — do not touch until WS5 complete.
 - Blind R+L shipping = $106/shipment — rejected, do not revisit.
 - PS5 curl: NEVER inline quote escapes. Always Set-Content body.json then -d "@body.json".
