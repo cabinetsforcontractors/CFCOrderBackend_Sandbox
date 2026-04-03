@@ -28,22 +28,22 @@ def shippo_request(endpoint: str, method: str = "GET", data: dict = None) -> Opt
     if not SHIPPO_API_KEY:
         print("[SHIPPO] No API key configured")
         return None
-    
+
     url = f"{SHIPPO_API_URL}/{endpoint}"
-    
+
     try:
         if data:
             req_data = json.dumps(data).encode()
             req = urllib.request.Request(url, data=req_data, method=method)
         else:
             req = urllib.request.Request(url, method=method)
-        
+
         req.add_header('Authorization', f'ShippoToken {SHIPPO_API_KEY}')
         req.add_header('Content-Type', 'application/json')
-        
+
         with urllib.request.urlopen(req, timeout=30) as resp:
             return json.loads(resp.read().decode())
-            
+
     except urllib.error.HTTPError as e:
         error_body = e.read().decode()
         print(f"[SHIPPO] HTTP Error {e.code}: {error_body}")
@@ -72,7 +72,7 @@ def get_shipping_rates(
 ) -> Dict:
     """
     Get shipping rates from Shippo for small packages.
-    
+
     Returns:
         {
             'success': True/False,
@@ -94,7 +94,7 @@ def get_shipping_rates(
     """
     if not SHIPPO_API_KEY:
         return {'success': False, 'error': 'Shippo API not configured', 'rates': []}
-    
+
     # Build shipment request
     shipment_data = {
         "address_from": {
@@ -124,25 +124,25 @@ def get_shipping_rates(
         }],
         "async": False  # Wait for rates synchronously
     }
-    
-    print(f"[SHIPPO] Getting rates: {origin_zip} -> {dest_zip}, {weight_lbs} lbs")
-    
+
+    print(f"[SHIPPO] Getting rates: {origin_zip} -> {dest_zip}, {weight_lbs} lbs, length={length or DEFAULT_PARCEL['length']}\"")
+
     result = shippo_request("shipments", method="POST", data=shipment_data)
-    
+
     if not result:
         return {'success': False, 'error': 'Failed to create shipment', 'rates': []}
-    
+
     if result.get('status') == 'ERROR':
         messages = result.get('messages', [])
         error_msg = messages[0].get('text') if messages else 'Unknown error'
         return {'success': False, 'error': error_msg, 'rates': []}
-    
+
     # Parse rates
     raw_rates = result.get('rates', [])
-    
+
     if not raw_rates:
         return {'success': False, 'error': 'No rates returned', 'rates': []}
-    
+
     rates = []
     for r in raw_rates:
         rate = {
@@ -157,17 +157,17 @@ def get_shipping_rates(
             'duration_terms': r.get('duration_terms', '')
         }
         rates.append(rate)
-    
+
     # Sort by price
     rates.sort(key=lambda x: x['amount'])
-    
+
     # Find cheapest and fastest
     cheapest = rates[0] if rates else None
-    
+
     # Find fastest (lowest estimated_days, excluding None)
     rates_with_days = [r for r in rates if r['estimated_days'] is not None]
     fastest = min(rates_with_days, key=lambda x: x['estimated_days']) if rates_with_days else cheapest
-    
+
     return {
         'success': True,
         'rates': rates,
@@ -182,19 +182,23 @@ def get_simple_rate(
     origin_zip: str,
     dest_zip: str,
     weight_lbs: float,
-    is_residential: bool = True
+    is_residential: bool = True,
+    length: float = None,
 ) -> Dict:
     """
     Simplified rate lookup using just ZIP codes and weight.
     Uses placeholder addresses since Shippo requires full addresses.
-    
+
+    Pass length (inches) for long items like trim molding (e.g. length=96).
+    If not provided, uses default parcel dimensions (24x18x6 in).
+
     Returns the cheapest rate found.
     """
     return get_shipping_rates(
         origin_name="Warehouse",
         origin_street="123 Warehouse St",
         origin_city="City",
-        origin_state="FL",  # Will be overridden by ZIP
+        origin_state="FL",
         origin_zip=origin_zip,
         dest_name="Customer",
         dest_street="456 Customer St",
@@ -202,14 +206,15 @@ def get_simple_rate(
         dest_state="FL",
         dest_zip=dest_zip,
         weight_lbs=weight_lbs,
-        is_residential=is_residential
+        length=str(int(length)) if length else None,
+        is_residential=is_residential,
     )
 
 
 def purchase_label(rate_id: str) -> Dict:
     """
     Purchase a shipping label for a given rate.
-    
+
     Returns:
         {
             'success': True/False,
@@ -220,23 +225,23 @@ def purchase_label(rate_id: str) -> Dict:
     """
     if not SHIPPO_API_KEY:
         return {'success': False, 'error': 'Shippo API not configured'}
-    
+
     transaction_data = {
         "rate": rate_id,
         "label_file_type": "PDF",
         "async": False
     }
-    
+
     result = shippo_request("transactions", method="POST", data=transaction_data)
-    
+
     if not result:
         return {'success': False, 'error': 'Failed to create transaction'}
-    
+
     if result.get('status') != 'SUCCESS':
         messages = result.get('messages', [])
         error_msg = messages[0].get('text') if messages else result.get('status', 'Unknown error')
         return {'success': False, 'error': error_msg}
-    
+
     return {
         'success': True,
         'label_url': result.get('label_url'),
@@ -257,7 +262,7 @@ def validate_address(
 ) -> Dict:
     """
     Validate an address using Shippo.
-    
+
     Returns:
         {
             'valid': True/False,
@@ -275,15 +280,15 @@ def validate_address(
         "country": country,
         "validate": True
     }
-    
+
     result = shippo_request("addresses", method="POST", data=address_data)
-    
+
     if not result:
         return {'valid': False, 'error': 'Failed to validate address'}
-    
+
     validation = result.get('validation_results', {})
     is_valid = validation.get('is_valid', False)
-    
+
     return {
         'valid': is_valid,
         'is_residential': result.get('is_residential'),
@@ -303,7 +308,7 @@ def validate_address(
 def test_shippo():
     """Test Shippo API connection and get sample rates"""
     print(f"[SHIPPO] Testing with API key: {SHIPPO_API_KEY[:10]}..." if SHIPPO_API_KEY else "[SHIPPO] No API key!")
-    
+
     # Test rate lookup: ROC warehouse (30071) to Lake Wales FL (33859)
     result = get_simple_rate(
         origin_zip="30071",
@@ -311,7 +316,7 @@ def test_shippo():
         weight_lbs=10,
         is_residential=True
     )
-    
+
     print(f"[SHIPPO] Test result: {json.dumps(result, indent=2)}")
     return result
 
