@@ -10,7 +10,7 @@ The Design-to-Doorstep bootstrap e-commerce platform. BOM-to-cart conversion fro
 - **Concept defined** — "Design-to-Doorstep" vision
 - **BOOTSTRAP_PLATFORM_SPEC.md** referenced in manifest but not yet created
 - **No code exists** — this is greenfield development
-- **CFC pricing infrastructure** is the foundation — MSRP = COGS / 0.38
+- **CFC pricing rule:** MSRP is an assigned value. Sales Price = MSRP × 0.38. WSP (LI supplier) is the floor MSRP.
 - **CabinetCloudAI engine** provides BOM output that would feed the cart
 
 ## Key Files
@@ -35,6 +35,6 @@ The Design-to-Doorstep bootstrap e-commerce platform. BOM-to-cart conversion fro
 ## Rules & Decisions
 - Design-to-Doorstep is the brand concept — design your kitchen, buy the cabinets, get them delivered
 - Must maintain clear separation between wholesale (CFC/B2B) and retail (consumer) pricing
-- CFC pricing integrity must be protected — consumer prices derived from MSRP, never expose COGS
+- CFC pricing integrity must be protected — consumer prices derived from assigned MSRP, never expose COGS
 - BOM output from CabinetCloudAI engine is the bridge between design tool and e-commerce
 - Multi-seller SaaS is the long-term vision — start with single-seller (William's cabinets) first
