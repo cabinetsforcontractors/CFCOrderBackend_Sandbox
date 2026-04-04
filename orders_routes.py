@@ -775,7 +775,8 @@ def update_shipment(
             detail=f"Invalid status. Must be one of: {valid_statuses}",
         )
 
-    valid_methods = ["LTL", "Pirateship", "Pickup", "BoxTruck", "LiDelivery", None]
+    # Shippo added — all valid shipping methods
+    valid_methods = ["LTL", "Shippo", "Pirateship", "Pickup", "BoxTruck", "LiDelivery", None]
     if ship_method and ship_method not in valid_methods:
         raise HTTPException(
             status_code=400,
