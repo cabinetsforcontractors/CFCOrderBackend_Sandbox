@@ -1,10 +1,6 @@
 """
 ai_summary.py
 Anthropic Claude API integration for generating order summaries.
-
-generate_order_summary()       — SHORT 6-bullet state summary for order list display
-                                  Auto-generated on sync, shown on every order card
-generate_comprehensive_summary() — Full analysis for AI tab on demand
 """
 
 import json
@@ -18,21 +14,27 @@ from db_helpers import get_db
 
 
 def is_configured() -> bool:
+    """Check if Anthropic API is configured"""
     return bool(ANTHROPIC_API_KEY)
 
 
 def call_anthropic_api(prompt: str, max_tokens: int = 1024) -> str:
+    """Call Anthropic Claude API to generate summary"""
     if not ANTHROPIC_API_KEY:
         return "AI Summary not available - API key not configured"
 
     url = "https://api.anthropic.com/v1/messages"
+
     payload = {
         "model": "claude-sonnet-4-20250514",
         "max_tokens": max_tokens,
-        "messages": [{"role": "user", "content": prompt}]
+        "messages": [
+            {"role": "user", "content": prompt}
+        ]
     }
 
     data = json.dumps(payload).encode('utf-8')
+
     req = urllib.request.Request(url, data=data, method='POST')
     req.add_header("Content-Type", "application/json")
     req.add_header("x-api-key", ANTHROPIC_API_KEY)
@@ -53,58 +55,41 @@ def call_anthropic_api(prompt: str, max_tokens: int = 1024) -> str:
         return f"AI Summary error: {str(e)}"
 
 
-def _get_relative_time(dt) -> str:
-    """Convert a datetime to a relative time string."""
-    if not dt:
-        return ""
-    from datetime import datetime, timezone
-    now = datetime.now(timezone.utc)
-    if dt.tzinfo is None:
-        from datetime import timezone as tz
-        dt = dt.replace(tzinfo=tz.utc)
-    diff = now - dt
-    total_hours = diff.total_seconds() / 3600
-    if total_hours < 1:
-        mins = int(diff.total_seconds() / 60)
-        return f"{mins} min ago"
-    elif total_hours < 24:
-        hrs = int(total_hours)
-        return f"{hrs} hr{'s' if hrs != 1 else ''} ago"
-    else:
-        days = int(total_hours / 24)
-        return f"{days} day{'s' if days != 1 else ''} ago"
-
-
 def generate_order_summary(order_id: str) -> str:
     """
-    Generate a SHORT 6-bullet state summary for order card display.
+    Generate a 6-bullet state summary for order card display.
 
-    Format (always exactly 6 bullets):
-    • Order age + value
-    • Payment status
-    • Warehouse / sent-to-warehouse status
-    • BOL / shipment status
-    • Supplier / tracking communication
-    • Next action or escalation
+    Each bullet represents the current state of one dimension:
+    1. Order age and value
+    2. Payment status
+    3. Warehouse / sent-to-warehouse status
+    4. BOL / shipment / tracking status
+    5. Supplier or warehouse communication
+    6. Next action or escalation
 
-    Auto-generated on sync. Reads notes, events, email snippets.
+    Also reads internal notes and email snippets from suppliers.
     """
+
+    # Gather all order data
     with get_db() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("SELECT * FROM orders WHERE order_id = %s", (order_id,))
             order = cur.fetchone()
+
             if not order:
                 return "Order not found"
 
+            # Email snippets (supplier emails, warehouse responses)
             cur.execute("""
                 SELECT email_from, email_subject, email_snippet, email_date, snippet_type
                 FROM order_email_snippets
                 WHERE order_id = %s
                 ORDER BY email_date DESC
-                LIMIT 10
+                LIMIT 20
             """, (order_id,))
             snippets = cur.fetchall()
 
+            # Recent non-sync events
             cur.execute("""
                 SELECT event_type, event_data, created_at
                 FROM order_events
@@ -115,202 +100,215 @@ def generate_order_summary(order_id: str) -> str:
             """, (order_id,))
             events = cur.fetchall()
 
+            # Shipments
             cur.execute("""
                 SELECT warehouse, ship_method, status, tracking, tracking_number,
                        pro_number, weight, created_at, shipped_at, delivered_at,
-                       rl_customer_price, li_customer_price, customer_price, ps_quote_price
+                       bol_sent, bol_sent_at
                 FROM order_shipments
                 WHERE order_id = %s
+                ORDER BY created_at ASC
             """, (order_id,))
             shipments = cur.fetchall()
 
     # Build context
-    parts = []
+    context_parts = []
 
-    # Order facts
-    days_open = order.get('days_open') or 0
-    order_total = float(order.get('order_total') or 0)
-    parts.append(f"Order #{order_id} | Age: {days_open} day{'s' if days_open != 1 else ''} | Total: ${order_total:.2f}")
+    context_parts.append(f"ORDER #{order_id}")
+    context_parts.append(f"Customer: {order.get('company_name') or order.get('customer_name')}")
+    context_parts.append(f"Order Total: ${order.get('order_total', 0)}")
+    context_parts.append(f"Days Open: {order.get('days_open', 0)}")
+    context_parts.append(f"Payment Received: {'Yes' if order.get('payment_received') else 'No'}")
+    context_parts.append(f"Payment Received At: {order.get('payment_received_at') or 'N/A'}")
+    context_parts.append(f"Invoice Sent: {'Yes' if order.get('payment_link_sent') else 'No'}")
+    context_parts.append(f"Invoice Sent At: {order.get('payment_link_sent_at') or 'N/A'}")
+    context_parts.append(f"Sent to Warehouse: {'Yes' if order.get('sent_to_warehouse') else 'No'}")
+    context_parts.append(f"Sent to Warehouse At: {order.get('sent_to_warehouse_at') or 'N/A'}")
+    context_parts.append(f"BOL Sent: {'Yes' if order.get('bol_sent') else 'No'}")
+    context_parts.append(f"BOL Sent At: {order.get('bol_sent_at') or 'N/A'}")
 
-    # Payment
-    if order.get('payment_received'):
-        paid_at = _get_relative_time(order.get('payment_received_at'))
-        paid_amt = float(order.get('payment_amount') or order_total)
-        parts.append(f"Payment: RECEIVED ${paid_amt:.2f} {paid_at}")
-    else:
-        # Check if invoice was sent
-        invoice_events = [e for e in events if e.get('event_type') == 'email_sent']
-        if invoice_events:
-            sent_at = _get_relative_time(invoice_events[0].get('created_at'))
-            parts.append(f"Payment: NOT received — invoice sent {sent_at}")
-        else:
-            parts.append("Payment: NOT received — no invoice sent yet")
-
-    # Warehouse
-    warehouses = [order.get(f'warehouse_{i}') for i in range(1, 5) if order.get(f'warehouse_{i}')]
-    wh_str = ', '.join(warehouses) if warehouses else 'unknown'
-    if order.get('sent_to_warehouse'):
-        sent_at = _get_relative_time(order.get('sent_to_warehouse_at'))
-        parts.append(f"Warehouse ({wh_str}): order sent {sent_at}")
-    else:
-        parts.append(f"Warehouse ({wh_str}): not yet ordered")
-
-    # BOL / Shipment status
-    if order.get('bol_sent'):
-        bol_at = _get_relative_time(order.get('bol_sent_at'))
-        parts.append(f"BOL: sent {bol_at}")
-    elif shipments:
-        shipped = [s for s in shipments if s.get('status') == 'shipped']
-        if shipped:
-            ship_time = _get_relative_time(shipped[0].get('shipped_at'))
-            tracking = shipped[0].get('tracking_number') or shipped[0].get('pro_number') or 'pending'
-            parts.append(f"Shipment: shipped {ship_time} — tracking {tracking}")
-        else:
-            parts.append("BOL: not yet sent — shipment pending")
-    else:
-        parts.append("BOL: not yet sent")
-
-    # Supplier / tracking communication
-    supplier_snippets = [s for s in snippets if s.get('snippet_type') in ('supplier', 'tracking', 'warehouse')]
-    if supplier_snippets:
-        last = supplier_snippets[0]
-        time_str = _get_relative_time(last.get('email_date'))
-        subject = last.get('email_subject', 'supplier email')
-        parts.append(f"Supplier contact: email from {last.get('email_from', 'supplier')} {time_str} — \"{subject[:60]}\"")
-    else:
-        # Check if we emailed supplier
-        supplier_events = [e for e in events if 'supplier' in str(e.get('event_type', '')).lower() or 'warehouse' in str(e.get('event_type', '')).lower()]
-        if supplier_events:
-            time_str = _get_relative_time(supplier_events[0].get('created_at'))
-            parts.append(f"Supplier contact: email sent {time_str} — awaiting response")
-        else:
-            parts.append("Supplier contact: none yet")
-
-    # Notes (read if present)
-    notes_str = ""
+    if order.get('tracking'):
+        context_parts.append(f"Tracking: {order.get('tracking')}")
+    if order.get('pro_number'):
+        context_parts.append(f"PRO Number: {order.get('pro_number')}")
+    if order.get('comments'):
+        context_parts.append(f"Customer Comments: {order.get('comments')}")
     if order.get('notes'):
-        notes_str = f"\nInternal notes: {order['notes'][:200]}"
+        context_parts.append(f"Internal Notes: {order.get('notes')}")
 
-    # Next action
-    if not order.get('payment_received'):
-        parts.append("Next action: follow up on payment — customer has received invoice")
-    elif not order.get('sent_to_warehouse'):
-        parts.append("Next action: send order to warehouse once payment confirmed")
-    elif not order.get('bol_sent'):
-        if supplier_snippets:
-            parts.append("Next action: BOL ready to send — warehouse has responded")
-        else:
-            parts.append("Next action: create and send BOL to warehouse")
-    elif not any(s.get('status') == 'shipped' for s in (shipments or [])):
-        parts.append("Next action: monitor for tracking/shipping confirmation")
-    else:
-        parts.append("Next action: monitor delivery — notify customer when delivered")
+    warehouses = [order.get(f'warehouse_{i}') for i in range(1, 5) if order.get(f'warehouse_{i}')]
+    if warehouses:
+        context_parts.append(f"Warehouses: {', '.join(warehouses)}")
 
-    # Build the prompt
-    context = "\n".join(parts) + notes_str
+    if shipments:
+        context_parts.append("\nSHIPMENTS:")
+        for s in shipments:
+            context_parts.append(f"  Warehouse: {s.get('warehouse')} | Status: {s.get('status')} | Method: {s.get('ship_method') or 'Not set'}")
+            if s.get('tracking_number'): context_parts.append(f"  Tracking: {s.get('tracking_number')}")
+            if s.get('pro_number'): context_parts.append(f"  PRO: {s.get('pro_number')}")
+            if s.get('shipped_at'): context_parts.append(f"  Shipped At: {s.get('shipped_at')}")
+            if s.get('delivered_at'): context_parts.append(f"  Delivered At: {s.get('delivered_at')}")
+            if s.get('bol_sent'): context_parts.append(f"  BOL Sent At: {s.get('bol_sent_at')}")
 
-    prompt = f"""You are generating a 6-bullet status summary for an internal order management dashboard.
+    if snippets:
+        context_parts.append("\nEMAIL COMMUNICATIONS:")
+        for s in snippets:
+            date_str = s['email_date'].strftime('%m/%d %H:%M') if s.get('email_date') else ''
+            context_parts.append(f"  [{date_str}] From: {s.get('email_from', 'Unknown')} | Subject: {s.get('email_subject', '')}")
+            if s.get('email_snippet'):
+                context_parts.append(f"  {s['email_snippet'][:300]}")
 
-PRODUCE EXACTLY 6 BULLETS. Each bullet must be a single sentence starting with "• ".
-NO markdown, NO headers, NO bold text. Plain text only.
-Use relative time ("2 days ago", "3 hours ago", "this morning").
+    if events:
+        context_parts.append("\nORDER EVENTS (most recent first):")
+        for e in events:
+            date_str = e['created_at'].strftime('%m/%d %H:%M') if e.get('created_at') else ''
+            context_parts.append(f"  [{date_str}] {e.get('event_type')}")
 
-Required bullet order:
-1. Order age and dollar value
-2. Payment status (received or pending + when invoice was sent)
-3. Warehouse status (ordered or not + which warehouse + when)
-4. BOL or shipment status (sent or not + tracking if available)
-5. Supplier/warehouse communication (any emails to/from supplier + how long ago)
-6. Next action needed or escalation if overdue
+    context = "\n".join(context_parts)
 
-Facts to use:
-{context}
+    prompt = f"""You are generating a 6-bullet state summary for an internal cabinet order dashboard.
 
-Write the 6 bullets now:"""
+PRODUCE EXACTLY 6 BULLETS. Each bullet starts with "• " and is ONE sentence.
+NO markdown, NO headers, NO bold. Plain text only.
+Use relative time ("2 days ago", "3 hours ago", "this morning", "just now").
+Today's date/time context is available from the timestamps in the data.
+
+Required bullet order — always all 6, even if the answer is "not yet":
+1. Order age and dollar value (e.g. "• Order is 2 days old — $4,250 due")
+2. Payment status (e.g. "• Payment received 3 hours ago" or "• Payment not received — invoice sent this morning")
+3. Warehouse order status (e.g. "• Order sent to LI warehouse 1 day ago" or "• Not yet sent to warehouse — awaiting payment")
+4. BOL and shipment status (e.g. "• BOL sent Apr 4, tracking PRO 12345" or "• No BOL yet — shipment pending")
+5. Supplier/warehouse communication (e.g. "• Email from LI 2 hours ago confirming order received" or "• No supplier contact yet")
+6. Next action (e.g. "• Escalate: no tracking after 2 days — call warehouse" or "• Wait for payment then send to warehouse")
+
+Use the internal notes and email communications if present — they contain important context.
+
+ORDER DATA:
+{context}"""
 
     return call_anthropic_api(prompt, max_tokens=400)
 
 
 def generate_comprehensive_summary(order_id: str) -> str:
-    """Generate detailed comprehensive summary for AI tab on demand."""
+    """Generate detailed comprehensive summary for order popup - full history analysis"""
+
+    # Gather all order data
     with get_db() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # Get order details
             cur.execute("SELECT * FROM orders WHERE order_id = %s", (order_id,))
             order = cur.fetchone()
+
             if not order:
                 return "Order not found"
 
+            # Get ALL email snippets (more than card summary)
             cur.execute("""
                 SELECT email_from, email_subject, email_snippet, email_date, snippet_type
                 FROM order_email_snippets
-                WHERE order_id = %s ORDER BY email_date ASC
+                WHERE order_id = %s
+                ORDER BY email_date ASC
             """, (order_id,))
             snippets = cur.fetchall()
 
+            # Get ALL events
             cur.execute("""
                 SELECT event_type, event_data, created_at
                 FROM order_events
-                WHERE order_id = %s ORDER BY created_at ASC
+                WHERE order_id = %s
+                ORDER BY created_at ASC
             """, (order_id,))
             events = cur.fetchall()
 
+            # Get shipments
             cur.execute("""
-                SELECT warehouse, ship_method, tracking, tracking_number,
-                       pro_number, status, weight, created_at
-                FROM order_shipments WHERE order_id = %s
+                SELECT warehouse, ship_method, tracking, pro_number,
+                       status, weight, ship_method, created_at
+                FROM order_shipments
+                WHERE order_id = %s
+                ORDER BY created_at ASC
             """, (order_id,))
             shipments = cur.fetchall()
 
+    # Build comprehensive context for AI
     context_parts = []
+
+    # Order info
     context_parts.append(f"ORDER #{order_id}")
     context_parts.append(f"Customer: {order.get('company_name') or order.get('customer_name')}")
-    context_parts.append(f"Total: ${order.get('order_total', 0)}")
+    context_parts.append(f"Status: {order.get('status', 'Unknown')}")
+    context_parts.append(f"Order Total: ${order.get('order_total', 0)}")
     context_parts.append(f"Payment Received: {'Yes' if order.get('payment_received') else 'No'}")
     context_parts.append(f"Created: {order.get('created_at')}")
-    if order.get('tracking'): context_parts.append(f"Tracking: {order.get('tracking')}")
-    if order.get('pro_number'): context_parts.append(f"PRO: {order.get('pro_number')}")
-    if order.get('comments'): context_parts.append(f"Customer Comments: {order.get('comments')}")
-    if order.get('notes'): context_parts.append(f"Internal Notes: {order.get('notes')}")
 
+    if order.get('tracking'):
+        context_parts.append(f"Tracking: {order.get('tracking')}")
+    if order.get('pro_number'):
+        context_parts.append(f"PRO Number: {order.get('pro_number')}")
+    if order.get('comments'):
+        context_parts.append(f"Customer Comments: {order.get('comments')}")
+    if order.get('notes'):
+        context_parts.append(f"Internal Notes: {order.get('notes')}")
+
+    # Warehouses
     warehouses = [order.get(f'warehouse_{i}') for i in range(1, 5) if order.get(f'warehouse_{i}')]
-    if warehouses: context_parts.append(f"Warehouses: {', '.join(warehouses)}")
+    if warehouses:
+        context_parts.append(f"Warehouses: {', '.join(warehouses)}")
 
+    # Shipments
     if shipments:
         context_parts.append("\n--- SHIPMENTS ---")
         for s in shipments:
-            context_parts.append(f"Warehouse: {s.get('warehouse')} | Status: {s.get('status')}")
-            if s.get('tracking_number'): context_parts.append(f"  Tracking: {s.get('tracking_number')}")
-            if s.get('pro_number'): context_parts.append(f"  PRO: {s.get('pro_number')}")
-            if s.get('weight'): context_parts.append(f"  Weight: {s.get('weight')} lbs")
+            context_parts.append(f"Warehouse: {s.get('warehouse')} | Carrier: {s.get('carrier')} | Status: {s.get('status')}")
+            if s.get('tracking'):
+                context_parts.append(f"  Tracking: {s.get('tracking')}")
+            if s.get('pro_number'):
+                context_parts.append(f"  PRO: {s.get('pro_number')}")
+            if s.get('weight'):
+                context_parts.append(f"  Weight: {s.get('weight')} lbs | Cost: ${s.get('ship_method', 0)}")
 
+    # ALL Email communications (chronological for full history)
     if snippets:
-        context_parts.append("\n--- EMAIL HISTORY ---")
+        context_parts.append("\n--- EMAIL HISTORY (oldest to newest) ---")
         for s in snippets:
             date_str = s['email_date'].strftime('%m/%d/%y %H:%M') if s.get('email_date') else ''
-            context_parts.append(f"[{date_str}] From: {s.get('email_from')} | {s.get('email_subject')}")
+            context_parts.append(f"[{date_str}] From: {s.get('email_from', 'Unknown')}")
+            context_parts.append(f"Subject: {s.get('email_subject', '')}")
             if s.get('email_snippet'):
-                context_parts.append(f"{s['email_snippet'][:400]}")
+                # Include more of the snippet for comprehensive view
+                context_parts.append(f"{s['email_snippet'][:500]}")
+            context_parts.append("")
 
+    # ALL Events (chronological)
     if events:
         context_parts.append("\n--- EVENT TIMELINE ---")
-        important = [e for e in events if e.get('event_type') not in ('b2bwave_sync',)]
-        for e in important[-30:]:
+        for e in events:
             date_str = e['created_at'].strftime('%m/%d/%y %H:%M') if e.get('created_at') else ''
-            context_parts.append(f"[{date_str}] {e.get('event_type')}")
+            event_data = e.get('event_data', '')
+            if isinstance(event_data, dict):
+                event_data = json.dumps(event_data)
+            context_parts.append(f"[{date_str}] {e.get('event_type')}: {str(event_data)[:200]}")
 
     context = "\n".join(context_parts)
 
-    prompt = f"""You are analyzing a cabinet wholesale order. Provide a comprehensive summary.
+    # Comprehensive prompt
+    prompt = f"""You are analyzing a cabinet order for a wholesale business. Provide a COMPREHENSIVE summary that helps staff understand the full history of this order.
 
 Include these sections:
 1. **Order Overview** - Customer, total, payment status, current stage
-2. **Timeline Summary** - Key dates chronologically
-3. **Communication History** - Important points from emails
-4. **Shipping Status** - What shipped, tracking, delivery status
-5. **Issues & Resolutions** - Any problems and how handled
-6. **Current Status & Next Steps** - Where things stand and what's needed
+2. **Timeline Summary** - Key dates and what happened chronologically  
+3. **Communication History** - Important points from emails (customer requests, issues, confirmations)
+4. **Shipping Status** - What shipped from where, tracking info, delivery status
+5. **Issues & Resolutions** - Any problems that came up and how they were handled
+6. **Current Status & Next Steps** - Where things stand now and what needs to happen next
 
-Format: clear section headers, bullet points, include specific dates.
+Format rules:
+- Use clear section headers
+- Use bullet points within sections
+- Include specific dates when relevant
+- Highlight any unusual requests or issues
+- Be thorough but organized
+- If information is missing for a section, skip that section
 
 ORDER DATA:
 {context}"""
@@ -319,7 +317,12 @@ ORDER DATA:
 
 
 def generate_simple_summary(text: str, max_length: int = 200) -> str:
+    """Generate a simple summary of any text"""
     if not is_configured():
         return text[:max_length] + "..." if len(text) > max_length else text
-    prompt = f"Summarize this in {max_length} characters or less. Be concise:\n\n{text}"
+
+    prompt = f"""Summarize this in {max_length} characters or less. Be concise:
+
+{text}"""
+
     return call_anthropic_api(prompt, max_tokens=256)
