@@ -1,5 +1,5 @@
 # WS6 — CFC Orders Session Handoff
-**Date:** 2026-04-04
+**Date:** 2026-04-04 (updated end of day)
 **Repo:** CFCOrderBackend_Sandbox (https://cfcorderbackend-sandbox.onrender.com)
 
 ⛔ THIS IS THE SANDBOX REPO — NOT PRODUCTION
@@ -9,44 +9,69 @@
 
 ---
 
-## PRIORITY ORDER — DO IN THIS SEQUENCE
+## CURRENT STATE — Sandbox is feature-complete. Ready for production promotion.
 
-1. ✅ Complete sandbox UI wiring (in progress — see Current Work below)
-2. Promote to production (Phase 7)
-3. Build Phase 8 — Shipment Tracking & Notification Engine
-4. Phase 9 — Full Customer Portal
-5. Phase 10 — Full Warehouse Portal
-6. Phase 11 — SMS
-7. Phase 12 — Mobile App
+**Next step: Execute Phase 7 (production promotion checklist below).**
 
 ---
 
-## Current Work — Sandbox UI Wiring (IN PROGRESS)
+## Phase 7 — Production Promotion Checklist
 
-Still needed before production promotion:
+Shared PostgreSQL DB — migrations already done ✅ (confirmed 2026-04-04).
+ADMIN_API_KEY=CFC2026 set on sandbox ✅. Gmail OAuth working ✅.
 
-- Notes add/edit inline in detail panel
-- Customer comments (B2BWave `comments` field) shown in detail panel
-- ShipmentRow inline in table — status, method, tracking, Save & Email / Save Only
-- Supplier email clock on ShipmentRow (Phase 8 dependency — see below)
-- Profit tracking per order (shipping charge vs cost)
-- AI Summary snippet on detail panel Details tab
-- Alert background + label on table rows
-- Light theme CSS (match production)
-- Manual shipping override in ShippingManager
-- Shippo ZIP auto-fill fix (warehouse name key mismatch)
-- Fix StatusBar Sync AI to use apiFetch not raw fetch
-- Ship-to address in invoice email template
-- Email template minor formatting polish
+### Pre-Promotion Verification
+1. Hit `GET /health` on sandbox backend — confirm 200
+2. Confirm ADMIN_API_KEY=CFC2026 is NOT yet set on prod Render (to avoid conflict before cutover)
+3. No additional DB migrations needed — all columns confirmed present
+
+### Promotion Steps — In Order
+
+**Step 1 — Set ADMIN_API_KEY on prod Render**
+On `cfc-backend-b83s` Render dashboard → Environment tab:
+```
+ADMIN_API_KEY = CFC2026
+```
+Do NOT redeploy yet.
+
+**Step 2 — Repoint Render production backend**
+On Render for `cfc-backend-b83s`:
+- Change connected GitHub repo → `4wprince/CFCOrderBackend_Sandbox`
+- Branch: `main`
+- Deploy
+
+**Step 3 — Repoint Vercel production frontend**
+On Vercel for `cfc-orders-frontend`:
+- Change connected GitHub repo → `4wprince/CFCOrdersFrontend_Sandbox`
+- Branch: `main`
+- Redeploy
+
+**Step 4 — Post-deploy smoke tests on production URLs**
+- `GET /health` → 200
+- Load order list — confirm orders appear (shared DB, instant)
+- Send test invoice via "Send Invoice + PDF" — confirm email + PDF received
+- Trigger B2BWave webhook → confirm invoice email fires
+- Shippo auto-quote on <70 lb order — confirm rate returns
+- Square checkout URL generation — confirm URL copies correctly
+- PAID badge renders on table row + detail panel
+- AI Summary 6-bullet shows on Details tab
+- Sync AI button generates summaries
+- Confirm no 500s in Render logs for 5 min post-deploy
+
+**Step 5 — Confirm production stable**
+- Watch Render logs 5 min post-deploy
+- Confirm Gmail OAuth env vars transferred (GMAIL_CLIENT_ID, GMAIL_CLIENT_SECRET, GMAIL_REFRESH_TOKEN)
 
 ---
 
-## What's Complete ✅
+## What's Complete in Sandbox ✅
 
 ### Lane A — Shippo End-to-End ✅
 - <70 lbs → Shippo; 70+ lbs → R+L LTL
 - LONG_PARCEL (98×9×6) for items with single number ≥84 in name
 - X-separated dimensions → forced LTL
+- Shippo ZIP uses short codes (LI=32148, DL=32256, etc.) matching DB warehouse field
+- Shippo weight pre-fills from shipment.weight or order.total_weight
 
 ### Lane B — Payment Triggers ✅
 - Trigger 1: B2BWave webhook → invoice email + PDF ✅ verified 2026-04-04
@@ -56,227 +81,139 @@ Still needed before production promotion:
 
 ### Invoice / Checkout ✅
 - QB-style HTML invoice with line items, 8% tariff, shipping, grand total
+- Ship-to address: addr2 on own line, explicit Ship To label, em-dash fixed ✅
 - PDF invoice attached to payment email (reportlab)
 - Policy agreement popup before Pay Now
 - Internal CFC notification on new order
-- Checkout UI shows tariff + shipping breakdown
 
-### Frontend UI (partial) ✅
-- PAID badge on table row and detail panel header
-- Payment status in detail panel (received, amount, paid at)
-- Send Invoice + PDF button in Actions tab
-- Checkout URL copy in Actions tab
+### Frontend UI ✅ (all wired — App.jsx v7.4.0)
+- Light theme CSS v7.3.0
+- Customer comments inline on table row + detail panel
+- Notes add/edit inline in detail panel (saves + triggers AI summary refresh)
+- ShipmentRow in detail panel (status, method, tracking, Save & Email / Save Only)
+- Profit tracking in table (Ship: $X (+$Y), Total: $Z)
+- Alert backgrounds + labels on table rows
+- Sync AI button in header → POST /orders/regenerate-summaries
+- 6-bullet AI state summary at top of Details tab (auto-generates on sync every 7.5 min)
+- Full AI analysis on AI tab (on-demand)
+- Refresh AI Summary button in Actions tab
+- Manual shipping override in ShippingManager (cost/charge/note → quote_price + customer_price)
 - Shippo option in ShippingManager with auto-quote
-- AI Summary tab working
+- PAID badge on table row and detail panel header
+- Send Invoice + PDF button in Actions tab
+
+### Backend ✅
+- email_templates.py: Ship To label, addr2 fix, &mdash; encoding
+- checkout.py: LI = Cabinetry Distribution, 561 Keuka Rd, (615) 410-6775
+- orders_routes.py: Shippo in valid_methods
+- sync_service.py: 7.5 min interval, auto-refresh AI summaries post-sync
+- sync_routes.py: POST /orders/regenerate-summaries
+- ai_summary.py: 6-bullet state summary + comprehensive analysis (both working)
+- config.py: 7.5 min sync, LI name/zip correct
+
+### DB Migrations ✅
+- All 15 RL fields in order_shipments confirmed present (/add-rl-fields run 2026-04-04)
+- orders table: all lifecycle, AI, alert, checkpoint columns present
+- order_status view: all 10 columns including current_status and days_open
+- No further migrations needed
 
 ---
 
-## Deferred Minor Fixes (before production promotion)
+## Deferred Items (do NOT block production promotion)
 
-- Ship-to address missing from invoice email template
-- Email template formatting polish
-- LI warehouse: name = Cabinetry Distribution, address = 561 Keuka Rd, Interlachen FL 32148, phone = (615) 410-6775
+| Item | Priority |
+|------|----------|
+| Email template formatting polish (subject line â encoding) | Low — next email touch |
+| R+L multi-warehouse auto-quote (logic issue) | Phase 8 |
+| /proxy/auto-quote endpoint on production | Phase 8 |
+| Lane C (RTA Weight) | Blocked on WS5 |
 
 ---
 
-## PHASE 8 — Shipment Tracking & Notification Engine
+## Phase 8 — Shipment Tracking & Notification Engine
 
-This is the top priority after sandbox UI wiring and production promotion.
-Phase 8 absorbs what were previously Phase 8 (supplier email), Phase 9 (customer portal foundation), and Phase 10 (warehouse portal foundation).
+Top priority after production promotion. See previous handoff content preserved below.
 
 ### Warehouse Shipping Rules
 - **LI (Cabinetry Distribution)** — always ships, any length. Watch Gmail for tracking/PRO.
 - **LM (Love-Milestone)** — always ships, any length. Watch Gmail for tracking/PRO.
-- **DL (DL Cabinetry)** — ships only if long pallet (≥96"). CFC arranges R+L for everything else. Watch Gmail for DL-shipped items.
-- **All others** — CFC always arranges R+L. Supplier palletizes and gets it out. CFC pulls PRO from R+L.
-
-### DL Length Detection
-Already built in checkout.py via `detect_item_dimensions()`. Shipment router reads the long pallet flag to assign Track A or Track B.
+- **DL (DL Cabinetry)** — ships only if long pallet (≥96"). CFC arranges R+L for everything else.
+- **All others** — CFC always arranges R+L. Supplier palletizes. CFC pulls PRO from R+L API.
 
 ### Track A — Warehouse Ships (LI, LM, DL long pallet)
-
-Day 0: Payment confirmed. Warehouse notified. Pick list PDF (warehouse version, no customer info) attached to notification email.
-
-Day 2: Gmail scan for tracking/PRO from that warehouse.
-- Found → auto-populate shipment, skip to Tracking Confirmed
-- Not found → send warehouse response form link
-
-Form: "Has Order #XXXX shipped?"
-- Yes → text field: enter tracking/PRO → submit → R+L polling starts every 4 business hours
-  - R+L confirms → Tracking Confirmed
-  - 12 hours, no R+L confirmation → "R+L has no record, confirm it went out?" Yes/No
-    - Yes again → poll 4 more hours → still nothing → email William to call
-    - No → fall to "When will it ship?" flow
-- No → "When will it ship?" dropdown:
-  - Today → poll R+L next morning → no pickup → email William
-  - Tomorrow → poll R+L day after → no pickup → email William
-  - 2+ days → email William immediately
-  - Not sure → email William immediately
-- No response in 24 hours → email William
+Day 0: Payment confirmed. Warehouse notified. Pick list PDF (warehouse version) attached.
+Day 2: Gmail scan for tracking/PRO. Found → auto-populate. Not found → send warehouse response form.
+Form flow: Has it shipped? Yes → PRO entry → R+L polling every 4 business hours → Tracking Confirmed.
+No response 24h → email William.
 
 ### Track B — CFC Arranges R+L (all others + DL short)
-
-Day 0: Payment confirmed. BOL created. Warehouse notified. Pick list PDF (warehouse version) attached.
-
-Day 2: Send warehouse form: "Is Order #XXXX palletized and ready for R+L pickup?"
-- Yes, ready → backend pings R+L to confirm/schedule pickup → poll every 4 business hours for PRO
-  - PRO confirmed → Tracking Confirmed
-  - 12 hours, no confirmation → email William
-- No → "When will it be ready?" dropdown (same options as Track A)
-- No response in 24 hours → email William
-
-Note: Supplier never sees the PRO. CFC pulls PRO from R+L API and sends to customer.
+Day 0: Payment confirmed. BOL created. Warehouse notified.
+Day 2: Form: "Is it palletized and ready for R+L pickup?"
+Yes → R+L pickup ping → poll for PRO → Tracking Confirmed.
+No response 24h → email William.
 
 ### Tracking Confirmed (both tracks)
-
-1. Customer email: "Your order has shipped" + PRO + estimated delivery date from R+L API
-2. Poll R+L API daily for ETA and stop number
-3. Evening before delivery: "Your delivery is tomorrow — someone must be present"
-4. Morning of delivery: Delivery Day email (see below) + customer pick sheet PDF attached + interactive pick sheet link
+1. Customer email: shipped + PRO + ETA
+2. Poll R+L daily for ETA + stop number
+3. Evening before delivery: "Your delivery is tomorrow"
+4. Morning of delivery: Delivery Day email + customer pick sheet PDF + interactive pick sheet link
 5. R+L shows delivered: Post-Delivery email
 
-### Delivery Day Email
-- You are stop #X of Y on today's route — use this to estimate arrival time
-- ⚠️ Claims cannot be honored without: (1) digital pick sheet completed, (2) minimum 4 delivery photos submitted through the pick sheet link
-- Take photos of every box BEFORE the driver leaves — even if everything appears fine
-- Check that ALL SKUs on your order are present on the pallet before the driver leaves
-- Do NOT sign the BOL until you have physically inspected every box and noted any visible damage directly on the BOL in writing
-- If damage: do not refuse delivery, note on BOL, complete replacement request at cabinetsforcontractors.net/pages/5-replacement-request
-- Policy: no returns on assembled/installed cabinets, 20% restocking on undamaged items in original packaging, damage must be reported within 48 hours
-
-### Post-Delivery Email
-- R+L confirms delivered
-- Reiterate: damage within 48 hours, replacement form link
-- Reiterate: no returns on assembled/installed cabinets
-- "Hope everything arrived perfectly — reply or call (770) 990-4885"
-- Future: SMS version
-
 ### Interactive Mobile Pick Sheet
-URL: `/picksheet/{order_id}?token={token}` — same token pattern as checkout-ui
-
-Content:
-- Order #, customer name, delivery date, warehouse
-- Per line item: SKU + description, quantity, ✅ tap to check off, flag as missing/damaged
-- 4 required photo slots with labels:
-  1. Full pallet on truck before unloading
-  2. All boxes laid out after unloading
-  3. Any visible damage (or "no damage" tap)
-  4. BOL with signature and any damage notes written on it
+URL: `/picksheet/{order_id}?token={token}`
+- 4 required photo slots (pallet on truck, boxes laid out, any damage, signed BOL)
+- Per-SKU checklist with tap-to-check + flag missing/damaged
 - All 4 photos required before submit activates
-- "All items present + photos taken" → submit → logs completion timestamp
-- "Report missing items" → flagged SKUs fire immediate alert to William
-
-Photos sent silently to dedicated Gmail account (to be set up).
-Subject format: "Order #XXXX — Delivery Photos — [Customer Name] — [Date]"
-Body includes order ID, customer name, delivery address, any damage flags.
-
-### Pick List PDF — Two Versions (generated via reportlab, same pattern as invoice_pdf.py)
-
-Customer version: CFC header, order #, customer name/address/phone/email, date, line items table (SKU, description, qty, notes), policy agreement text, pick sheet link, claim language.
-
-Warehouse version: CFC header only, order #, warehouse name, line items table, internal notes. No customer info.
-
-When sent:
-- Warehouse version → attached to warehouse notification email at payment confirmation
-- Customer version → attached to delivery day morning email
-
-### Email Templates Needed (Phase 8)
-1. Warehouse — pick list + payment notification (warehouse version PDF attached)
-2. Warehouse — Track A form: "Has it shipped?"
-3. Warehouse — Track B form: "Is it palletized and ready?"
-4. Warehouse — R+L no record, confirm again
-5. Customer — order has shipped (PRO + ETA)
-6. Customer — delivery tomorrow
-7. Customer — delivery day (stop #, pick sheet link, photo requirement, BOL language)
-8. Customer — delivered confirmation
-9. William — escalation (various triggers)
+- Photos sent silently to dedicated Gmail
 
 ### Backend Components Needed
-- `shipment_state` column or table — tracks per-shipment state machine state
-- Polling job — runs every 4 business hours, checks R+L API by PRO number
-- Gmail scan — tied to shipment state machine (LI, LM, DL-shipped items only)
-- Warehouse form endpoint — one-page response form, writes to DB
-- Pick sheet endpoint — `/picksheet/{order_id}?token={token}`
-- Photo upload endpoint — receives 4 images, sends silent email to dedicated Gmail
-- Pick list PDF generator — `picklist_pdf.py`, two versions
-- Email scheduler — fires correct template on state transitions
+- `shipment_state` column/table — per-shipment state machine
+- Polling job — every 4 business hours, checks R+L by PRO
+- Gmail scan — tied to state machine (LI, LM, DL-shipped only)
+- Warehouse form endpoint — one-page response, writes to DB
+- Pick sheet endpoint + photo upload endpoint
+- Pick list PDF generator — two versions (customer + warehouse)
+- Email scheduler — fires templates on state transitions
 
 ### Frontend Components Needed
-- ShipmentRow: show current track state, escalation badge
-- ShipmentRow: supplier clock indicator (days since order, warning at day 2)
+- ShipmentRow: track state, escalation badge, supplier clock (days since order, warning at day 2)
 - New: pick sheet page (mobile-first HTML)
 
 ---
 
-## PHASE 9 — Full Customer Portal (after Phase 8)
+## Key Files (current SHAs)
 
-Builds on Phase 8 foundation (pick sheet page, delivery day page, tracking status).
-
-- Customer-facing order status page (progress, tracking history, past orders)
-- Light auth: last 4 phone + shipping ZIP
-- Shows: current status, all shipments, tracking, estimated delivery, BOL link
-- Future: browser extension
-- Future: mobile app (Phase 12)
-
----
-
-## PHASE 10 — Full Warehouse Portal (after Phase 8)
-
-Builds on Phase 8 foundation (warehouse response form).
-
-- Full warehouse login (last 4 phone + warehouse ZIP)
-- View all open orders assigned to their warehouse
-- Download BOL PDF
-- Schedule R+L pickup
-- CFC notification when pickup scheduled
-
----
-
-## PHASE 11 — SMS (after Phase 8)
-
-SMS slots into every Phase 8 notification point:
-- Payment confirmed
-- Order shipped
-- Delivery tomorrow
-- Delivery today (with stop number)
-- Delivered
-
----
-
-## PHASE 12 — Mobile App (after Phase 9)
-
-Customer-specific version of Phase 9 portal as a native app.
-
----
-
-## Key Files
-
-cfc-orders:checkout.py               sha 635ad071
-cfc-orders:invoice_pdf.py            sha 17582f15
-cfc-orders:email_templates.py        sha 96ca2b7f
-cfc-orders:email_sender.py           sha 12bed3e8
-cfc-orders:checkout_routes.py        sha ffc0c8a8
-cfc-orders:payment_triggers.py       sha 8b6688cb
-cfc-orders:square_sync.py            sha c3c6158b
-cfc-orders:shippo_rates.py           sha 835c069f
-cfc-orders:shipping_routes.py        sha f759b973
-cfc-orders:requirements.txt          sha 6d27a806
-cfc-orders:handoffs/SESSION_HANDOFF_ORDERS.md  sha (this file)
-cfc-orders-frontend:src/App.jsx      sha 72b0251e — v7.2.4
-cfc-orders-frontend:src/components/ShippingManager.jsx  sha a8baafeb — v5.9.5
-cfc-orders-frontend:README.md        sha 927706cc
+| File | SHA |
+|------|-----|
+| cfc-orders:email_templates.py | e66c7ba2 |
+| cfc-orders:checkout.py | 76ff33fa |
+| cfc-orders:orders_routes.py | 27ece593 |
+| cfc-orders:ai_summary.py | 15a85caf |
+| cfc-orders:sync_service.py | 240c2219 |
+| cfc-orders:sync_routes.py | dfaa5ea7 |
+| cfc-orders:config.py | 7475f384 |
+| cfc-orders:invoice_pdf.py | 17582f15 |
+| cfc-orders:email_sender.py | 12bed3e8 |
+| cfc-orders:checkout_routes.py | ffc0c8a8 |
+| cfc-orders:payment_triggers.py | 8b6688cb |
+| cfc-orders:square_sync.py | c3c6158b |
+| cfc-orders:shippo_rates.py | 835c069f |
+| cfc-orders:shipping_routes.py | f759b973 |
+| cfc-orders-frontend:src/App.jsx | 74531425 (v7.4.0) |
+| cfc-orders-frontend:src/index.css | ba6be644 (v7.3.0) |
+| cfc-orders-frontend:src/components/ShippingManager.jsx | ea4de1bf (v5.9.8) |
+| cfc-orders-frontend:src/components/ShipmentRow.jsx | 398b287a (v5.9.4) |
 
 ---
 
 ## Critical Reminders
 
-- SANDBOX only — do not touch production.
+- SANDBOX only — do not touch production until Phase 7 promotion steps complete.
 - Shared PostgreSQL DB — migrations affect production data.
 - ADMIN_API_KEY=CFC2026 ✅ set on sandbox Render.
 - Gmail OAuth ✅ working — refresh token regenerated 2026-04-04.
 - Do NOT set SQUARE_ENVIRONMENT — deferred.
-- PS5 PowerShell: NEVER use &&. One command per block. Set-Content body.json then -InFile.
+- PS5 PowerShell: NEVER use &&. One command per block.
 - NEVER suggest cold start — Render is PAID.
 - Lane C (RTA Weight) blocked on WS5 — do not touch.
-- LI warehouse name/address correction pending — deferred until next file touch.
 - WS17 FILE LOCK still active — no WS17 files without explicit consent.
