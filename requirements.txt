@@ -1,5 +1,5 @@
 # CFC Order Workflow Backend v6.2.0
-# Updated 2026-03-19 — Phase 5B (rate limiting)
+# Updated 2026-04-04 — Add reportlab for PDF invoice generation
 
 # Web framework
 fastapi
@@ -30,3 +30,6 @@ squareup
 # Rate limiting
 slowapi
 limits
+
+# PDF invoice generation
+reportlab
