@@ -20,35 +20,28 @@ if DATABASE_URL and "sslmode" not in DATABASE_URL:
 # API CONFIGS
 # =============================================================================
 
-# B2BWave API
 B2BWAVE_URL = os.environ.get("B2BWAVE_URL", "").strip().rstrip('/')
 B2BWAVE_USERNAME = os.environ.get("B2BWAVE_USERNAME", "").strip()
 B2BWAVE_API_KEY = os.environ.get("B2BWAVE_API_KEY", "").strip()
 
-# Anthropic (Claude AI)
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "").strip()
 
-# Shippo (Small Package Shipping)
 SHIPPO_API_KEY = os.environ.get("SHIPPO_API_KEY", "").strip()
 
-# Square (Payments)
 SQUARE_ACCESS_TOKEN = os.environ.get("SQUARE_ACCESS_TOKEN", "").strip()
 SQUARE_ENVIRONMENT = os.environ.get("SQUARE_ENVIRONMENT", "sandbox").strip()
 
-# Checkout
 CHECKOUT_BASE_URL = os.environ.get("CHECKOUT_BASE_URL", "").strip()
 CHECKOUT_SECRET = os.environ.get("CHECKOUT_SECRET", "default-secret-change-me")
 GMAIL_SEND_ENABLED = os.environ.get("GMAIL_SEND_ENABLED", "false").lower() == "true"
 
-# R+L Quote Sandbox (microservice for address validation + freight quoting)
-# Phase 2: Proxy to this service instead of calling R+L directly
 RL_QUOTE_SANDBOX_URL = os.environ.get("RL_QUOTE_SANDBOX_URL", "https://rl-quote-sandbox.onrender.com").strip()
 
 # =============================================================================
 # AUTO-SYNC CONFIG
 # =============================================================================
 
-AUTO_SYNC_INTERVAL_MINUTES = 15
+AUTO_SYNC_INTERVAL_MINUTES = 7.5   # sync every 7.5 minutes
 AUTO_SYNC_DAYS_BACK = 7
 
 # =============================================================================
@@ -57,7 +50,7 @@ AUTO_SYNC_DAYS_BACK = 7
 
 SUPPLIER_INFO = {
     'LI': {
-        'name': 'Li',
+        'name': 'Cabinetry Distribution',
         'address': '561 Keuka Rd, Interlachen FL 32148',
         'contact': 'Li Yang (615) 410-6775',
         'email': 'cabinetrydistribution@gmail.com'
@@ -105,13 +98,13 @@ SUPPLIER_INFO = {
         'email': 'lnccabinetryvab@gmail.com'
     },
     'GHI': {
-        'name': 'GHI',
+        'name': 'GHI Cabinets',
         'address': '1807 48th Ave E Unit 110, Palmetto FL 34221',
         'contact': 'Kathryn Belfiore (941) 479-8070',
         'email': 'kbelfiore@ghicabinets.com'
     },
     'Linda': {
-        'name': 'Linda / Dealer Cabinetry',
+        'name': 'Dealer Cabinetry',
         'address': '202 West Georgia Ave, Bremen GA 30110',
         'contact': 'Linda Yang (678) 821-3505',
         'email': 'linda@dealercabinetry.com'
@@ -126,16 +119,22 @@ WAREHOUSE_ZIPS = {
     'LI': '32148',
     'DL': '32256',
     'ROC': '30071',
+    'GHI': '34221',
     'Go Bravura': '77066',
     'Love-Milestone': '32824',
     'Cabinet & Stone': '77043',
+    'Cabinet & Stone CA': '90723',
     'DuraStone': '77037',
     'L&C Cabinetry': '23454',
-    'GHI': '34221',
-    'Linda': '30110'
+    'Linda': '30110',
+    # Full names for compatibility
+    'Cabinetry Distribution': '32148',
+    'DL Cabinetry': '32256',
+    'ROC Cabinetry': '30071',
+    'GHI Cabinets': '34221',
+    'Dealer Cabinetry': '30110',
 }
 
-# Keywords that indicate oversized shipment
 OVERSIZED_KEYWORDS = ['OVEN', 'PANTRY', '96"', '96*', 'X96', '96X', '96H', '96 H']
 
 # =============================================================================
@@ -143,21 +142,16 @@ OVERSIZED_KEYWORDS = ['OVEN', 'PANTRY', '96"', '96*', 'X96', '96X', '96H', '96 H
 # =============================================================================
 
 def is_b2bwave_configured():
-    """Check if B2BWave API is configured"""
     return bool(B2BWAVE_URL and B2BWAVE_USERNAME and B2BWAVE_API_KEY)
 
 def is_anthropic_configured():
-    """Check if Anthropic API is configured"""
     return bool(ANTHROPIC_API_KEY)
 
 def is_shippo_configured():
-    """Check if Shippo API is configured"""
     return bool(SHIPPO_API_KEY)
 
 def is_square_configured():
-    """Check if Square API is configured"""
     return bool(SQUARE_ACCESS_TOKEN)
 
 def is_rl_quote_sandbox_configured():
-    """Check if RL Quote Sandbox URL is configured"""
     return bool(RL_QUOTE_SANDBOX_URL)
