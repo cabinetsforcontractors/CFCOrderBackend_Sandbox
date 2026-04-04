@@ -32,12 +32,12 @@ TARIFF_RATE = 0.08  # 8%
 
 WAREHOUSES = {
     'LI': {
-        'name': 'Liberty Industries',
-        'address': '103 Trisket Ln',
+        'name': 'Cabinetry Distribution',
+        'address': '561 Keuka Rd',
         'city': 'Interlachen',
         'state': 'FL',
         'zip': '32148',
-        'phone': '386-325-0825'
+        'phone': '(615) 410-6775'
     },
     'DL': {
         'name': 'DL Cabinetry',
@@ -239,11 +239,6 @@ def get_shipping_quote(origin_zip: str, dest_zip: str, weight: float, is_residen
 
 # =============================================================================
 # SHIPPING METHOD SELECTION
-# Rules:
-# 1. X-separated dims in name → LTL
-# 2. Weight >= 70 lbs → LTL
-# 3. Single number >= 84 in name → small_package, LONG_PARCEL (98x9x6)
-# 4. Otherwise → small_package, standard (24x18x6)
 # =============================================================================
 
 SMALL_PACKAGE_WEIGHT_LIMIT = 70
@@ -278,9 +273,7 @@ def get_shippo_quote(origin_zip: str, dest_zip: str, weight: float, is_residenti
 
 
 def select_shipping_method(weight: float, items: list):
-    """
-    Returns: (method, parcel_length)
-    """
+    """Returns: (method, parcel_length)"""
     max_length = None
     for item in items:
         name = item.get('name', '')
@@ -303,12 +296,6 @@ def calculate_order_shipping(order_data: dict, dest_address: dict) -> Dict:
     """
     Calculate shipping for an entire order, grouped by warehouse.
     Applies 8% tariff on items subtotal.
-
-    Returns:
-        {
-            shipments, total_items, tariff_amount, tariff_rate,
-            total_shipping, grand_total, destination
-        }
     """
     line_items = order_data.get('line_items', []) or order_data.get('products', [])
     b2bwave_total_weight = order_data.get('total_weight', 0)
@@ -415,7 +402,6 @@ def calculate_order_shipping(order_data: dict, dest_address: dict) -> Dict:
         qty = int(item.get('quantity', 1) or 1)
         total_items += price * qty
 
-    # Apply 8% tariff on items subtotal
     tariff_amount = round(total_items * TARIFF_RATE, 2)
     grand_total = round(total_items + tariff_amount + total_shipping, 2)
 
@@ -452,7 +438,6 @@ def fetch_b2bwave_order(order_id: str) -> Optional[Dict]:
                 line_items = []
                 for op in order_products:
                     product = op.get('order_product', op)
-                    # B2BWave uses final_price as the actual unit price
                     unit_price = float(
                         product.get('final_price') or product.get('price') or 0
                     )
@@ -471,7 +456,6 @@ def fetch_b2bwave_order(order_id: str) -> Optional[Dict]:
                 except (ValueError, TypeError):
                     total_weight = 0
 
-                # Parse order date from submitted_at
                 submitted_at = raw_order.get('submitted_at', '')
                 try:
                     order_date = datetime.fromisoformat(
@@ -487,12 +471,12 @@ def fetch_b2bwave_order(order_id: str) -> Optional[Dict]:
                     'id': raw_order.get('id'),
                     'customer_name': raw_order.get('customer_name'),
                     'customer_email': customer_email,
-                    'email': customer_email,  # alias used by email_sender / payment_triggers
+                    'email': customer_email,
                     'customer_phone': raw_order.get('customer_phone', ''),
                     'company_name': raw_order.get('customer_company'),
                     'line_items': line_items,
-                    'order_total': order_total,       # gross subtotal from B2BWave
-                    'subtotal': order_total,           # backwards compat alias
+                    'order_total': order_total,
+                    'subtotal': order_total,
                     'order_date': order_date,
                     'total_weight': total_weight,
                     'shipping_address': {
@@ -547,8 +531,6 @@ def create_square_payment_link(amount_cents: int, order_id: str, customer_email:
             }
 
         data = json.dumps(payload).encode()
-        print(f"[SQUARE] Creating payment link: {url}")
-
         req = urllib.request.Request(url, data=data, method='POST')
         req.add_header('Authorization', f'Bearer {SQUARE_ACCESS_TOKEN}')
         req.add_header('Content-Type', 'application/json')
