@@ -179,6 +179,7 @@ def b2bwave_order_webhook(payload: dict):
     Trigger 1: Generates checkout token, stores in DB, calculates shipping,
     then emails the customer their payment link + PDF invoice.
     Also sends internal notification to CFC with order summary.
+    Auto-creates one order_shipments row per warehouse group (idempotent).
     """
     if not CHECKOUT_ENABLED:
         return {"status": "error", "message": "Checkout module not enabled"}
@@ -222,6 +223,38 @@ def b2bwave_order_webhook(payload: dict):
                 except Exception as se:
                     print(f"[WEBHOOK] Shipping calc failed for order {order_id}: {se}")
                     shipping_result = None
+
+                # Auto-create one order_shipments row per warehouse group (idempotent)
+                if shipping_result and shipping_result.get('shipments'):
+                    try:
+                        with get_db() as wh_conn:
+                            with wh_conn.cursor() as wh_cur:
+                                created = 0
+                                for ship in shipping_result['shipments']:
+                                    wh_code = ship.get('warehouse')
+                                    if not wh_code or wh_code == 'UNKNOWN':
+                                        continue
+                                    wh_name = ship.get('warehouse_name', wh_code)
+                                    wh_short = wh_name.replace(' & ', '-').replace(' ', '-')
+                                    ship_id = f"{order_id}-{wh_short}"
+                                    origin_zip = ship.get('origin_zip', '')
+                                    weight = ship.get('weight') or None
+                                    is_oversized = ship.get('is_oversized', False)
+                                    wh_cur.execute(
+                                        "SELECT id FROM order_shipments WHERE shipment_id = %s",
+                                        (ship_id,)
+                                    )
+                                    if not wh_cur.fetchone():
+                                        wh_cur.execute(
+                                            """INSERT INTO order_shipments
+                                               (order_id, shipment_id, warehouse, status, origin_zip, weight, has_oversized)
+                                               VALUES (%s, %s, %s, 'needs_order', %s, %s, %s)""",
+                                            (str(order_id), ship_id, wh_name, origin_zip, weight, is_oversized)
+                                        )
+                                        created += 1
+                        print(f"[WEBHOOK] Shipment records: {created} created for order {order_id} ({len(shipping_result['shipments'])} warehouses)")
+                    except Exception as wh_e:
+                        print(f"[WEBHOOK] Shipment record creation failed for order {order_id}: {wh_e}")
 
                 order_data['payment_link'] = checkout_url
                 order_data['shipping_result'] = shipping_result  # for PDF + template
@@ -464,7 +497,7 @@ def checkout_ui(order_id: str, token: str):
     <!-- Policy Agreement Modal -->
     <div class="modal-overlay" id="policyModal">
         <div class="modal">
-            <h3>⚠️ Please Review Our Policies</h3>
+            <h3>&#x26A0;&#xFE0F; Please Review Our Policies</h3>
             <p style="font-size:14px;color:#555;margin-bottom:12px;">By proceeding to payment you agree to the following terms:</p>
             <ul>
                 <li><strong>No returns on assembled or installed cabinets.</strong></li>
@@ -525,15 +558,15 @@ def checkout_ui(order_id: str, token: str):
                 shipping.shipments.forEach(ship => {{
                     const quoteOk = ship.quote && ship.quote.success;
                     html += `<div class="shipment">
-                        <div class="shipment-header">📦 From: ${{ship.warehouse_name}} (${{ship.origin_zip}})</div>
-                        <div class="shipment-detail">${{ship.items.length}} item(s) · ${{ship.weight}} lbs</div>
+                        <div class="shipment-header">&#x1F4E6; From: ${{ship.warehouse_name}} (${{ship.origin_zip}})</div>
+                        <div class="shipment-detail">${{ship.items.length}} item(s) &middot; ${{ship.weight}} lbs</div>
                         <div class="shipment-detail" style="margin-top:6px;">
                             ${{quoteOk ? `<strong>Shipping: $${{ship.shipping_cost.toFixed(2)}}</strong>` : `<span style="color:#c00">Quote unavailable</span>`}}
                         </div>
                     </div>`;
                 }});
                 if (shipping.shipments.some(s => s.shipping_method === 'ltl')) {{
-                    html += `<div class="residential-note">🏠 Residential delivery includes liftgate service</div>`;
+                    html += `<div class="residential-note">&#x1F3E0; Residential delivery includes liftgate service</div>`;
                 }}
             }}
 
