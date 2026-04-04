@@ -18,6 +18,7 @@ Endpoints:
     POST /gmail/sync               — pull order updates from Gmail
     POST /square/sync              — pull payments from Square
     GET  /square/status            — check Square config (public)
+    POST /orders/regenerate-summaries — regenerate AI 6-bullet summaries for active orders
 """
 
 from datetime import datetime, timezone, timedelta
@@ -29,10 +30,12 @@ from config import B2BWAVE_URL, B2BWAVE_USERNAME, B2BWAVE_API_KEY
 from db_helpers import get_db
 
 try:
-    from sync_service import b2bwave_api_request, sync_order_from_b2bwave
+    from sync_service import b2bwave_api_request, sync_order_from_b2bwave, refresh_ai_summaries_for_active_orders
     SYNC_SERVICE_LOADED = True
 except ImportError:
     SYNC_SERVICE_LOADED = False
+    def refresh_ai_summaries_for_active_orders():
+        pass
 
 try:
     from gmail_sync import run_gmail_sync, gmail_configured
@@ -194,3 +197,21 @@ def square_status():
             else "Set SQUARE_ACCESS_TOKEN and SQUARE_LOCATION_ID environment variables"
         ),
     }
+
+
+# =============================================================================
+# AI SUMMARIES
+# =============================================================================
+
+@sync_router.post("/orders/regenerate-summaries")
+def regenerate_ai_summaries(_: bool = Depends(require_admin)):
+    """
+    Trigger immediate AI summary regeneration for all active orders.
+    Same logic as the auto-sync refresh but on-demand. [admin]
+    Runs synchronously — may take 30-60s for many orders.
+    """
+    try:
+        refresh_ai_summaries_for_active_orders()
+        return {"status": "ok", "message": "AI summaries regenerated for active orders"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"AI summary refresh error: {str(e)}")
