@@ -11,7 +11,7 @@ import urllib.request
 import urllib.error
 import hmac
 import hashlib
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Dict, Any
 
 # Config from environment
@@ -22,14 +22,14 @@ B2BWAVE_API_KEY = os.environ.get("B2BWAVE_API_KEY", "").strip()
 SQUARE_APP_ID = os.environ.get("SQUARE_APP_ID", "").strip()
 SQUARE_ACCESS_TOKEN = os.environ.get("SQUARE_ACCESS_TOKEN", "").strip()
 SQUARE_LOCATION_ID = os.environ.get("SQUARE_LOCATION_ID", "").strip()
-SQUARE_ENVIRONMENT = os.environ.get("SQUARE_ENVIRONMENT", "sandbox").strip()  # sandbox or production
+SQUARE_ENVIRONMENT = os.environ.get("SQUARE_ENVIRONMENT", "sandbox").strip()
 
 RL_QUOTE_API_URL = os.environ.get("RL_QUOTE_API_URL", "https://rl-quote-sandbox.onrender.com").strip()
+CHECKOUT_BASE_URL = os.environ.get("CHECKOUT_BASE_URL", "").strip()
 
-CHECKOUT_BASE_URL = os.environ.get("CHECKOUT_BASE_URL", "").strip()  # Your checkout page URL
+# Tariff rate applied to order subtotal
+TARIFF_RATE = 0.08  # 8%
 
-# Warehouse data
-# Warehouse information - full addresses for BOL creation
 WAREHOUSES = {
     'LI': {
         'name': 'Liberty Industries',
@@ -129,7 +129,6 @@ WAREHOUSES = {
     },
 }
 
-# SKU prefix to warehouse mapping
 SKU_WAREHOUSE_MAP = {
     # LI
     'WSP': 'LI', 'GSP': 'LI', 'NBLK': 'LI',
@@ -144,14 +143,14 @@ SKU_WAREHOUSE_MAP = {
     'HGW': 'Go Bravura', 'EMW': 'Go Bravura', 'EGG': 'Go Bravura', 'URC': 'Go Bravura',
     'WWW': 'Go Bravura', 'NDG': 'Go Bravura', 'NCC': 'Go Bravura', 'NBW': 'Go Bravura',
     'BX': 'Go Bravura', 'URW': 'Go Bravura',
-    # Love-Milestone (preferred for these door styles, ARTISAN is fallback)
+    # Love-Milestone
     'HSS': 'Love', 'LGS': 'Love', 'LGSS': 'Love', 'DG': 'Love',
     'EOK': 'Love', 'EWT': 'Love',
-    # Cabinet & Stone (TX default, CA for MSCS)
+    # Cabinet & Stone
     'BSN': 'Cabinet & Stone', 'SGCS': 'Cabinet & Stone', 'WOCS': 'Cabinet & Stone',
     'EWSCS': 'Cabinet & Stone', 'CAWN': 'Cabinet & Stone', 'ESCS': 'Cabinet & Stone', 'CS-': 'Cabinet & Stone',
-    'BSW': 'Cabinet & Stone',  # Bright Snow White
-    'MSCS': 'Cabinet & Stone CA',  # Ships from California
+    'BSW': 'Cabinet & Stone',
+    'MSCS': 'Cabinet & Stone CA',
     # DuraStone
     'NSN': 'DuraStone', 'NBDS': 'DuraStone', 'CMEN': 'DuraStone', 'SIV': 'DuraStone',
     # L&C
@@ -166,25 +165,16 @@ def detect_item_dimensions(name: str):
     """
     Parse product name to detect shipping dimension type.
 
-    Rules (checked in order):
-    1. X-separated numbers/dimensions → LTL truck shipping
-       Examples: "1.5X96X.75 Ref Filler", "24WX84HX3D Refrigerator Panel", "1.5WX96H Refrigerator Panel"
-    2. Single standalone number >= 84 → long package (small package, real length passed to Shippo)
-       Examples: "96 Inside Corner Molding", "96 Crown Molding", "96 Outside Corner Molding"
-    3. Otherwise → standard small package
-
-    Returns:
-        ('ltl', None)
-        ('long_package', length_inches)
-        ('standard', None)
+    Rules:
+    1. X-separated dimensions (e.g. "24WX84HX3D") → LTL
+    2. Single standalone number >= 84 (e.g. "96 Crown Molding") → long_package
+    3. Otherwise → standard
     """
     name_upper = name.upper()
 
-    # X-separated dimensions → LTL (e.g. "1.5X96X.75", "24WX84HX3D", "1.5WX96H")
     if re.search(r'\d+\.?\d*[WHD]?X\d+', name_upper):
         return ('ltl', None)
 
-    # Single standalone number >= 84 → long package (Shippo with real length)
     numbers = re.findall(r'\b(\d+(?:\.\d+)?)\b', name)
     large_numbers = [float(n) for n in numbers if float(n) >= 84]
     if len(large_numbers) == 1:
@@ -195,56 +185,27 @@ def detect_item_dimensions(name: str):
 
 def get_warehouse_for_sku(sku: str) -> Optional[str]:
     """Get warehouse code from SKU prefix"""
-    # Extract prefix (first part before dash or numbers)
     prefix = sku.split('-')[0] if '-' in sku else sku
-    # Remove trailing numbers
     prefix = ''.join(c for c in prefix if not c.isdigit()).upper()
-
     return SKU_WAREHOUSE_MAP.get(prefix)
 
 
 def is_oversized(product_name: str) -> bool:
-    """Check if product is oversized based on name"""
     name_upper = product_name.upper()
     return any(keyword in name_upper for keyword in OVERSIZED_KEYWORDS)
 
 
 def group_items_by_warehouse(line_items: list) -> Dict[str, list]:
-    """Group order items by their source warehouse"""
     groups = {}
-
     for item in line_items:
         sku = item.get('sku', '') or item.get('product_sku', '')
         warehouse = get_warehouse_for_sku(sku)
-
         if not warehouse:
             warehouse = 'UNKNOWN'
-
         if warehouse not in groups:
             groups[warehouse] = []
-
         groups[warehouse].append(item)
-
     return groups
-
-
-def calculate_shipment_weight(items: list, order_total_weight: float = 0) -> float:
-    """
-    Calculate total weight for items.
-
-    Priority:
-    1. Use B2BWave's total_weight if available (for single-warehouse orders)
-    2. Fall back to estimate: 30 lbs per cabinet
-    """
-    if order_total_weight and order_total_weight > 0:
-        return max(order_total_weight, 1)
-
-    total_weight = 0
-    for item in items:
-        qty = item.get('quantity', 1)
-        total_weight += qty * 30
-
-    return max(total_weight, 1)
 
 
 def get_shipping_quote(origin_zip: str, dest_zip: str, weight: float, is_residential: bool, is_oversized: bool = False) -> Dict:
@@ -278,19 +239,14 @@ def get_shipping_quote(origin_zip: str, dest_zip: str, weight: float, is_residen
 
 # =============================================================================
 # SHIPPING METHOD SELECTION
-# =============================================================================
-#
-# Rules (checked in order):
-# 1. Item name has X-separated dimensions (e.g. "24WX84HX3D") → LTL
+# Rules:
+# 1. X-separated dims in name → LTL
 # 2. Weight >= 70 lbs → LTL
-# 3. Item name has single number >= 84 (e.g. "96 Crown Molding") → small_package, LONG_PARCEL box (98x9x6)
-# 4. Otherwise → small_package, standard box (24x18x6)
-#
-# Under 70 lbs → Shippo (UPS/USPS small package)
-# 70 lbs and over → R+L (LTL freight)
+# 3. Single number >= 84 in name → small_package, LONG_PARCEL (98x9x6)
+# 4. Otherwise → small_package, standard (24x18x6)
 # =============================================================================
 
-SMALL_PACKAGE_WEIGHT_LIMIT = 70  # lbs - orders under this use Shippo
+SMALL_PACKAGE_WEIGHT_LIMIT = 70
 
 
 def get_shippo_quote(origin_zip: str, dest_zip: str, weight: float, is_residential: bool = True, length: int = None) -> Dict:
@@ -312,12 +268,10 @@ def get_shippo_quote(origin_zip: str, dest_zip: str, weight: float, is_residenti
 
         query_string = '&'.join(f"{k}={v}" for k, v in params.items())
         full_url = f"{url}?{query_string}"
-
         req = urllib.request.Request(full_url)
 
         with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read().decode())
-            return data
+            return json.loads(resp.read().decode())
 
     except Exception as e:
         return {'success': False, 'error': str(e)}
@@ -325,17 +279,7 @@ def get_shippo_quote(origin_zip: str, dest_zip: str, weight: float, is_residenti
 
 def select_shipping_method(weight: float, items: list):
     """
-    Determine shipping method and parcel length.
-
     Returns: (method, parcel_length)
-        method: 'small_package' or 'ltl'
-        parcel_length: None for standard dims, int inches for long items
-
-    Rules (checked in order):
-    1. Item name has X-separated dimensions → LTL
-    2. Weight >= 70 lbs → LTL
-    3. Item name has single number >= 84 → small_package, use LONG_PARCEL box
-    4. Otherwise → small_package, standard dims
     """
     max_length = None
     for item in items:
@@ -358,29 +302,27 @@ def select_shipping_method(weight: float, items: list):
 def calculate_order_shipping(order_data: dict, dest_address: dict) -> Dict:
     """
     Calculate shipping for an entire order, grouped by warehouse.
-    Uses Shippo for small packages (<70 lbs) and R+L for LTL (70+ lbs).
+    Applies 8% tariff on items subtotal.
 
-    Weight Priority:
-    1. RTA database (SKU-level weights) - most accurate for split orders
-    2. B2BWave total_weight - good for single warehouse orders
-    3. Estimate at 30 lbs per item - fallback
+    Returns:
+        {
+            shipments, total_items, tariff_amount, tariff_rate,
+            total_shipping, grand_total, destination
+        }
     """
     line_items = order_data.get('line_items', []) or order_data.get('products', [])
-
     b2bwave_total_weight = order_data.get('total_weight', 0)
 
     rta_weight_info = None
     try:
         from rta_database import calculate_order_weight_and_flags
         rta_weight_info = calculate_order_weight_and_flags(line_items)
-        print(f"[CHECKOUT] RTA weight lookup: {rta_weight_info.get('total_weight')} lbs, long_pallet: {rta_weight_info.get('has_long_pallet_item')}")
+        print(f"[CHECKOUT] RTA weight: {rta_weight_info.get('total_weight')} lbs")
     except Exception as e:
         print(f"[CHECKOUT] RTA database not available: {e}")
 
     warehouse_groups = group_items_by_warehouse(line_items)
-
     is_residential = True
-
     dest_zip = dest_address.get('zip', '') or dest_address.get('postal_code', '')
 
     shipments = []
@@ -413,7 +355,6 @@ def calculate_order_shipping(order_data: dict, dest_address: dict) -> Dict:
         for item in items:
             sku = item.get('sku', '')
             qty = item.get('quantity', 1)
-
             rta_info = sku_to_rta.get(sku)
             if rta_info:
                 warehouse_weight += rta_info.get('line_weight', 0)
@@ -426,9 +367,7 @@ def calculate_order_shipping(order_data: dict, dest_address: dict) -> Dict:
             warehouse_weight = b2bwave_total_weight
 
         weight = max(warehouse_weight, 1)
-
         oversized = has_long_pallet or any(is_oversized(item.get('name', '')) for item in items)
-
         shipping_method, parcel_length = select_shipping_method(weight, items)
 
         if shipping_method == 'small_package':
@@ -439,7 +378,6 @@ def calculate_order_shipping(order_data: dict, dest_address: dict) -> Dict:
                 is_residential=is_residential,
                 length=parcel_length
             )
-
             shipping_cost = 0
             if quote.get('success') and quote.get('cheapest'):
                 shipping_cost = quote['cheapest'].get('amount', 0)
@@ -451,7 +389,6 @@ def calculate_order_shipping(order_data: dict, dest_address: dict) -> Dict:
                 is_residential=is_residential,
                 is_oversized=oversized
             )
-
             shipping_cost = 0
             if quote.get('success') and quote.get('quote'):
                 shipping_cost = quote['quote'].get('customer_price', 0)
@@ -471,17 +408,24 @@ def calculate_order_shipping(order_data: dict, dest_address: dict) -> Dict:
 
         total_shipping += shipping_cost
 
+    # Calculate item subtotal from line items
     total_items = 0
     for item in line_items:
         price = float(item.get('price', 0) or item.get('unit_price', 0) or 0)
         qty = int(item.get('quantity', 1) or 1)
         total_items += price * qty
 
+    # Apply 8% tariff on items subtotal
+    tariff_amount = round(total_items * TARIFF_RATE, 2)
+    grand_total = round(total_items + tariff_amount + total_shipping, 2)
+
     return {
         'shipments': shipments,
-        'total_shipping': round(total_shipping, 2),
         'total_items': round(total_items, 2),
-        'grand_total': round(total_items + total_shipping, 2),
+        'tariff_rate': TARIFF_RATE,
+        'tariff_amount': tariff_amount,
+        'total_shipping': round(total_shipping, 2),
+        'grand_total': grand_total,
         'destination': dest_address
     }
 
@@ -493,7 +437,6 @@ def fetch_b2bwave_order(order_id: str) -> Optional[Dict]:
 
     try:
         url = f"{B2BWAVE_URL}/api/orders.json?id_eq={order_id}"
-
         credentials = f"{B2BWAVE_USERNAME}:{B2BWAVE_API_KEY}"
         encoded_credentials = base64.b64encode(credentials.encode()).decode()
 
@@ -509,11 +452,17 @@ def fetch_b2bwave_order(order_id: str) -> Optional[Dict]:
                 line_items = []
                 for op in order_products:
                     product = op.get('order_product', op)
+                    # B2BWave uses final_price as the actual unit price
+                    unit_price = float(
+                        product.get('final_price') or product.get('price') or 0
+                    )
+                    qty = int(float(product.get('quantity', 1)))
                     line_items.append({
                         'sku': product.get('product_code', ''),
                         'name': product.get('product_name', ''),
-                        'quantity': int(float(product.get('quantity', 1))),
-                        'price': float(product.get('price', 0)),
+                        'quantity': qty,
+                        'price': unit_price,
+                        'line_total': round(unit_price * qty, 2),
                     })
 
                 total_weight_raw = raw_order.get('total_weight', 0)
@@ -522,14 +471,29 @@ def fetch_b2bwave_order(order_id: str) -> Optional[Dict]:
                 except (ValueError, TypeError):
                     total_weight = 0
 
+                # Parse order date from submitted_at
+                submitted_at = raw_order.get('submitted_at', '')
+                try:
+                    order_date = datetime.fromisoformat(
+                        submitted_at.replace('Z', '+00:00')
+                    ).strftime('%B %d, %Y') if submitted_at else ''
+                except Exception:
+                    order_date = submitted_at or ''
+
+                order_total = float(raw_order.get('gross_total', 0) or 0)
+                customer_email = raw_order.get('customer_email', '')
+
                 return {
                     'id': raw_order.get('id'),
                     'customer_name': raw_order.get('customer_name'),
-                    'customer_email': raw_order.get('customer_email'),
+                    'customer_email': customer_email,
+                    'email': customer_email,  # alias used by email_sender / payment_triggers
                     'customer_phone': raw_order.get('customer_phone', ''),
                     'company_name': raw_order.get('customer_company'),
                     'line_items': line_items,
-                    'subtotal': float(raw_order.get('gross_total', 0)),
+                    'order_total': order_total,       # gross subtotal from B2BWave
+                    'subtotal': order_total,           # backwards compat alias
+                    'order_date': order_date,
                     'total_weight': total_weight,
                     'shipping_address': {
                         'address': raw_order.get('address', ''),
@@ -553,7 +517,6 @@ def create_square_payment_link(amount_cents: int, order_id: str, customer_email:
     if not SQUARE_ACCESS_TOKEN:
         print("[SQUARE] No access token configured")
         return None
-
     if not SQUARE_LOCATION_ID:
         print("[SQUARE] No location ID configured")
         return None
@@ -584,9 +547,7 @@ def create_square_payment_link(amount_cents: int, order_id: str, customer_email:
             }
 
         data = json.dumps(payload).encode()
-
         print(f"[SQUARE] Creating payment link: {url}")
-        print(f"[SQUARE] Payload: {payload}")
 
         req = urllib.request.Request(url, data=data, method='POST')
         req.add_header('Authorization', f'Bearer {SQUARE_ACCESS_TOKEN}')
@@ -595,26 +556,22 @@ def create_square_payment_link(amount_cents: int, order_id: str, customer_email:
 
         with urllib.request.urlopen(req, timeout=30) as resp:
             result = json.loads(resp.read().decode())
-            print(f"[SQUARE] Response: {result}")
             return result.get('payment_link', {}).get('url')
 
     except urllib.error.HTTPError as e:
-        error_body = e.read().decode()
-        print(f"[SQUARE] HTTP Error {e.code}: {error_body}")
+        print(f"[SQUARE] HTTP Error {e.code}: {e.read().decode()}")
         return None
     except Exception as e:
-        print(f"[SQUARE] Error creating payment link: {e}")
+        print(f"[SQUARE] Error: {e}")
         return None
 
 
 def generate_checkout_token(order_id: str) -> str:
-    """Generate a secure token for checkout link"""
     secret = os.environ.get("CHECKOUT_SECRET", "default-secret-change-me")
     message = f"{order_id}-{datetime.now().strftime('%Y%m%d')}"
     return hmac.new(secret.encode(), message.encode(), hashlib.sha256).hexdigest()[:16]
 
 
 def verify_checkout_token(order_id: str, token: str) -> bool:
-    """Verify checkout token is valid"""
     expected = generate_checkout_token(order_id)
     return hmac.compare_digest(token, expected)
