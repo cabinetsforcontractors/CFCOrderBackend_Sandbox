@@ -251,7 +251,7 @@ def _render_payment_link(order: Dict) -> str:
     payment_link = order.get("payment_link", "#")
     line_items = order.get("line_items", [])
 
-    # Shipping result may be embedded in order_data
+    # Shipping result
     sr = order.get("shipping_result", {})
     total_items = sr.get("total_items", order.get("order_total", 0))
     tariff_rate = sr.get("tariff_rate", 0.08)
@@ -259,17 +259,25 @@ def _render_payment_link(order: Dict) -> str:
     total_shipping = sr.get("total_shipping", 0)
     grand_total = sr.get("grand_total", round(float(total_items) + tariff_amount + total_shipping, 2))
 
-    # Shipping address
+    # Shipping address — fix address2 to render on its own line
     addr = order.get("shipping_address", {})
-    addr_str = addr.get("address", "")
-    if addr.get("address2"):
-        addr_str += f", {addr['address2']}"
-    city_state_zip = f"{addr.get('city', '')}, {addr.get('state', '')} {addr.get('zip', '')}".strip(", ")
+    street = addr.get("address", "")
+    street2 = addr.get("address2", "")
+    city = addr.get("city", "")
+    state = addr.get("state", "")
+    zip_code = addr.get("zip", "")
+
+    # Build address HTML — address2 gets its own line, not comma-appended
+    addr_html = f"<strong>{street}</strong>"
+    if street2:
+        addr_html += f"<br/>{street2}"
+    city_state_zip = f"{city}, {state} {zip_code}".strip(", ")
+    if city_state_zip.strip():
+        addr_html += f"<br/>{city_state_zip}"
 
     # Bill to block
     bill_name = f"<strong>{company or customer}</strong>"
     bill_contact = f"<br/>{customer}" if company else ""
-    bill_addr = f"<br/>{addr_str}<br/>{city_state_zip}" if addr_str else ""
 
     # Line items table
     if line_items:
@@ -314,7 +322,9 @@ def _render_payment_link(order: Dict) -> str:
     <div class="meta-row">
         <div class="meta-box">
             <div class="meta-label">Bill To</div>
-            <div class="meta-value">{bill_name}{bill_contact}{bill_addr}</div>
+            <div class="meta-value">{bill_name}{bill_contact}</div>
+            <div class="meta-label" style="margin-top:10px;">Ship To</div>
+            <div class="meta-value">{addr_html if street else "Same as above"}</div>
         </div>
         <div class="meta-box" style="flex:0 0 180px;">
             <div class="meta-label">Invoice #</div>
@@ -336,17 +346,17 @@ def _render_payment_link(order: Dict) -> str:
     </table>
 
     <div class="cta-wrap">
-        <a href="{payment_link}" class="cta-button">Pay Now — ${grand_total:,.2f}</a>
+        <a href="{payment_link}" class="cta-button">Pay Now &mdash; ${grand_total:,.2f}</a>
     </div>
 
     <div class="policy-box">
-        <strong>⚠️ Please read before completing payment</strong>
+        <strong>&#9888;&#65039; Please read before completing payment</strong>
         By clicking Pay Now you agree to the following policies:
         <ul>
             <li>No returns on assembled or installed cabinets.</li>
             <li>20% restocking fee on returned undamaged items in original packaging.</li>
             <li>Damaged items must be noted on the delivery receipt and reported within 48 hours of delivery.</li>
-            <li>Buyer is responsible for verifying all measurements before ordering — we cannot accept returns for incorrect sizing.</li>
+            <li>Buyer is responsible for verifying all measurements before ordering &mdash; we cannot accept returns for incorrect sizing.</li>
             <li>Minor color variation between door samples and production run is normal and not grounds for return.</li>
             <li>Shipping quotes are estimates; final shipping cost may vary for remote locations.</li>
         </ul>
@@ -430,7 +440,7 @@ def _render_trusted_payment_reminder(order: Dict) -> str:
 
     body = f"""
     <p>Hi {first_name},</p>
-    <p>Just a friendly reminder — your cabinets for Order #{order_id} have shipped and we have an outstanding balance of <strong>{total_fmt}</strong>.</p>
+    <p>Just a friendly reminder &mdash; your cabinets for Order #{order_id} have shipped and we have an outstanding balance of <strong>{total_fmt}</strong>.</p>
     {_order_summary_block(order)}
     <p style="text-align:center;"><a href="{payment_link}" class="cta-button">Pay Now</a></p>
     <p>Thanks for your business,<br><strong>William Prince</strong><br>Cabinets For Contractors</p>
@@ -550,7 +560,7 @@ def render_template_preview(template_id: str) -> Optional[str]:
             {"sku": "WSP-B30", "name": "Base Cabinet 30W", "quantity": 2, "price": 124.00, "line_total": 248.00},
         ],
         "shipping_address": {
-            "address": "123 Main St", "city": "Atlanta", "state": "GA", "zip": "30301"
+            "address": "123 Main St", "address2": "Apt 4B", "city": "Atlanta", "state": "GA", "zip": "30301"
         },
         "shipping_result": {
             "total_items": 604.00, "tariff_rate": 0.08, "tariff_amount": 48.32,
