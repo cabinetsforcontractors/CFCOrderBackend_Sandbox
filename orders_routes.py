@@ -1065,6 +1065,7 @@ def get_rl_quote_data(shipment_id: str):
                         else None,
                         "quote_url": shipment.get("quote_url"),
                     },
+                    "is_residential": bool(shipment.get("is_residential", True)),
                     "rl_quote_url": "https://www.rlcarriers.com/freight/shipping/rate-quote",
                 }
     except Exception as e:
