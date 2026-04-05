@@ -164,11 +164,6 @@ OVERSIZED_KEYWORDS = ['PANTRY', 'OVEN', 'TALL', 'BROOM', 'LINEN', 'UTILITY']
 def detect_item_dimensions(name: str):
     """
     Parse product name to detect shipping dimension type.
-
-    Rules:
-    1. X-separated dimensions (e.g. "24WX84HX3D") → LTL
-    2. Single standalone number >= 84 (e.g. "96 Crown Molding") → long_package
-    3. Otherwise → standard
     """
     name_upper = name.upper()
 
@@ -206,6 +201,110 @@ def group_items_by_warehouse(line_items: list) -> Dict[str, list]:
             groups[warehouse] = []
         groups[warehouse].append(item)
     return groups
+
+
+def validate_address_residential(dest_address: dict) -> bool:
+    """
+    Call Smarty via rl-quote-sandbox to determine if delivery address is residential.
+    Returns True (residential) or False (commercial).
+    Defaults to True on any error — residential is the safer/costlier assumption.
+    """
+    try:
+        street = dest_address.get('address', '') or dest_address.get('street', '')
+        city = dest_address.get('city', '')
+        state = dest_address.get('state', '')
+        zip_code = (dest_address.get('zip', '') or dest_address.get('postal_code', ''))[:5]
+
+        if not street or not zip_code:
+            print(f"[CHECKOUT] Smarty skipped — missing street or ZIP")
+            return True
+
+        payload = json.dumps({
+            'street': street,
+            'city': city,
+            'state': state,
+            'zip_code': zip_code
+        }).encode()
+
+        req = urllib.request.Request(
+            f"{RL_QUOTE_API_URL}/validate-address",
+            data=payload,
+            method='POST'
+        )
+        req.add_header('Content-Type', 'application/json')
+
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            result = json.loads(resp.read().decode())
+            if result.get('success') and result.get('address'):
+                is_res = result['address'].get('is_residential', True)
+                print(f"[CHECKOUT] Smarty: {street}, {zip_code} → {'residential' if is_res else 'commercial'}")
+                return bool(is_res)
+    except Exception as e:
+        print(f"[CHECKOUT] Smarty validation failed: {e}")
+
+    return True  # Default to residential
+
+
+def fetch_b2bwave_customer_address(customer_id: str) -> Optional[Dict]:
+    """
+    Fetch customer billing address from B2BWave API using customer_id.
+    Returns dict with street, city, state, zip, company_name — or None on failure.
+    """
+    if not B2BWAVE_URL or not B2BWAVE_API_KEY or not customer_id:
+        return None
+    try:
+        url = f"{B2BWAVE_URL}/api/customers/{customer_id}.json"
+        credentials = f"{B2BWAVE_USERNAME}:{B2BWAVE_API_KEY}"
+        encoded = base64.b64encode(credentials.encode()).decode()
+        req = urllib.request.Request(url)
+        req.add_header('Authorization', f'Basic {encoded}')
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode())
+            # B2BWave wraps in {"customer": {...}} or returns flat
+            customer = data.get('customer', data) if isinstance(data, dict) else data
+            return {
+                'company_name': customer.get('name', '') or customer.get('company_name', ''),
+                'street': customer.get('address', ''),
+                'street2': customer.get('address2', ''),
+                'city': customer.get('city', ''),
+                'state': customer.get('state', ''),
+                'zip': customer.get('postal_code', '') or customer.get('zip', ''),
+            }
+    except Exception as e:
+        print(f"[B2BWAVE] Error fetching customer {customer_id}: {e}")
+        return None
+
+
+def update_b2bwave_order_address(order_id: str, address: Dict) -> bool:
+    """
+    Update order delivery address in B2BWave via PUT /api/orders/{id}.json.
+    Returns True on success, False on failure.
+    """
+    if not B2BWAVE_URL or not B2BWAVE_API_KEY:
+        return False
+    try:
+        url = f"{B2BWAVE_URL}/api/orders/{order_id}.json"
+        credentials = f"{B2BWAVE_USERNAME}:{B2BWAVE_API_KEY}"
+        encoded = base64.b64encode(credentials.encode()).decode()
+        payload = json.dumps({
+            'order': {
+                'address': address.get('street', ''),
+                'address2': address.get('street2', ''),
+                'city': address.get('city', ''),
+                'province': address.get('state', ''),
+                'postal_code': address.get('zip', ''),
+            }
+        }).encode()
+        req = urllib.request.Request(url, data=payload, method='PUT')
+        req.add_header('Authorization', f'Basic {encoded}')
+        req.add_header('Content-Type', 'application/json')
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            resp.read()
+            print(f"[B2BWAVE] Order {order_id} address updated")
+            return True
+    except Exception as e:
+        print(f"[B2BWAVE] Error updating order {order_id} address: {e}")
+        return False
 
 
 def get_shipping_quote(origin_zip: str, dest_zip: str, weight: float, is_residential: bool, is_oversized: bool = False) -> Dict:
@@ -295,6 +394,7 @@ def select_shipping_method(weight: float, items: list):
 def calculate_order_shipping(order_data: dict, dest_address: dict) -> Dict:
     """
     Calculate shipping for an entire order, grouped by warehouse.
+    Calls Smarty to determine is_residential from the delivery address.
     Applies 8% tariff on items subtotal.
     """
     line_items = order_data.get('line_items', []) or order_data.get('products', [])
@@ -309,8 +409,10 @@ def calculate_order_shipping(order_data: dict, dest_address: dict) -> Dict:
         print(f"[CHECKOUT] RTA database not available: {e}")
 
     warehouse_groups = group_items_by_warehouse(line_items)
-    is_residential = True
+
+    # Determine is_residential via Smarty — per-order, not hardcoded
     dest_zip = dest_address.get('zip', '') or dest_address.get('postal_code', '')
+    is_residential = validate_address_residential(dest_address)
 
     shipments = []
     total_shipping = 0
@@ -328,7 +430,8 @@ def calculate_order_shipping(order_data: dict, dest_address: dict) -> Dict:
                 'items': items,
                 'quote': {'success': False, 'error': 'Could not determine warehouse for items'},
                 'shipping_cost': 0,
-                'shipping_method': 'unknown'
+                'shipping_method': 'unknown',
+                'is_residential': is_residential,
             })
             continue
 
@@ -390,12 +493,13 @@ def calculate_order_shipping(order_data: dict, dest_address: dict) -> Dict:
             'is_oversized': oversized,
             'shipping_method': shipping_method,
             'quote': quote,
-            'shipping_cost': shipping_cost
+            'shipping_cost': shipping_cost,
+            'is_residential': is_residential,
         })
 
         total_shipping += shipping_cost
 
-    # Calculate item subtotal from line items
+    # Calculate item subtotal
     total_items = 0
     for item in line_items:
         price = float(item.get('price', 0) or item.get('unit_price', 0) or 0)
@@ -412,7 +516,8 @@ def calculate_order_shipping(order_data: dict, dest_address: dict) -> Dict:
         'tariff_amount': tariff_amount,
         'total_shipping': round(total_shipping, 2),
         'grand_total': grand_total,
-        'destination': dest_address
+        'destination': dest_address,
+        'is_residential': is_residential,
     }
 
 
@@ -466,9 +571,11 @@ def fetch_b2bwave_order(order_id: str) -> Optional[Dict]:
 
                 order_total = float(raw_order.get('gross_total', 0) or 0)
                 customer_email = raw_order.get('customer_email', '')
+                customer_id = str(raw_order.get('customer_id', '')) if raw_order.get('customer_id') else None
 
                 return {
                     'id': raw_order.get('id'),
+                    'customer_id': customer_id,
                     'customer_name': raw_order.get('customer_name'),
                     'customer_email': customer_email,
                     'email': customer_email,
