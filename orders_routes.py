@@ -776,7 +776,7 @@ def update_shipment(
         )
 
     # Shippo added — all valid shipping methods
-    valid_methods = ["LTL", "Shippo", "Pirateship", "Pickup", "BoxTruck", "LiDelivery", None]
+    valid_methods = ["LTL", "Shippo", "Pirateship", "Pickup", "BoxTruck", "LiDelivery", "Manual", None]
     if ship_method and ship_method not in valid_methods:
         raise HTTPException(
             status_code=400,
@@ -976,6 +976,7 @@ def get_rl_quote_data(shipment_id: str):
                 )
                 needs_manual = False
                 weight_note = None
+                weight_allocation = None
 
                 if shipment_weight:
                     weight_note = "from shipment"
@@ -983,8 +984,46 @@ def get_rl_quote_data(shipment_id: str):
                     shipment_weight = round(order_weight, 1)
                     weight_note = "from order"
                 elif not is_single_warehouse:
-                    needs_manual = True
-                    weight_note = "Multi-warehouse — enter weight for this shipment"
+                    # Sales-based weight allocation (TEMPORARY — not production-ready)
+                    # ⚠️ Real per-item weights needed from Lane C (WS5) before this is accurate.
+                    # Current logic: allocate total_weight proportionally by warehouse line_total.
+                    if order_weight > 0:
+                        cur.execute(
+                            """
+                            SELECT warehouse,
+                                   COALESCE(SUM(line_total), 0) AS warehouse_total
+                            FROM order_line_items
+                            WHERE order_id = %s AND warehouse IS NOT NULL
+                            GROUP BY warehouse
+                            """,
+                            (shipment["order_id"],),
+                        )
+                        wh_totals = {
+                            r["warehouse"]: float(r["warehouse_total"])
+                            for r in cur.fetchall()
+                        }
+                        order_sales_total = sum(wh_totals.values())
+                        this_wh_sales = wh_totals.get(warehouse, 0)
+                        if order_sales_total > 0:
+                            pct = this_wh_sales / order_sales_total
+                            allocated_weight = round(order_weight * pct, 1)
+                            weight_allocation = {
+                                "this_warehouse_sales": round(this_wh_sales, 2),
+                                "order_sales_total": round(order_sales_total, 2),
+                                "pct": round(pct * 100, 2),
+                                "allocated_weight": allocated_weight,
+                            }
+                            shipment_weight = allocated_weight
+                            weight_note = (
+                                f"Sales-allocated ({round(pct * 100, 1)}% of order)"
+                                f" \u26a0\ufe0f Not production-ready \u2014 verify before use"
+                            )
+                        else:
+                            needs_manual = True
+                            weight_note = "Multi-warehouse \u2014 enter weight for this shipment"
+                    else:
+                        needs_manual = True
+                        weight_note = "Multi-warehouse \u2014 no total weight on order"
                 else:
                     needs_manual = True
                     weight_note = "No weight data available"
@@ -1010,6 +1049,7 @@ def get_rl_quote_data(shipment_id: str):
                         "value": shipment_weight,
                         "note": weight_note,
                         "needs_manual_entry": needs_manual,
+                        "allocation": weight_allocation,
                     },
                     "oversized": {
                         "detected": has_oversized_flag,
