@@ -78,14 +78,12 @@ def add_rl_shipping_fields() -> dict:
                 ("customer_price", "DECIMAL(10,2)"),
                 ("tracking_number", "VARCHAR(100)")
             ]
-
             for field_name, field_type in fields_to_add:
                 try:
                     cur.execute(f"ALTER TABLE order_shipments ADD COLUMN {field_name} {field_type}")
                 except Exception:
                     conn.rollback()
                     pass
-
             conn.commit()
     return {"status": "ok", "message": "Shipping fields added to order_shipments"}
 
@@ -147,12 +145,8 @@ def fix_order_id_length() -> dict:
     with get_db() as conn:
         with conn.cursor() as cur:
             results = []
-
             try:
-                cur.execute("""
-                    SELECT viewname FROM pg_views
-                    WHERE schemaname = 'public'
-                """)
+                cur.execute("SELECT viewname FROM pg_views WHERE schemaname = 'public'")
                 views = cur.fetchall()
                 for view in views:
                     try:
@@ -162,12 +156,8 @@ def fix_order_id_length() -> dict:
                         pass
             except Exception as e:
                 results.append(f"View lookup: {str(e)}")
-
             try:
-                cur.execute("""
-                    SELECT rulename, tablename FROM pg_rules
-                    WHERE schemaname = 'public'
-                """)
+                cur.execute("SELECT rulename, tablename FROM pg_rules WHERE schemaname = 'public'")
                 rules = cur.fetchall()
                 for rule in rules:
                     try:
@@ -177,9 +167,7 @@ def fix_order_id_length() -> dict:
                         pass
             except Exception as e:
                 results.append(f"Rule lookup: {str(e)}")
-
             conn.commit()
-
             tables = ['orders', 'order_status', 'order_line_items', 'order_events', 'order_shipments']
             for table in tables:
                 try:
@@ -187,7 +175,6 @@ def fix_order_id_length() -> dict:
                     results.append(f"{table}: updated")
                 except Exception as e:
                     results.append(f"{table}: {str(e)}")
-
             conn.commit()
     return {"status": "ok", "results": results}
 
@@ -211,13 +198,8 @@ def recreate_order_status_view() -> dict:
                         ELSE 'needs_payment_link'
                     END as current_status,
                     EXTRACT(DAY FROM NOW() - order_date)::INTEGER as days_open,
-                    payment_link_sent,
-                    payment_received,
-                    sent_to_warehouse,
-                    warehouse_confirmed,
-                    bol_sent,
-                    is_complete,
-                    updated_at
+                    payment_link_sent, payment_received, sent_to_warehouse,
+                    warehouse_confirmed, bol_sent, is_complete, updated_at
                 FROM orders
             """)
             conn.commit()
@@ -241,9 +223,7 @@ def add_weight_column() -> dict:
 def add_is_residential_to_shipments() -> dict:
     """
     Add is_residential column to order_shipments table.
-
     Populated at checkout time via Smarty address validation.
-    Used by the admin UI to show/hide the liftgate toggle for commercial addresses.
     Safe to run multiple times.
     """
     with get_db() as conn:
@@ -260,31 +240,50 @@ def add_is_residential_to_shipments() -> dict:
                 return {"status": "error", "message": str(e)}
 
 
+def add_address_pending_to_checkouts() -> dict:
+    """
+    Add address_pending and address_validation_error columns to pending_checkouts.
+
+    address_pending: TRUE when Smarty fails after 3 attempts — blocks invoice send,
+                     shows customer a "we'll contact you" page instead of Pay button.
+    address_validation_error: stores the Smarty error message for CFC reference.
+
+    Safe to run multiple times.
+    """
+    results = []
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            for col_name, col_def in [
+                ("address_pending", "BOOLEAN DEFAULT FALSE"),
+                ("address_validation_error", "TEXT"),
+            ]:
+                try:
+                    cur.execute(f"ALTER TABLE pending_checkouts ADD COLUMN {col_name} {col_def}")
+                    results.append(f"{col_name}: added")
+                except Exception as e:
+                    if "already exists" in str(e):
+                        results.append(f"{col_name}: already exists")
+                    else:
+                        results.append(f"{col_name}: ERROR — {str(e)}")
+                    conn.rollback()
+                    continue
+            conn.commit()
+    return {"status": "ok", "message": "Address pending columns added to pending_checkouts", "results": results}
+
+
 # =============================================================================
 # PHASE 3B: LIFECYCLE FIELDS MIGRATION
 # =============================================================================
 
 def add_lifecycle_fields() -> dict:
-    """
-    Add lifecycle management columns to orders table.
-
-    New columns:
-      - last_customer_email_at
-      - lifecycle_status
-      - lifecycle_deadline_at
-      - lifecycle_reminders_sent
-
-    Safe to run multiple times.
-    """
+    """Add lifecycle management columns to orders table. Safe to run multiple times."""
     results = []
-
     fields_to_add = [
         ("last_customer_email_at", "TIMESTAMP WITH TIME ZONE"),
         ("lifecycle_status", "VARCHAR(20) DEFAULT 'active'"),
         ("lifecycle_deadline_at", "TIMESTAMP WITH TIME ZONE"),
         ("lifecycle_reminders_sent", "JSONB DEFAULT '{}'::jsonb"),
     ]
-
     with get_db() as conn:
         with conn.cursor() as cur:
             for field_name, field_type in fields_to_add:
@@ -298,44 +297,25 @@ def add_lifecycle_fields() -> dict:
                         results.append(f"{field_name}: ERROR — {str(e)}")
                     conn.rollback()
                     continue
-
             try:
-                cur.execute("""
-                    CREATE INDEX IF NOT EXISTS idx_orders_lifecycle_status
-                    ON orders(lifecycle_status)
-                """)
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_orders_lifecycle_status ON orders(lifecycle_status)")
                 results.append("idx_orders_lifecycle_status: created")
             except Exception as e:
                 results.append(f"lifecycle index: {str(e)}")
                 conn.rollback()
-
             try:
-                cur.execute("""
-                    CREATE INDEX IF NOT EXISTS idx_orders_last_customer_email
-                    ON orders(last_customer_email_at)
-                """)
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_orders_last_customer_email ON orders(last_customer_email_at)")
                 results.append("idx_orders_last_customer_email: created")
             except Exception as e:
                 results.append(f"email index: {str(e)}")
                 conn.rollback()
-
             conn.commit()
-
-    return {
-        "status": "ok",
-        "message": "Lifecycle fields migration complete",
-        "results": results
-    }
+    return {"status": "ok", "message": "Lifecycle fields migration complete", "results": results}
 
 
 def backfill_lifecycle_from_emails() -> dict:
-    """
-    Backfill last_customer_email_at from existing order_email_snippets.
-    Run AFTER add_lifecycle_fields().
-    """
+    """Backfill last_customer_email_at from existing order_email_snippets. Run AFTER add_lifecycle_fields()."""
     updated = 0
-    errors = []
-
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute("""
@@ -350,7 +330,6 @@ def backfill_lifecycle_from_emails() -> dict:
                 AND o.last_customer_email_at IS NULL
             """)
             updated += cur.rowcount
-
             cur.execute("""
                 UPDATE orders
                 SET last_customer_email_at = COALESCE(updated_at, order_date, created_at)
@@ -358,12 +337,5 @@ def backfill_lifecycle_from_emails() -> dict:
                 AND (is_complete = FALSE OR is_complete IS NULL)
             """)
             updated += cur.rowcount
-
             conn.commit()
-
-    return {
-        "status": "ok",
-        "message": f"Backfilled {updated} orders with last_customer_email_at",
-        "updated": updated,
-        "errors": errors
-    }
+    return {"status": "ok", "message": f"Backfilled {updated} orders with last_customer_email_at", "updated": updated}
