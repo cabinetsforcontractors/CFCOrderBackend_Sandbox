@@ -95,12 +95,12 @@ def add_ps_fields() -> dict:
             try:
                 cur.execute("ALTER TABLE order_shipments ADD COLUMN ps_quote_url TEXT")
                 conn.commit()
-            except:
+            except Exception:
                 conn.rollback()
             try:
                 cur.execute("ALTER TABLE order_shipments ADD COLUMN ps_quote_price DECIMAL(10,2)")
                 conn.commit()
-            except:
+            except Exception:
                 conn.rollback()
     return {"status": "ok", "message": "PS fields added"}
 
@@ -135,7 +135,7 @@ def fix_sku_columns() -> dict:
                 try:
                     cur.execute(f"ALTER TABLE {table_col[0]} ALTER COLUMN {table_col[1]} TYPE VARCHAR(100)")
                     conn.commit()
-                except:
+                except Exception:
                     conn.rollback()
     return {"status": "ok", "message": "SKU columns fixed"}
 
@@ -152,7 +152,7 @@ def fix_order_id_length() -> dict:
                     try:
                         cur.execute(f"DROP VIEW IF EXISTS {view[0]} CASCADE")
                         results.append(f"Dropped view: {view[0]}")
-                    except:
+                    except Exception:
                         pass
             except Exception as e:
                 results.append(f"View lookup: {str(e)}")
@@ -163,7 +163,7 @@ def fix_order_id_length() -> dict:
                     try:
                         cur.execute(f"DROP RULE IF EXISTS {rule[0]} ON {rule[1]} CASCADE")
                         results.append(f"Dropped rule: {rule[0]}")
-                    except:
+                    except Exception:
                         pass
             except Exception as e:
                 results.append(f"Rule lookup: {str(e)}")
@@ -243,11 +243,7 @@ def add_is_residential_to_shipments() -> dict:
 def add_address_pending_to_checkouts() -> dict:
     """
     Add address_pending and address_validation_error columns to pending_checkouts.
-
-    address_pending: TRUE when Smarty fails after 3 attempts — blocks invoice send,
-                     shows customer a "we'll contact you" page instead of Pay button.
-    address_validation_error: stores the Smarty error message for CFC reference.
-
+    address_pending = TRUE blocks invoice send entirely (hard stop for edge cases).
     Safe to run multiple times.
     """
     results = []
@@ -269,6 +265,51 @@ def add_address_pending_to_checkouts() -> dict:
                     continue
             conn.commit()
     return {"status": "ok", "message": "Address pending columns added to pending_checkouts", "results": results}
+
+
+def add_address_classification_to_checkouts() -> dict:
+    """
+    Add address classification columns to pending_checkouts.
+
+    address_classification_needed  — TRUE for Cases B (uncertain rdi) and C (Smarty failed).
+                                     Customer is sent to Step 1 → Step 2 classification flow.
+    address_initially_found        — TRUE = Smarty found area but rdi empty (Case B).
+                                     FALSE = Smarty found nothing (Case C), edit box pre-opened.
+    address_type_confirmed         — What the customer selected in Step 2:
+                                     residential_existing | commercial_existing |
+                                     residential_new_construction | commercial_new_construction |
+                                     rural | military
+    is_residential_customer_confirmed — Derived bool from address_type_confirmed.
+                                        Used as is_residential_override in calculate_order_shipping().
+
+    Safe to run multiple times.
+    """
+    results = []
+    cols = [
+        ("address_classification_needed", "BOOLEAN DEFAULT FALSE"),
+        ("address_initially_found", "BOOLEAN DEFAULT TRUE"),
+        ("address_type_confirmed", "VARCHAR(50)"),
+        ("is_residential_customer_confirmed", "BOOLEAN"),
+    ]
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            for col_name, col_def in cols:
+                try:
+                    cur.execute(f"ALTER TABLE pending_checkouts ADD COLUMN {col_name} {col_def}")
+                    results.append(f"{col_name}: added")
+                except Exception as e:
+                    if "already exists" in str(e):
+                        results.append(f"{col_name}: already exists")
+                    else:
+                        results.append(f"{col_name}: ERROR — {str(e)}")
+                    conn.rollback()
+                    continue
+            conn.commit()
+    return {
+        "status": "ok",
+        "message": "Address classification columns added to pending_checkouts",
+        "results": results
+    }
 
 
 # =============================================================================
