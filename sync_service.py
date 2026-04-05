@@ -174,10 +174,14 @@ def sync_order_from_b2bwave(order_data: dict) -> dict:
                     if wh_row:
                         item_warehouse = wh_row['warehouse_name']
 
+                qty = float(item.get('quantity', 0) or 0)
+                price = float(item.get('price', 0) or 0)
+                line_total = round(qty * price, 2)
+
                 cur.execute("""
-                    INSERT INTO order_line_items (order_id, sku, sku_prefix, product_name, quantity, price, warehouse)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
-                """, (order_id, sku, prefix, item.get('product_name'), item.get('quantity'), item.get('price'), item_warehouse))
+                    INSERT INTO order_line_items (order_id, sku, sku_prefix, product_name, quantity, price, line_total, warehouse)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                """, (order_id, sku, prefix, item.get('product_name'), qty, price, line_total, item_warehouse))
 
             cur.execute("""
                 INSERT INTO order_events (order_id, event_type, event_data, source)
