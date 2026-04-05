@@ -15,7 +15,6 @@ import hashlib
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any
 
-# Config from environment
 B2BWAVE_URL = os.environ.get("B2BWAVE_URL", "").strip().rstrip('/')
 B2BWAVE_USERNAME = os.environ.get("B2BWAVE_USERNAME", "").strip()
 B2BWAVE_API_KEY = os.environ.get("B2BWAVE_API_KEY", "").strip()
@@ -28,7 +27,7 @@ SQUARE_ENVIRONMENT = os.environ.get("SQUARE_ENVIRONMENT", "sandbox").strip()
 RL_QUOTE_API_URL = os.environ.get("RL_QUOTE_API_URL", "https://rl-quote-sandbox.onrender.com").strip()
 CHECKOUT_BASE_URL = os.environ.get("CHECKOUT_BASE_URL", "").strip()
 
-TARIFF_RATE = 0.08  # 8%
+TARIFF_RATE = 0.08
 
 WAREHOUSES = {
     'LI': {'name': 'Cabinetry Distribution', 'address': '561 Keuka Rd', 'city': 'Interlachen', 'state': 'FL', 'zip': '32148', 'phone': '(615) 410-6775'},
@@ -63,6 +62,16 @@ SKU_WAREHOUSE_MAP = {
 }
 
 OVERSIZED_KEYWORDS = ['PANTRY', 'OVEN', 'TALL', 'BROOM', 'LINEN', 'UTILITY']
+
+# Maps customer address type selection to is_residential bool
+ADDRESS_TYPE_MAP = {
+    'residential_existing': True,
+    'commercial_existing': False,
+    'residential_new_construction': True,
+    'commercial_new_construction': False,
+    'rural': True,
+    'military': True,
+}
 
 
 def detect_item_dimensions(name: str):
@@ -103,17 +112,18 @@ def group_items_by_warehouse(line_items: list) -> Dict[str, list]:
 
 def validate_address_full(dest_address: dict) -> dict:
     """
-    Call Smarty via rl-quote-sandbox to validate address and determine residential status.
-    Retries up to 3 times with 1-second delays before giving up.
+    Call Smarty via rl-quote-sandbox to validate address.
+    Retries up to 3 times with 1-second delays.
 
     Returns:
-        {
-            success: bool,
-            is_residential: bool,  # True = residential, False = commercial
-            address: dict | None,  # Smarty-corrected address fields
-            error: str | None,
-            attempts: int
-        }
+        success: bool — Smarty returned a usable result
+        is_residential: bool — True=residential, False=commercial
+        is_uncertain: bool — True when Smarty found the area but rdi is empty
+                             (cannot confirm residential vs commercial)
+        address: dict | None — Smarty-corrected address fields
+        rdi: str — Smarty's rdi value ("Residential", "Commercial", or "")
+        error: str | None
+        attempts: int
     """
     street = dest_address.get('address', '') or dest_address.get('street', '')
     city = dest_address.get('city', '')
@@ -124,7 +134,9 @@ def validate_address_full(dest_address: dict) -> dict:
         return {
             'success': False,
             'is_residential': True,
+            'is_uncertain': False,
             'address': None,
+            'rdi': '',
             'error': 'Missing street address or ZIP code',
             'attempts': 0
         }
@@ -145,17 +157,24 @@ def validate_address_full(dest_address: dict) -> dict:
                 method='POST'
             )
             req.add_header('Content-Type', 'application/json')
-
             with urllib.request.urlopen(req, timeout=10) as resp:
                 result = json.loads(resp.read().decode())
 
                 if result.get('success') and result.get('address'):
-                    is_res = bool(result['address'].get('is_residential', True))
-                    print(f"[CHECKOUT] Smarty attempt {attempt}/3 OK: {street[:30]}, {zip_code} → {'residential' if is_res else 'commercial'}")
+                    addr = result['address']
+                    is_res = bool(addr.get('is_residential', True))
+                    rdi = addr.get('smarty_rdi', '')
+                    # Uncertain = Smarty found the area but couldn't classify residential vs commercial
+                    is_uncertain = not rdi
+                    label = 'residential' if is_res else 'commercial'
+                    suffix = ' (uncertain)' if is_uncertain else ''
+                    print(f"[CHECKOUT] Smarty attempt {attempt}/3 OK: {street[:30]}, {zip_code} → {label}{suffix}")
                     return {
                         'success': True,
                         'is_residential': is_res,
-                        'address': result.get('address'),
+                        'is_uncertain': is_uncertain,
+                        'address': addr,
+                        'rdi': rdi,
                         'error': None,
                         'attempts': attempt
                     }
@@ -170,11 +189,13 @@ def validate_address_full(dest_address: dict) -> dict:
         if attempt < 3:
             time.sleep(1)
 
-    print(f"[CHECKOUT] Smarty failed after 3 attempts for: {street}, {zip_code}")
+    print(f"[CHECKOUT] Smarty failed after 3 attempts: {street}, {zip_code}")
     return {
         'success': False,
-        'is_residential': True,  # conservative default — never used when success=False
+        'is_residential': True,
+        'is_uncertain': False,
         'address': None,
+        'rdi': '',
         'error': last_error or 'Smarty validation failed after 3 attempts',
         'attempts': 3
     }
@@ -184,7 +205,6 @@ def validate_address_residential(dest_address: dict) -> bool:
     """
     Simplified wrapper — returns is_residential bool only.
     Used inside calculate_order_shipping() where a bool is sufficient.
-    Failures default to True (residential = safer assumption).
     """
     result = validate_address_full(dest_address)
     return result['is_residential']
@@ -195,7 +215,6 @@ def validate_address_residential(dest_address: dict) -> bool:
 # =============================================================================
 
 def fetch_b2bwave_customer_address(customer_id: str) -> Optional[Dict]:
-    """Fetch customer billing address from B2BWave API using customer_id."""
     if not B2BWAVE_URL or not B2BWAVE_API_KEY or not customer_id:
         return None
     try:
@@ -221,7 +240,6 @@ def fetch_b2bwave_customer_address(customer_id: str) -> Optional[Dict]:
 
 
 def update_b2bwave_order_address(order_id: str, address: Dict) -> bool:
-    """Update order delivery address in B2BWave via PUT /api/orders/{id}.json."""
     if not B2BWAVE_URL or not B2BWAVE_API_KEY:
         return False
     try:
@@ -250,11 +268,10 @@ def update_b2bwave_order_address(order_id: str, address: Dict) -> bool:
 
 
 # =============================================================================
-# SHIPPING QUOTE HELPERS
+# SHIPPING QUOTE
 # =============================================================================
 
 def get_shipping_quote(origin_zip: str, dest_zip: str, weight: float, is_residential: bool, is_oversized: bool = False) -> Dict:
-    """Get LTL shipping quote from R+L Carriers direct API."""
     try:
         from rl_carriers import get_simple_quote, is_configured
         if is_configured():
@@ -281,15 +298,13 @@ SMALL_PACKAGE_WEIGHT_LIMIT = 70
 
 
 def get_shippo_quote(origin_zip: str, dest_zip: str, weight: float, is_residential: bool = True, length: int = None) -> Dict:
-    """Get small package shipping quote from Shippo API."""
     try:
         shippo_url = os.environ.get("SHIPPO_API_URL", "").strip() or os.environ.get("CFC_BACKEND_URL", "https://cfcorderbackend-sandbox.onrender.com").strip()
-        url = f"{shippo_url}/shippo/rates"
         params = {'origin_zip': origin_zip, 'dest_zip': dest_zip, 'weight_lbs': weight, 'is_residential': 'true' if is_residential else 'false'}
         if length:
             params['length'] = length
         query_string = '&'.join(f"{k}={v}" for k, v in params.items())
-        req = urllib.request.Request(f"{url}?{query_string}")
+        req = urllib.request.Request(f"{shippo_url}/shippo/rates?{query_string}")
         with urllib.request.urlopen(req, timeout=30) as resp:
             return json.loads(resp.read().decode())
     except Exception as e:
@@ -297,7 +312,6 @@ def get_shippo_quote(origin_zip: str, dest_zip: str, weight: float, is_residenti
 
 
 def select_shipping_method(weight: float, items: list):
-    """Returns: (method, parcel_length)"""
     max_length = None
     for item in items:
         dim_type, length = detect_item_dimensions(item.get('name', ''))
@@ -311,11 +325,12 @@ def select_shipping_method(weight: float, items: list):
     return ('small_package', max_length)
 
 
-def calculate_order_shipping(order_data: dict, dest_address: dict) -> Dict:
+def calculate_order_shipping(order_data: dict, dest_address: dict, is_residential_override: Optional[bool] = None) -> Dict:
     """
     Calculate shipping for an entire order, grouped by warehouse.
-    Calls Smarty to determine is_residential from the delivery address.
-    Applies 8% tariff on items subtotal.
+
+    is_residential_override: if provided, skips Smarty call and uses this value directly.
+    Used when the customer has already classified their address.
     """
     line_items = order_data.get('line_items', []) or order_data.get('products', [])
     b2bwave_total_weight = order_data.get('total_weight', 0)
@@ -328,9 +343,13 @@ def calculate_order_shipping(order_data: dict, dest_address: dict) -> Dict:
         print(f"[CHECKOUT] RTA database not available: {e}")
 
     warehouse_groups = group_items_by_warehouse(line_items)
-
     dest_zip = dest_address.get('zip', '') or dest_address.get('postal_code', '')
-    is_residential = validate_address_residential(dest_address)
+
+    if is_residential_override is not None:
+        is_residential = is_residential_override
+        print(f"[CHECKOUT] Using customer-confirmed is_residential={is_residential}")
+    else:
+        is_residential = validate_address_residential(dest_address)
 
     shipments = []
     total_shipping = 0
@@ -405,7 +424,6 @@ def calculate_order_shipping(order_data: dict, dest_address: dict) -> Dict:
 
 
 def fetch_b2bwave_order(order_id: str) -> Optional[Dict]:
-    """Fetch order details from B2BWave API."""
     if not B2BWAVE_URL or not B2BWAVE_API_KEY:
         return None
     try:
@@ -474,7 +492,6 @@ def fetch_b2bwave_order(order_id: str) -> Optional[Dict]:
 
 
 def create_square_payment_link(amount_cents: int, order_id: str, customer_email: str) -> Optional[str]:
-    """Create a Square payment link for the order."""
     if not SQUARE_ACCESS_TOKEN or not SQUARE_LOCATION_ID:
         return None
     try:
