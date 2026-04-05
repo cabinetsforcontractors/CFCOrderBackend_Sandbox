@@ -1,26 +1,31 @@
 # WS6 — CFC Orders Session Handoff
-**Date:** 2026-04-05 (weight allocation for multi-warehouse LTL)
+**Date:** 2026-04-05 (multi-warehouse LTL auto-quote complete)
 **Repo:** CFCOrderBackend_Sandbox / CFCOrdersFrontend_Sandbox
 
 ⛔ THIS IS THE SANDBOX REPO — NOW LIVE AS PRODUCTION
 - Production backend: https://cfc-backend-b83s.onrender.com (repointed to CFCOrderBackend_Sandbox)
-- Production frontend: https://cfc-orders-frontend.vercel.app (repointed to CFCOrdersFrontend_Sandbox)
+- Production frontend: https://cfc-orders-frontend.vercel.app (repointed — unverified, use sandbox URL for testing)
+- Sandbox frontend: https://cfcordersfrontend-sandbox.vercel.app
 
 ---
 
-## CURRENT STATE — Multi-warehouse LTL auto-quote unblocked.
+## CURRENT STATE — Multi-warehouse LTL "Quote All" working end-to-end.
 
-**What was just built (2026-04-05):**
+**What was built this session (2026-04-05):**
 
-### Weight Allocation — `orders_routes.py` (sha `4e530dfa`)
-`GET /shipments/{shipment_id}/rl-quote-data` — when a shipment has no stored weight and the order spans multiple warehouses, the endpoint now computes a sales-proportional weight allocation from `order_line_items.line_total` grouped by warehouse. Returns `weight.value` (non-null) so the frontend auto-quote button is enabled.
+### Fix 1 — `orders_routes.py` (sha `6c4ac2fa`)
+Weight allocation query changed from `COALESCE(SUM(line_total), 0)` to `SUM(COALESCE(line_total, price * quantity, 0))`. Fallback to `price * quantity` when `line_total` is null — which it was for all pre-fix orders since sync never wrote it.
 
-Example — Order #5492:
-- SHLS (L&C Cabinetry): $2,665.01 → 81.33% → 692.6 lbs
-- WSP: $611.75 → 18.67% → 159.2 lbs
-- Total weight: 851.8 lbs ✅
+### Fix 2 — `sync_service.py` (sha `21156ca7`)
+Added `line_total = round(qty * price, 2)` to the B2BWave sync INSERT. All future syncs now populate `line_total` correctly. Fix 1 remains as safety fallback.
 
-Weight note shown in UI: `"Sales-allocated (81.3% of order) ⚠️ Not production-ready — verify before use"`
+### Feature — `App.jsx` v7.6.0 (sha `e2b5a999`)
+"⚡ Quote All Warehouses (LTL)" button in Actions tab. One click: loops all shipments, calls `rl-quote-data` + `/proxy/auto-quote` for each in sequence, displays combined results panel with per-warehouse breakdown and total shipping cost.
+
+**Tested on order #5492:**
+- L&C Cabinetry: 692.8 lbs → $351.84 carrier / $401.84 customer
+- LI: 159 lbs → $351.84 carrier / $401.84 customer ⚠️ identical to L&C — may be R+L minimum floor rate, verify on live order
+- Total: $803.68
 
 ---
 
@@ -28,67 +33,26 @@ Weight note shown in UI: `"Sales-allocated (81.3% of order) ⚠️ Not productio
 
 **DO NOT use sales-allocated weights on live orders without review.**
 
-Current logic allocates `orders.total_weight` proportionally by each warehouse's `SUM(line_total)`. This is an approximation — cabinet prices correlate loosely with weight but are not a substitute for real per-item weights.
+Current logic allocates `orders.total_weight` proportionally by each warehouse's `SUM(line_total)` (or `price * quantity` fallback). This is an approximation — prices correlate loosely with weight.
 
-| Warehouse | Sales | % | Allocated Weight | Real Weight |
-|-----------|-------|---|-----------------|-------------|
-| SHLS (L&C Cabinetry) | $2,665.01 | 81.33% | 692.6 lbs | Unknown until Lane C |
-| WSP | $611.75 | 18.67% | 159.2 lbs | Unknown until Lane C |
+| Warehouse | Sales | % | Allocated Weight |
+|-----------|-------|---|-----------------|
+| SHLS (L&C Cabinetry) | $2,665.01 | 81.33% | 692.6 lbs |
+| WSP (LI) | $611.75 | 18.67% | 159.2 lbs |
 
-**Production fix required:** Lane C (RTA Weight) must be completed (blocked on WS5 canonical master cleanup). Once Lane C loads real per-SKU weights from the RTA database, the allocation logic in `get_rl_quote_data` should be replaced with a `SUM(item_weight * quantity)` per warehouse query against `order_line_items` joined to the weight lookup.
-
-Until then: treat sales-allocated weights as estimates. Always verify quote weight against physical shipment before booking R+L.
+**Production fix:** Lane C (RTA Weight) must complete (blocked on WS5). Replace allocation with `SUM(item_weight * quantity)` per warehouse from real SKU weight data.
 
 ---
 
-## Phase 7 Status — COMPLETE ✅
-- Step 1 (api.js CFC2026): done ✅
-- Step 2 (Render repoint): done ✅ (auto-deploy)
-- Step 3 (DB migrations): done ✅ (shared DB)
-- Step 4 (Vercel repoint): done ✅ (auto-deploy)
-- Step 5 (smoke test): done ✅ (confirmed working from UI)
-- Step 6 (cleanup): DONE ✅ — dead files never existed in sandbox; .gitignore already correct; repo archiving skipped (risk unclear)
+## Step 6 Cleanup — DONE ✅
+- Dead files (main2/4/7/8.py): never existed in sandbox
+- .gitignore: already correct
+- Repo archiving: skipped (production Vercel connection unverified — do not archive until confirmed)
 
 ---
 
-## Deferred Items
-
-| Item | Priority |
-|------|----------|
-| Email subject line â encoding (minor formatting) | Low |
-| R+L multi-warehouse auto-quote weight accuracy | Blocked on Lane C / WS5 |
-| Lane C (RTA Weight) | Blocked on WS5 |
-
----
-
-## Phase 8 — Shipment Tracking & Notification Engine
-
-Top priority next. See WS6_CFC_ORDERS.md for full spec.
-
-### Warehouse Shipping Rules
-- **LI (Cabinetry Distribution)** — always ships, any length. Watch Gmail for tracking/PRO.
-- **LM (Love-Milestone)** — always ships, any length. Watch Gmail for tracking/PRO.
-- **DL (DL Cabinetry)** — ships only if long pallet (≥96"). CFC arranges R+L for everything else.
-- **All others** — CFC always arranges R+L. Supplier palletizes. CFC pulls PRO from R+L API.
-
-### Track A — Warehouse Ships (LI, LM, DL long pallet)
-Day 0: Payment confirmed. Warehouse notified. Pick list PDF (warehouse version) attached.
-Day 2: Gmail scan for tracking/PRO. Found → auto-populate. Not found → send warehouse response form.
-Form flow: Has it shipped? Yes → PRO entry → R+L polling every 4 business hours → Tracking Confirmed.
-No response 24h → email William.
-
-### Track B — CFC Arranges R+L (all others + DL short)
-Day 0: Payment confirmed. BOL created. Warehouse notified.
-Day 2: Form: "Is it palletized and ready for R+L pickup?"
-Yes → R+L pickup ping → poll for PRO → Tracking Confirmed.
-No response 24h → email William.
-
-### Tracking Confirmed (both tracks)
-1. Customer email: shipped + PRO + ETA
-2. Poll R+L daily for ETA + stop number
-3. Evening before delivery: "Your delivery is tomorrow"
-4. Morning of delivery: Delivery Day email + customer pick sheet PDF + interactive pick sheet link
-5. R+L shows delivered: Post-Delivery email
+## Phase 8 — Next
+Shipment tracking & notification engine. See `brain:workstreams/WS6_CFC_ORDERS.md` for full spec.
 
 ---
 
@@ -96,14 +60,15 @@ No response 24h → email William.
 
 | File | SHA | Notes |
 |------|-----|-------|
-| cfc-orders:orders_routes.py | 4e530dfa | Sales-based weight allocation in rl-quote-data |
-| cfc-orders:checkout_routes.py | 5b5e6c55 | Per-warehouse shipment auto-create in webhook |
-| cfc-orders-frontend:src/App.jsx | ecb8f13a | v7.5.0 — multi-warehouse table + actions |
+| cfc-orders:orders_routes.py | 6c4ac2fa | COALESCE fallback for weight allocation |
+| cfc-orders:sync_service.py | 21156ca7 | line_total now written on B2BWave sync |
+| cfc-orders:checkout_routes.py | 5b5e6c55 | Per-warehouse shipment auto-create |
 | cfc-orders:checkout.py | 76ff33fa | Unchanged |
 | cfc-orders:main.py | e4cd70c1 | v6.2.0 unchanged |
+| cfc-orders-frontend:src/App.jsx | e2b5a999 | v7.6.0 — Quote All Warehouses LTL |
 | cfc-orders-frontend:src/components/ShippingManager.jsx | ea4de1bf | v5.9.8 unchanged |
 | cfc-orders-frontend:src/components/ShipmentRow.jsx | 398b287a | v5.9.4 unchanged |
-| cfc-orders-frontend:src/components/RLQuoteHelper.jsx | 216707be | v5.9.1 unchanged — button auto-enables when weight.value non-null |
+| cfc-orders-frontend:src/components/RLQuoteHelper.jsx | 216707be | v5.9.1 unchanged |
 
 ---
 
@@ -117,3 +82,4 @@ No response 24h → email William.
 - WS17 FILE LOCK still active.
 - POWERSHELL: NEVER use &&. One command per block.
 - ⚠️ Sales-allocated weights are estimates only — see PRODUCTION GATE above.
+- ⚠️ LI quote returning same price as L&C on order #5492 — may be R+L minimum floor, verify on next real order.
