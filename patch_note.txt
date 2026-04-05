@@ -1,0 +1,2 @@
+    def add_address_pending_to_checkouts() -> dict:
+        pass
