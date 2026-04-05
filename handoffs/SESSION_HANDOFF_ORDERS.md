@@ -1,5 +1,5 @@
 # WS6 — CFC Orders Session Handoff
-**Date:** 2026-04-04 (multi-warehouse shipping complete)
+**Date:** 2026-04-05 (weight allocation for multi-warehouse LTL)
 **Repo:** CFCOrderBackend_Sandbox / CFCOrdersFrontend_Sandbox
 
 ⛔ THIS IS THE SANDBOX REPO — NOW LIVE AS PRODUCTION
@@ -8,18 +8,36 @@
 
 ---
 
-## CURRENT STATE — Multi-warehouse shipping live.
+## CURRENT STATE — Multi-warehouse LTL auto-quote unblocked.
 
-**What was just built (2026-04-04):**
+**What was just built (2026-04-05):**
 
-### Gap 1 — Backend: Per-warehouse shipment record auto-creation ✅
-`checkout_routes.py` (sha `5b5e6c55`) — webhook now auto-creates one `order_shipments` row per warehouse group immediately when B2BWave order fires. Uses `calculate_order_shipping()` result, idempotent (checks `shipment_id` before insert). Matches sync_service `shipment_id` format: `{order_id}-{wh-short}`. Fields populated: `warehouse`, `status='needs_order'`, `origin_zip`, `weight`, `has_oversized`.
+### Weight Allocation — `orders_routes.py` (sha `4e530dfa`)
+`GET /shipments/{shipment_id}/rl-quote-data` — when a shipment has no stored weight and the order spans multiple warehouses, the endpoint now computes a sales-proportional weight allocation from `order_line_items.line_total` grouped by warehouse. Returns `weight.value` (non-null) so the frontend auto-quote button is enabled.
 
-### Gap 2 — Admin table: All warehouses shown ✅
-`App.jsx` v7.5.0 (sha `ecb8f13a`) — Warehouse column now renders all unique warehouses for the order as stacked tags. Multi-warehouse orders show e.g. `LI` + `DL` stacked vertically.
+Example — Order #5492:
+- SHLS (L&C Cabinetry): $2,665.01 → 81.33% → 692.6 lbs
+- WSP: $611.75 → 18.67% → 159.2 lbs
+- Total weight: 851.8 lbs ✅
 
-### Gap 3 — Actions tab: Per-warehouse shipping buttons ✅
-`App.jsx` v7.5.0 — Actions tab now maps over all shipments and renders one "🚚 Ship: {warehouse}" button per shipment. No more `shipments[0]` hardcode.
+Weight note shown in UI: `"Sales-allocated (81.3% of order) ⚠️ Not production-ready — verify before use"`
+
+---
+
+## ⚠️ PRODUCTION GATE — Weight Allocation Not Production-Ready
+
+**DO NOT use sales-allocated weights on live orders without review.**
+
+Current logic allocates `orders.total_weight` proportionally by each warehouse's `SUM(line_total)`. This is an approximation — cabinet prices correlate loosely with weight but are not a substitute for real per-item weights.
+
+| Warehouse | Sales | % | Allocated Weight | Real Weight |
+|-----------|-------|---|-----------------|-------------|
+| SHLS (L&C Cabinetry) | $2,665.01 | 81.33% | 692.6 lbs | Unknown until Lane C |
+| WSP | $611.75 | 18.67% | 159.2 lbs | Unknown until Lane C |
+
+**Production fix required:** Lane C (RTA Weight) must be completed (blocked on WS5 canonical master cleanup). Once Lane C loads real per-SKU weights from the RTA database, the allocation logic in `get_rl_quote_data` should be replaced with a `SUM(item_weight * quantity)` per warehouse query against `order_line_items` joined to the weight lookup.
+
+Until then: treat sales-allocated weights as estimates. Always verify quote weight against physical shipment before booking R+L.
 
 ---
 
@@ -29,7 +47,7 @@
 - Step 3 (DB migrations): done ✅ (shared DB)
 - Step 4 (Vercel repoint): done ✅ (auto-deploy)
 - Step 5 (smoke test): done ✅ (confirmed working from UI)
-- Step 6 (cleanup): DEFERRED — next session
+- Step 6 (cleanup): DONE ✅ — dead files never existed in sandbox; .gitignore already correct; repo archiving skipped (risk unclear)
 
 ---
 
@@ -37,16 +55,15 @@
 
 | Item | Priority |
 |------|----------|
-| Step 6 cleanup: delete main2/4/7/8.py, fix .gitignore, archive old repos | Next session |
 | Email subject line â encoding (minor formatting) | Low |
-| R+L multi-warehouse auto-quote | Phase 8 |
+| R+L multi-warehouse auto-quote weight accuracy | Blocked on Lane C / WS5 |
 | Lane C (RTA Weight) | Blocked on WS5 |
 
 ---
 
 ## Phase 8 — Shipment Tracking & Notification Engine
 
-Top priority after cleanup. See previous handoff content for full spec.
+Top priority next. See WS6_CFC_ORDERS.md for full spec.
 
 ### Warehouse Shipping Rules
 - **LI (Cabinetry Distribution)** — always ships, any length. Watch Gmail for tracking/PRO.
@@ -75,17 +92,18 @@ No response 24h → email William.
 
 ---
 
-## Key Files (current SHAs — 2026-04-04)
+## Key Files (current SHAs — 2026-04-05)
 
 | File | SHA | Notes |
 |------|-----|-------|
+| cfc-orders:orders_routes.py | 4e530dfa | Sales-based weight allocation in rl-quote-data |
 | cfc-orders:checkout_routes.py | 5b5e6c55 | Per-warehouse shipment auto-create in webhook |
 | cfc-orders-frontend:src/App.jsx | ecb8f13a | v7.5.0 — multi-warehouse table + actions |
 | cfc-orders:checkout.py | 76ff33fa | Unchanged |
-| cfc-orders:orders_routes.py | 27ece593 | Unchanged |
 | cfc-orders:main.py | e4cd70c1 | v6.2.0 unchanged |
 | cfc-orders-frontend:src/components/ShippingManager.jsx | ea4de1bf | v5.9.8 unchanged |
 | cfc-orders-frontend:src/components/ShipmentRow.jsx | 398b287a | v5.9.4 unchanged |
+| cfc-orders-frontend:src/components/RLQuoteHelper.jsx | 216707be | v5.9.1 unchanged — button auto-enables when weight.value non-null |
 
 ---
 
@@ -98,3 +116,4 @@ No response 24h → email William.
 - Lane C (RTA Weight) blocked on WS5 — do not touch.
 - WS17 FILE LOCK still active.
 - POWERSHELL: NEVER use &&. One command per block.
+- ⚠️ Sales-allocated weights are estimates only — see PRODUCTION GATE above.
