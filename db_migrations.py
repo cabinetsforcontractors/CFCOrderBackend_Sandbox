@@ -61,7 +61,6 @@ def add_rl_shipping_fields() -> dict:
     """Add RL Carriers shipping fields to order_shipments table"""
     with get_db() as conn:
         with conn.cursor() as cur:
-            # Add RL quote fields and Li pricing fields
             fields_to_add = [
                 ("origin_zip", "VARCHAR(10)"),
                 ("rl_quote_number", "VARCHAR(50)"),
@@ -79,15 +78,14 @@ def add_rl_shipping_fields() -> dict:
                 ("customer_price", "DECIMAL(10,2)"),
                 ("tracking_number", "VARCHAR(100)")
             ]
-            
+
             for field_name, field_type in fields_to_add:
                 try:
                     cur.execute(f"ALTER TABLE order_shipments ADD COLUMN {field_name} {field_type}")
-                except Exception as e:
-                    # Column might already exist
+                except Exception:
                     conn.rollback()
                     pass
-            
+
             conn.commit()
     return {"status": "ok", "message": "Shipping fields added to order_shipments"}
 
@@ -116,12 +114,12 @@ def fix_shipment_columns() -> dict:
             try:
                 cur.execute("ALTER TABLE order_shipments ALTER COLUMN order_id TYPE VARCHAR(50)")
                 conn.commit()
-            except Exception as e:
+            except Exception:
                 conn.rollback()
             try:
                 cur.execute("ALTER TABLE order_shipments ALTER COLUMN shipment_id TYPE VARCHAR(100)")
                 conn.commit()
-            except Exception as e:
+            except Exception:
                 conn.rollback()
     return {"status": "ok", "message": "Shipment columns fixed"}
 
@@ -130,26 +128,17 @@ def fix_sku_columns() -> dict:
     """Fix SKU column lengths in all tables"""
     with get_db() as conn:
         with conn.cursor() as cur:
-            try:
-                cur.execute("ALTER TABLE sku_warehouse_map ALTER COLUMN sku_prefix TYPE VARCHAR(100)")
-                conn.commit()
-            except:
-                conn.rollback()
-            try:
-                cur.execute("ALTER TABLE warehouse_mapping ALTER COLUMN sku_prefix TYPE VARCHAR(100)")
-                conn.commit()
-            except:
-                conn.rollback()
-            try:
-                cur.execute("ALTER TABLE order_items ALTER COLUMN sku_prefix TYPE VARCHAR(100)")
-                conn.commit()
-            except:
-                conn.rollback()
-            try:
-                cur.execute("ALTER TABLE order_line_items ALTER COLUMN sku_prefix TYPE VARCHAR(100)")
-                conn.commit()
-            except:
-                conn.rollback()
+            for table_col in [
+                ("sku_warehouse_map", "sku_prefix"),
+                ("warehouse_mapping", "sku_prefix"),
+                ("order_items", "sku_prefix"),
+                ("order_line_items", "sku_prefix"),
+            ]:
+                try:
+                    cur.execute(f"ALTER TABLE {table_col[0]} ALTER COLUMN {table_col[1]} TYPE VARCHAR(100)")
+                    conn.commit()
+                except:
+                    conn.rollback()
     return {"status": "ok", "message": "SKU columns fixed"}
 
 
@@ -158,11 +147,10 @@ def fix_order_id_length() -> dict:
     with get_db() as conn:
         with conn.cursor() as cur:
             results = []
-            
-            # First, find and drop ALL views that might depend on orders
+
             try:
                 cur.execute("""
-                    SELECT viewname FROM pg_views 
+                    SELECT viewname FROM pg_views
                     WHERE schemaname = 'public'
                 """)
                 views = cur.fetchall()
@@ -174,11 +162,10 @@ def fix_order_id_length() -> dict:
                         pass
             except Exception as e:
                 results.append(f"View lookup: {str(e)}")
-            
-            # Also drop any rules
+
             try:
                 cur.execute("""
-                    SELECT rulename, tablename FROM pg_rules 
+                    SELECT rulename, tablename FROM pg_rules
                     WHERE schemaname = 'public'
                 """)
                 rules = cur.fetchall()
@@ -190,10 +177,9 @@ def fix_order_id_length() -> dict:
                         pass
             except Exception as e:
                 results.append(f"Rule lookup: {str(e)}")
-            
+
             conn.commit()
-            
-            # Now alter order_id columns in all tables
+
             tables = ['orders', 'order_status', 'order_line_items', 'order_events', 'order_shipments']
             for table in tables:
                 try:
@@ -201,7 +187,7 @@ def fix_order_id_length() -> dict:
                     results.append(f"{table}: updated")
                 except Exception as e:
                     results.append(f"{table}: {str(e)}")
-            
+
             conn.commit()
     return {"status": "ok", "results": results}
 
@@ -210,13 +196,10 @@ def recreate_order_status_view() -> dict:
     """Recreate the order_status view after it was dropped"""
     with get_db() as conn:
         with conn.cursor() as cur:
-            # First drop the old view
             cur.execute("DROP VIEW IF EXISTS order_status CASCADE")
-            
-            # Create new view
             cur.execute("""
                 CREATE VIEW order_status AS
-                SELECT 
+                SELECT
                     order_id,
                     CASE
                         WHEN is_complete THEN 'complete'
@@ -255,6 +238,28 @@ def add_weight_column() -> dict:
                 return {"status": "error", "message": str(e)}
 
 
+def add_is_residential_to_shipments() -> dict:
+    """
+    Add is_residential column to order_shipments table.
+
+    Populated at checkout time via Smarty address validation.
+    Used by the admin UI to show/hide the liftgate toggle for commercial addresses.
+    Safe to run multiple times.
+    """
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            try:
+                cur.execute("ALTER TABLE order_shipments ADD COLUMN is_residential BOOLEAN DEFAULT TRUE")
+                conn.commit()
+                return {"status": "ok", "message": "is_residential column added to order_shipments"}
+            except Exception as e:
+                if "already exists" in str(e):
+                    conn.rollback()
+                    return {"status": "ok", "message": "is_residential column already exists"}
+                conn.rollback()
+                return {"status": "error", "message": str(e)}
+
+
 # =============================================================================
 # PHASE 3B: LIFECYCLE FIELDS MIGRATION
 # =============================================================================
@@ -262,24 +267,24 @@ def add_weight_column() -> dict:
 def add_lifecycle_fields() -> dict:
     """
     Add lifecycle management columns to orders table.
-    
+
     New columns:
-      - last_customer_email_at: Timestamp of last email to/from customer about this order
-      - lifecycle_status: Enum-like VARCHAR — active, inactive, archived, canceled
-      - lifecycle_deadline_at: Next lifecycle action deadline
-      - lifecycle_reminders_sent: JSON tracking which reminders have been sent
-    
-    Safe to run multiple times — uses IF NOT EXISTS pattern.
+      - last_customer_email_at
+      - lifecycle_status
+      - lifecycle_deadline_at
+      - lifecycle_reminders_sent
+
+    Safe to run multiple times.
     """
     results = []
-    
+
     fields_to_add = [
         ("last_customer_email_at", "TIMESTAMP WITH TIME ZONE"),
         ("lifecycle_status", "VARCHAR(20) DEFAULT 'active'"),
         ("lifecycle_deadline_at", "TIMESTAMP WITH TIME ZONE"),
         ("lifecycle_reminders_sent", "JSONB DEFAULT '{}'::jsonb"),
     ]
-    
+
     with get_db() as conn:
         with conn.cursor() as cur:
             for field_name, field_type in fields_to_add:
@@ -293,31 +298,29 @@ def add_lifecycle_fields() -> dict:
                         results.append(f"{field_name}: ERROR — {str(e)}")
                     conn.rollback()
                     continue
-            
-            # Add index on lifecycle_status for tab queries
+
             try:
                 cur.execute("""
-                    CREATE INDEX IF NOT EXISTS idx_orders_lifecycle_status 
+                    CREATE INDEX IF NOT EXISTS idx_orders_lifecycle_status
                     ON orders(lifecycle_status)
                 """)
                 results.append("idx_orders_lifecycle_status: created")
             except Exception as e:
                 results.append(f"lifecycle index: {str(e)}")
                 conn.rollback()
-            
-            # Add index on last_customer_email_at for cron queries
+
             try:
                 cur.execute("""
-                    CREATE INDEX IF NOT EXISTS idx_orders_last_customer_email 
+                    CREATE INDEX IF NOT EXISTS idx_orders_last_customer_email
                     ON orders(last_customer_email_at)
                 """)
                 results.append("idx_orders_last_customer_email: created")
             except Exception as e:
                 results.append(f"email index: {str(e)}")
                 conn.rollback()
-            
+
             conn.commit()
-    
+
     return {
         "status": "ok",
         "message": "Lifecycle fields migration complete",
@@ -328,19 +331,13 @@ def add_lifecycle_fields() -> dict:
 def backfill_lifecycle_from_emails() -> dict:
     """
     Backfill last_customer_email_at from existing order_email_snippets.
-    
-    Looks at the most recent email snippet for each order and uses its
-    date as the initial last_customer_email_at value.
-    
-    Also sets lifecycle_status based on the calculated days inactive.
     Run AFTER add_lifecycle_fields().
     """
     updated = 0
     errors = []
-    
+
     with get_db() as conn:
         with conn.cursor() as cur:
-            # Find orders with NULL last_customer_email_at that have email snippets
             cur.execute("""
                 UPDATE orders o
                 SET last_customer_email_at = sub.latest_email
@@ -353,8 +350,7 @@ def backfill_lifecycle_from_emails() -> dict:
                 AND o.last_customer_email_at IS NULL
             """)
             updated += cur.rowcount
-            
-            # For orders with no email snippets, use updated_at as fallback
+
             cur.execute("""
                 UPDATE orders
                 SET last_customer_email_at = COALESCE(updated_at, order_date, created_at)
@@ -362,9 +358,9 @@ def backfill_lifecycle_from_emails() -> dict:
                 AND (is_complete = FALSE OR is_complete IS NULL)
             """)
             updated += cur.rowcount
-            
+
             conn.commit()
-    
+
     return {
         "status": "ok",
         "message": f"Backfilled {updated} orders with last_customer_email_at",
