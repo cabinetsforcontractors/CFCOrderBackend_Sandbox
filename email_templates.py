@@ -207,7 +207,6 @@ def _wrap_email(header: str, body_content: str) -> str:
 
 
 def _order_summary_block(order: Dict) -> str:
-    """Simple order summary card (used in non-invoice templates)."""
     order_id = order.get("order_id", "—")
     customer = order.get("customer_name", "—")
     company = order.get("company_name", "")
@@ -240,7 +239,8 @@ def _order_summary_block(order: Dict) -> str:
 
 def _render_payment_link(order: Dict) -> str:
     """
-    Template 1: Full QB-style invoice with line items, tariff, shipping, Pay Now button, policy notice.
+    Template 1: Full QB-style invoice with line items, tariff, shipping, Pay Now button.
+    Includes residential classification notice + commercial address button on every send.
     Expects order_data to include 'shipping_result' from calculate_order_shipping().
     """
     customer = order.get("customer_name", "Valued Customer")
@@ -251,7 +251,6 @@ def _render_payment_link(order: Dict) -> str:
     payment_link = order.get("payment_link", "#")
     line_items = order.get("line_items", [])
 
-    # Shipping result
     sr = order.get("shipping_result", {})
     total_items = sr.get("total_items", order.get("order_total", 0))
     tariff_rate = sr.get("tariff_rate", 0.08)
@@ -259,7 +258,6 @@ def _render_payment_link(order: Dict) -> str:
     total_shipping = sr.get("total_shipping", 0)
     grand_total = sr.get("grand_total", round(float(total_items) + tariff_amount + total_shipping, 2))
 
-    # Shipping address — fix address2 to render on its own line
     addr = order.get("shipping_address", {})
     street = addr.get("address", "")
     street2 = addr.get("address2", "")
@@ -267,7 +265,6 @@ def _render_payment_link(order: Dict) -> str:
     state = addr.get("state", "")
     zip_code = addr.get("zip", "")
 
-    # Build address HTML — address2 gets its own line, not comma-appended
     addr_html = f"<strong>{street}</strong>"
     if street2:
         addr_html += f"<br/>{street2}"
@@ -275,11 +272,9 @@ def _render_payment_link(order: Dict) -> str:
     if city_state_zip.strip():
         addr_html += f"<br/>{city_state_zip}"
 
-    # Bill to block
     bill_name = f"<strong>{company or customer}</strong>"
     bill_contact = f"<br/>{customer}" if company else ""
 
-    # Line items table
     if line_items:
         rows = ""
         for item in line_items:
@@ -315,6 +310,36 @@ def _render_payment_link(order: Dict) -> str:
 
     tariff_pct = int(tariff_rate * 100)
 
+    # Residential classification notice — on every payment_link email.
+    # Catches the case where Smarty confirmed residential but customer is a contractor
+    # delivering to a job site. Commercial address button fires CFC alert, stops payment.
+    confirm_commercial_url = order.get("confirm_commercial_url", "#")
+    residential_notice = f"""
+    <div style="background:#EFF6FF;border:1px solid #BFDBFE;border-radius:8px;
+                padding:16px 18px;margin:20px 0;">
+        <p style="margin:0 0 8px;font-weight:700;color:#1E40AF;font-size:14px;">
+            &#128205; Delivery Address Classification
+        </p>
+        <p style="margin:0 0 8px;font-size:13px;color:#1E40AF;line-height:1.6;">
+            Your delivery address has been classified as a
+            <strong>residential address</strong>.
+            Residential deliveries include liftgate service at delivery.
+        </p>
+        <p style="margin:0 0 14px;font-size:13px;color:#1E40AF;line-height:1.6;">
+            If this is actually a <strong>commercial address</strong>
+            (business with a loading dock or forklift),
+            <strong>do not pay this invoice</strong>.
+        </p>
+        <p style="margin:0;text-align:center;">
+            <a href="{confirm_commercial_url}"
+               style="display:inline-block;background:#DC2626;color:#ffffff;
+                      text-decoration:none;padding:10px 24px;border-radius:6px;
+                      font-weight:700;font-size:13px;letter-spacing:0.3px;">
+                This is a commercial address &rarr;
+            </a>
+        </p>
+    </div>"""
+
     body = f"""
     <p>Hi {first_name},</p>
     <p>Thank you for your order. Please find your invoice below. A PDF copy is attached for your records.</p>
@@ -344,6 +369,8 @@ def _render_payment_link(order: Dict) -> str:
         <tr><td class="label">Shipping</td><td class="amount">${total_shipping:,.2f}</td></tr>
         <tr class="grand"><td class="label">Total Due</td><td class="amount">${grand_total:,.2f}</td></tr>
     </table>
+
+    {residential_notice}
 
     <div class="cta-wrap">
         <a href="{payment_link}" class="cta-button">Pay Now &mdash; ${grand_total:,.2f}</a>
@@ -551,6 +578,7 @@ def render_template_preview(template_id: str) -> Optional[str]:
         "order_total": 4250.00,
         "order_date": "April 04, 2026",
         "payment_link": "https://square.link/example",
+        "confirm_commercial_url": "https://cfcorderbackend-sandbox.onrender.com/checkout/5307/confirm-commercial?token=abc123",
         "payment_amount": 4250.00,
         "tracking": "PRO 123456789",
         "pro_number": "123456789",
