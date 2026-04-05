@@ -986,12 +986,12 @@ def get_rl_quote_data(shipment_id: str):
                 elif not is_single_warehouse:
                     # Sales-based weight allocation (TEMPORARY — not production-ready)
                     # ⚠️ Real per-item weights needed from Lane C (WS5) before this is accurate.
-                    # Current logic: allocate total_weight proportionally by warehouse line_total.
+                    # Uses price * quantity as fallback when line_total is null (sync_service gap).
                     if order_weight > 0:
                         cur.execute(
                             """
                             SELECT warehouse,
-                                   COALESCE(SUM(line_total), 0) AS warehouse_total
+                                   SUM(COALESCE(line_total, price * quantity, 0)) AS warehouse_total
                             FROM order_line_items
                             WHERE order_id = %s AND warehouse IS NOT NULL
                             GROUP BY warehouse
