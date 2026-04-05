@@ -2,13 +2,7 @@
 migration_routes.py
 FastAPI router for DB migrations and debug schema endpoints.
 
-Phase 5B: Extracted from main.py
-
 All endpoints require admin token (X-Admin-Token: <token> header).
-
-Mount in main.py with:
-    from migration_routes import migration_router
-    app.include_router(migration_router)
 
 Endpoints:
     POST /create-pending-checkouts-table
@@ -21,6 +15,7 @@ Endpoints:
     POST /recreate-order-status-view
     POST /add-weight-column
     POST /add-is-residential
+    POST /add-address-pending
     POST /init-db
     GET  /debug/orders-columns
 """
@@ -41,6 +36,7 @@ try:
         recreate_order_status_view as _recreate_order_status_view,
         add_weight_column as _add_weight_column,
         add_is_residential_to_shipments as _add_is_residential,
+        add_address_pending_to_checkouts as _add_address_pending,
     )
     DB_MIGRATIONS_LOADED = True
 except ImportError:
@@ -128,6 +124,15 @@ def add_is_residential(_: bool = Depends(require_admin)):
     return _run_migration(_add_is_residential)
 
 
+@migration_router.post("/add-address-pending")
+def add_address_pending(_: bool = Depends(require_admin)):
+    """
+    Add address_pending + address_validation_error columns to pending_checkouts.
+    WS6 — blocks invoice send when Smarty fails after 3 attempts.
+    """
+    return _run_migration(_add_address_pending)
+
+
 @migration_router.post("/init-db")
 def init_db(_: bool = Depends(require_admin)):
     """Initialize database schema (DESTRUCTIVE — drops and recreates)."""
@@ -155,19 +160,13 @@ def debug_orders_columns(_: bool = Depends(require_admin)):
                 ORDER BY ordinal_position
             """)
             columns = cur.fetchall()
-
             cur.execute("""
                 SELECT column_name
                 FROM information_schema.columns
                 WHERE table_name = 'order_status'
             """)
             view_columns = cur.fetchall()
-
             return {
                 "orders_columns": [c[0] for c in columns],
-                "view_columns": (
-                    [c[0] for c in view_columns]
-                    if view_columns
-                    else "view does not exist"
-                ),
+                "view_columns": [c[0] for c in view_columns] if view_columns else "view does not exist",
             }
