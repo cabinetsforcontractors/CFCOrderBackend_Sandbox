@@ -20,6 +20,7 @@ Endpoints:
     POST /fix-order-id-length
     POST /recreate-order-status-view
     POST /add-weight-column
+    POST /add-is-residential
     POST /init-db
     GET  /debug/orders-columns
 """
@@ -39,6 +40,7 @@ try:
         fix_order_id_length as _fix_order_id_length,
         recreate_order_status_view as _recreate_order_status_view,
         add_weight_column as _add_weight_column,
+        add_is_residential_to_shipments as _add_is_residential,
     )
     DB_MIGRATIONS_LOADED = True
 except ImportError:
@@ -118,6 +120,12 @@ def recreate_order_status_view(_: bool = Depends(require_admin)):
 def add_weight_column(_: bool = Depends(require_admin)):
     """Add total_weight column."""
     return _run_migration(_add_weight_column)
+
+
+@migration_router.post("/add-is-residential")
+def add_is_residential(_: bool = Depends(require_admin)):
+    """Add is_residential column to order_shipments (WS6 — Smarty residential detection)."""
+    return _run_migration(_add_is_residential)
 
 
 @migration_router.post("/init-db")
