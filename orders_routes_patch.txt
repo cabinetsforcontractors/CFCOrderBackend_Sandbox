@@ -1,13 +1,6 @@
-                    "existing_quote": {
-                                        "quote_number": shipment.get("rl_quote_number"),
-                                        "quote_price": float(shipment["rl_quote_price"])
-                                        if shipment.get("rl_quote_price")
-                                        else None,
-                                        "customer_price": float(shipment["rl_customer_price"])
-                                        if shipment.get("rl_customer_price")
-                                        else None,
-                                        "quote_url": shipment.get("quote_url"),
-                                    },
-                                    "is_residential": bool(shipment.get("is_residential", True)),
-                                    "rl_quote_url": "https://www.rlcarriers.com/freight/shipping/rate-quote",
-                                }
+PENDING: Add is_residential to get_rl_quote_data return in orders_routes.py
+
+In get_rl_quote_data (line ~1080), add before "rl_quote_url":
+    "is_residential": bool(shipment.get("is_residential", True)),
+
+Run this migration before using the liftgate toggle: add_is_residential_to_shipments()
