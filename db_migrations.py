@@ -243,7 +243,6 @@ def add_is_residential_to_shipments() -> dict:
 def add_address_pending_to_checkouts() -> dict:
     """
     Add address_pending and address_validation_error columns to pending_checkouts.
-    address_pending = TRUE blocks invoice send entirely (hard stop for edge cases).
     Safe to run multiple times.
     """
     results = []
@@ -304,14 +303,6 @@ def add_address_classification_to_checkouts() -> dict:
 def add_bol_columns_to_shipments() -> dict:
     """
     Add BOL-related columns to order_shipments.
-
-    bol_url:    Link to the BOL PDF / R+L tracking page for the PRO number.
-    bol_number: R+L-assigned BOL number (distinct from PRO number on some shipments).
-                Typically the PRO number is the primary reference — this is a spare
-                field for cases where R+L returns a separate BOL identifier.
-
-    pro_number already exists (schema.py line 183).
-    bol_sent / bol_sent_at already exist.
     Safe to run multiple times.
     """
     results = []
@@ -408,3 +399,62 @@ def backfill_lifecycle_from_emails() -> dict:
             updated += cur.rowcount
             conn.commit()
     return {"status": "ok", "message": f"Backfilled {updated} orders with last_customer_email_at", "updated": updated}
+
+
+# =============================================================================
+# WS6 PHASE 9: SUPPLIER WORKFLOW FIELDS
+# =============================================================================
+
+def add_ws6_supplier_workflow_fields() -> dict:
+    """
+    Add WS6 supplier workflow columns to order_shipments.
+
+    quote_number:   R+L rate quote number saved at checkout — passed in BOL
+                    ReferenceNumbers to lock in the quoted rate with R+L.
+    close_time:     Pickup window close time from supplier form (e.g. "4:30 PM").
+                    Used in /PickupRequest/FromBOL close time field.
+    pickup_scheduled_email_sent: TRUE once customer receives pickup scheduled email.
+
+    Safe to run multiple times.
+    """
+    results = []
+    cols = [
+        ("quote_number", "VARCHAR(100)"),
+        ("close_time", "VARCHAR(20)"),
+        ("pickup_scheduled_email_sent", "BOOLEAN DEFAULT FALSE"),
+    ]
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            for col_name, col_def in cols:
+                try:
+                    cur.execute(f"ALTER TABLE order_shipments ADD COLUMN {col_name} {col_def}")
+                    results.append(f"{col_name}: added")
+                except Exception as e:
+                    if "already exists" in str(e):
+                        results.append(f"{col_name}: already exists")
+                    else:
+                        results.append(f"{col_name}: ERROR — {str(e)}")
+                    conn.rollback()
+                    continue
+            conn.commit()
+
+    # Also ensure orders.pro_number exists (separate from orders.tracking)
+    pro_result = []
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            try:
+                cur.execute("ALTER TABLE orders ADD COLUMN pro_number VARCHAR(50)")
+                pro_result.append("orders.pro_number: added")
+            except Exception as e:
+                if "already exists" in str(e):
+                    pro_result.append("orders.pro_number: already exists")
+                else:
+                    pro_result.append(f"orders.pro_number: ERROR — {str(e)}")
+                conn.rollback()
+            conn.commit()
+
+    return {
+        "status": "ok",
+        "message": "WS6 supplier workflow fields added",
+        "results": results + pro_result
+    }
