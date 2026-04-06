@@ -1,9 +1,6 @@
 """
-CFC Order Workflow Backend - v6.2.0
-Phase 5B Backend Hardening: main.py fully decomposed into route modules.
-WS17: invoice_routes added (/invoice/scan /status /emails /flags).
-Phase 5 Hardening: routes/audit.py added (/audit/log POST + GET).
-Phase 5B Rate Limiting: slowapi wired (200/min global default).
+CFC Order Workflow Backend - v6.3.0
+Phase 8: BOL generation added (bol_routes.py).
 
 Module Map:
   orders_routes.py    — /orders /shipments /warehouse-mapping /trusted-customers
@@ -13,6 +10,7 @@ Module Map:
   sync_routes.py      — /b2bwave/* /gmail/* /square/*
   migration_routes.py — /init-db /add-* /fix-* /debug/orders-columns
   checkout_routes.py  — /checkout* /checkout-ui/* /webhook/*
+  bol_routes.py       — /bol/{shipment_id}/create  /bol/{shipment_id}/status
   invoice_routes.py   — /invoice/scan /invoice/status /invoice/emails /invoice/flags
   routes/audit.py     — /audit/log (POST write, GET read)
   auth.py             — require_admin Depends() — X-Admin-Token or Bearer JWT
@@ -43,7 +41,7 @@ from config import (
     AUTO_SYNC_INTERVAL_MINUTES,
 )
 
-from db_helpers import get_db  # noqa: F401  (keep import so other modules can resolve)
+from db_helpers import get_db  # noqa: F401
 
 # =============================================================================
 # OPTIONAL SERVICE MODULES
@@ -92,10 +90,8 @@ except ImportError:
 # ROUTE MODULE IMPORTS
 # =============================================================================
 
-# Phase 2: RL-Quote proxy (/proxy/*)
 from rl_quote_proxy import router as rl_proxy_router
 
-# Phase 3A: Alerts (/alerts/*)
 try:
     from alerts_routes import alerts_router
     ALERTS_ENGINE_LOADED = True
@@ -103,20 +99,17 @@ except ImportError:
     ALERTS_ENGINE_LOADED = False
     print("[STARTUP] alerts_routes module not found, AlertsEngine disabled")
 
-# Phase 3B + 4: Lifecycle + Email + AI Config
 from startup_wiring import wire_all
 
-# Phase 5A: Orders + Shipping
 from orders_routes import orders_router
 from shipping_routes import shipping_router
 
-# Phase 5B: Detection, Sync, Migrations, Checkout
 from detection_routes import detection_router
 from sync_routes import sync_router
 from migration_routes import migration_router
 from checkout_routes import checkout_router
+from bol_routes import bol_router
 
-# WS17: Invoice Intelligence (/invoice/*)
 try:
     from invoice_routes import invoice_router
     INVOICE_LOADED = True
@@ -124,7 +117,6 @@ except ImportError:
     INVOICE_LOADED = False
     print("[STARTUP] invoice_routes module not found, Invoice Intelligence disabled")
 
-# Phase 5 Hardening: Audit Log (/audit/log)
 try:
     from routes.audit import audit_router
     AUDIT_LOADED = True
@@ -134,7 +126,7 @@ except ImportError:
 
 
 # =============================================================================
-# FASTAPI APP — CORS whitelist (no wildcard)
+# FASTAPI APP — CORS whitelist
 # =============================================================================
 
 _cors_env = os.environ.get("CORS_ORIGINS", "")
@@ -142,18 +134,17 @@ _extra_origins = [o.strip() for o in _cors_env.split(",") if o.strip()] if _cors
 
 ALLOWED_ORIGINS = [
     "https://cfc-orders-frontend.vercel.app",
-    "https://cfcordersfrontend-sandbox.vercel.app",   # sandbox frontend
-    "https://cfcorderbackend-sandbox.onrender.com",   # checkout self-reference
-    "https://brain-backend-6uhk.onrender.com",        # Brain UI proxy
+    "https://cfcordersfrontend-sandbox.vercel.app",
+    "https://cfcorderbackend-sandbox.onrender.com",
+    "https://brain-backend-6uhk.onrender.com",
     "http://localhost:3000",
     "http://localhost:5173",
     "http://127.0.0.1:3000",
     "http://127.0.0.1:5173",
 ] + _extra_origins
 
-app = FastAPI(title="CFC Order Workflow", version="6.2.0")
+app = FastAPI(title="CFC Order Workflow", version="6.3.0")
 
-# Phase 5B: Rate limiting — must be wired before routers are mounted
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(SlowAPIMiddleware)
@@ -170,7 +161,7 @@ app.add_middleware(
 # MOUNT ROUTERS
 # =============================================================================
 
-app.include_router(rl_proxy_router)           # Phase 2: /proxy/*
+app.include_router(rl_proxy_router)           # Phase 2:  /proxy/*
 
 if ALERTS_ENGINE_LOADED:
     app.include_router(alerts_router)         # Phase 3A: /alerts/*
@@ -184,6 +175,7 @@ app.include_router(detection_router)          # Phase 5B: /parse-email /detect-*
 app.include_router(sync_router)               # Phase 5B: /b2bwave/* /gmail/* /square/*
 app.include_router(migration_router)          # Phase 5B: /init-db /add-* /fix-* /debug/orders-columns
 app.include_router(checkout_router)           # Phase 5B: /checkout* /checkout-ui/* /webhook/*
+app.include_router(bol_router)                # Phase 8:  /bol/{shipment_id}/create  /bol/{shipment_id}/status
 
 if INVOICE_LOADED:
     app.include_router(invoice_router)        # WS17: /invoice/scan /status /emails /flags
@@ -193,12 +185,11 @@ if AUDIT_LOADED:
 
 
 # =============================================================================
-# STARTUP EVENT
+# STARTUP
 # =============================================================================
 
 @app.on_event("startup")
 def start_auto_sync():
-    """Start background sync thread on app startup."""
     if SYNC_SERVICE_LOADED:
         start_auto_sync_thread(run_gmail_sync, run_square_sync)
     else:
@@ -214,7 +205,7 @@ def root():
     return {
         "status": "ok",
         "service": "CFC Order Workflow",
-        "version": "6.2.0",
+        "version": "6.3.0",
         "auto_sync": get_sync_status(),
         "gmail_sync": {"enabled": gmail_configured()},
         "square_sync": {"enabled": square_configured()},
@@ -225,17 +216,14 @@ def root():
         "invoice_intel": {"enabled": INVOICE_LOADED},
         "audit_log": {"enabled": AUDIT_LOADED},
         "rate_limiting": {"enabled": True, "default_limit": "200/minute"},
+        "bol_generation": {"enabled": True},
     }
 
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": "6.2.0"}
+    return {"status": "ok", "version": "6.3.0"}
 
-
-# =============================================================================
-# SERVER STARTUP
-# =============================================================================
 
 if __name__ == "__main__":
     import uvicorn
