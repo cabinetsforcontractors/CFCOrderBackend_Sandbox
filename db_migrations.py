@@ -270,18 +270,7 @@ def add_address_pending_to_checkouts() -> dict:
 def add_address_classification_to_checkouts() -> dict:
     """
     Add address classification columns to pending_checkouts.
-
-    address_classification_needed  — TRUE for Cases B (uncertain rdi) and C (Smarty failed).
-                                     Customer is sent to Step 1 → Step 2 classification flow.
-    address_initially_found        — TRUE = Smarty found area but rdi empty (Case B).
-                                     FALSE = Smarty found nothing (Case C), edit box pre-opened.
-    address_type_confirmed         — What the customer selected in Step 2:
-                                     residential_existing | commercial_existing |
-                                     residential_new_construction | commercial_new_construction |
-                                     rural | military
-    is_residential_customer_confirmed — Derived bool from address_type_confirmed.
-                                        Used as is_residential_override in calculate_order_shipping().
-
+    Drives multi-step customer checkout flow (Step 1 / Step 2).
     Safe to run multiple times.
     """
     results = []
@@ -308,6 +297,45 @@ def add_address_classification_to_checkouts() -> dict:
     return {
         "status": "ok",
         "message": "Address classification columns added to pending_checkouts",
+        "results": results
+    }
+
+
+def add_bol_columns_to_shipments() -> dict:
+    """
+    Add BOL-related columns to order_shipments.
+
+    bol_url:    Link to the BOL PDF / R+L tracking page for the PRO number.
+    bol_number: R+L-assigned BOL number (distinct from PRO number on some shipments).
+                Typically the PRO number is the primary reference — this is a spare
+                field for cases where R+L returns a separate BOL identifier.
+
+    pro_number already exists (schema.py line 183).
+    bol_sent / bol_sent_at already exist.
+    Safe to run multiple times.
+    """
+    results = []
+    cols = [
+        ("bol_url", "TEXT"),
+        ("bol_number", "VARCHAR(50)"),
+    ]
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            for col_name, col_def in cols:
+                try:
+                    cur.execute(f"ALTER TABLE order_shipments ADD COLUMN {col_name} {col_def}")
+                    results.append(f"{col_name}: added")
+                except Exception as e:
+                    if "already exists" in str(e):
+                        results.append(f"{col_name}: already exists")
+                    else:
+                        results.append(f"{col_name}: ERROR — {str(e)}")
+                    conn.rollback()
+                    continue
+            conn.commit()
+    return {
+        "status": "ok",
+        "message": "BOL columns added to order_shipments",
         "results": results
     }
 
