@@ -29,19 +29,86 @@ CHECKOUT_BASE_URL = os.environ.get("CHECKOUT_BASE_URL", "").strip()
 
 TARIFF_RATE = 0.08
 
+# =============================================================================
+# WAREHOUSE DEFINITIONS
+# bol_shipper_name: what appears in the Shipper field on the R+L BOL.
+# Format: "Cabinets For Contractors-{first_letter_of_name}{last_2_zip}"
+# All codes are unique across all 12 warehouses — verified 2026-04-06.
+# Supplier name never appears on the BOL.
+# =============================================================================
 WAREHOUSES = {
-    'LI': {'name': 'Cabinetry Distribution', 'address': '561 Keuka Rd', 'city': 'Interlachen', 'state': 'FL', 'zip': '32148', 'phone': '(615) 410-6775'},
-    'DL': {'name': 'DL Cabinetry', 'address': '7825 Parramore Rd', 'city': 'Jacksonville', 'state': 'FL', 'zip': '32256', 'phone': '904-886-5000'},
-    'ROC': {'name': 'ROC Cabinetry', 'address': '6015 Unity Dr', 'city': 'Norcross', 'state': 'GA', 'zip': '30071', 'phone': '770-263-9800'},
-    'GHI': {'name': 'GHI Cabinets', 'address': '1402 10th Ave E', 'city': 'Palmetto', 'state': 'FL', 'zip': '34221', 'phone': '941-981-9994'},
-    'Go Bravura': {'name': 'Go Bravura', 'address': '6910 Fulton St', 'city': 'Houston', 'state': 'TX', 'zip': '77066', 'phone': '832-326-7003'},
-    'Love': {'name': 'Love-Milestone', 'address': '7130 Overland Rd', 'city': 'Orlando', 'state': 'FL', 'zip': '32824', 'phone': '407-857-1985'},
-    'ARTISAN': {'name': 'Artisan (fallback)', 'address': '6910 Fulton St', 'city': 'Houston', 'state': 'TX', 'zip': '77066', 'phone': '832-326-7003'},
-    'Cabinet & Stone': {'name': 'Cabinet & Stone', 'address': '1760 Stebbins Dr', 'city': 'Houston', 'state': 'TX', 'zip': '77043', 'phone': '713-468-8062'},
-    'Cabinet & Stone CA': {'name': 'Cabinet & Stone CA', 'address': '15500 Vermont Ave', 'city': 'Paramount', 'state': 'CA', 'zip': '90723', 'phone': '562-774-8522'},
-    'DuraStone': {'name': 'DuraStone', 'address': '4506 Archie St', 'city': 'Houston', 'state': 'TX', 'zip': '77037', 'phone': '281-445-4700'},
-    'L&C': {'name': 'L&C Cabinetry', 'address': '2157 Vista Circle', 'city': 'Virginia Beach', 'state': 'VA', 'zip': '23454', 'phone': '757-425-5544'},
-    'Linda': {'name': 'Dealer Cabinetry', 'address': '200 Industrial Blvd', 'city': 'Bremen', 'state': 'GA', 'zip': '30110', 'phone': '770-537-4422'},
+    'LI': {
+        'name': 'Cabinetry Distribution',
+        'address': '561 Keuka Rd', 'city': 'Interlachen', 'state': 'FL', 'zip': '32148',
+        'phone': '(615) 410-6775',
+        'bol_shipper_name': 'Cabinets For Contractors-C48',
+    },
+    'DL': {
+        'name': 'DL Cabinetry',
+        'address': '7825 Parramore Rd', 'city': 'Jacksonville', 'state': 'FL', 'zip': '32256',
+        'phone': '904-886-5000',
+        'bol_shipper_name': 'Cabinets For Contractors-D56',
+    },
+    'ROC': {
+        'name': 'ROC Cabinetry',
+        'address': '6015 Unity Dr', 'city': 'Norcross', 'state': 'GA', 'zip': '30071',
+        'phone': '770-263-9800',
+        'bol_shipper_name': 'Cabinets For Contractors-R71',
+    },
+    'GHI': {
+        'name': 'GHI Cabinets',
+        'address': '1402 10th Ave E', 'city': 'Palmetto', 'state': 'FL', 'zip': '34221',
+        'phone': '941-981-9994',
+        'bol_shipper_name': 'Cabinets For Contractors-G21',
+    },
+    'Go Bravura': {
+        'name': 'Go Bravura',
+        'address': '6910 Fulton St', 'city': 'Houston', 'state': 'TX', 'zip': '77066',
+        'phone': '832-326-7003',
+        'bol_shipper_name': 'Cabinets For Contractors-G66',
+    },
+    'Love': {
+        'name': 'Love-Milestone',
+        'address': '7130 Overland Rd', 'city': 'Orlando', 'state': 'FL', 'zip': '32824',
+        'phone': '407-857-1985',
+        'bol_shipper_name': 'Cabinets For Contractors-L24',
+    },
+    'ARTISAN': {
+        'name': 'Artisan (fallback)',
+        'address': '6910 Fulton St', 'city': 'Houston', 'state': 'TX', 'zip': '77066',
+        'phone': '832-326-7003',
+        'bol_shipper_name': 'Cabinets For Contractors-A66',
+    },
+    'Cabinet & Stone': {
+        'name': 'Cabinet & Stone',
+        'address': '1760 Stebbins Dr', 'city': 'Houston', 'state': 'TX', 'zip': '77043',
+        'phone': '713-468-8062',
+        'bol_shipper_name': 'Cabinets For Contractors-C43',
+    },
+    'Cabinet & Stone CA': {
+        'name': 'Cabinet & Stone CA',
+        'address': '15500 Vermont Ave', 'city': 'Paramount', 'state': 'CA', 'zip': '90723',
+        'phone': '562-774-8522',
+        'bol_shipper_name': 'Cabinets For Contractors-C23',
+    },
+    'DuraStone': {
+        'name': 'DuraStone',
+        'address': '4506 Archie St', 'city': 'Houston', 'state': 'TX', 'zip': '77037',
+        'phone': '281-445-4700',
+        'bol_shipper_name': 'Cabinets For Contractors-D37',
+    },
+    'L&C': {
+        'name': 'L&C Cabinetry',
+        'address': '2157 Vista Circle', 'city': 'Virginia Beach', 'state': 'VA', 'zip': '23454',
+        'phone': '757-425-5544',
+        'bol_shipper_name': 'Cabinets For Contractors-L54',
+    },
+    'Linda': {
+        'name': 'Dealer Cabinetry',
+        'address': '200 Industrial Blvd', 'city': 'Bremen', 'state': 'GA', 'zip': '30110',
+        'phone': '770-537-4422',
+        'bol_shipper_name': 'Cabinets For Contractors-D10',
+    },
 }
 
 SKU_WAREHOUSE_MAP = {
@@ -106,6 +173,12 @@ def group_items_by_warehouse(line_items: list) -> Dict[str, list]:
     return groups
 
 
+def get_bol_shipper_name(warehouse_code: str) -> str:
+    """Return the BOL shipper name for a given warehouse code."""
+    wh = WAREHOUSES.get(warehouse_code, {})
+    return wh.get('bol_shipper_name', 'Cabinets For Contractors')
+
+
 # =============================================================================
 # ADDRESS VALIDATION — Smarty with 3-attempt retry
 # =============================================================================
@@ -119,7 +192,6 @@ def validate_address_full(dest_address: dict) -> dict:
         success: bool — Smarty returned a usable result
         is_residential: bool — True=residential, False=commercial
         is_uncertain: bool — True when Smarty found the area but rdi is empty
-                             (cannot confirm residential vs commercial)
         address: dict | None — Smarty-corrected address fields
         rdi: str — Smarty's rdi value ("Residential", "Commercial", or "")
         error: str | None
@@ -164,7 +236,6 @@ def validate_address_full(dest_address: dict) -> dict:
                     addr = result['address']
                     is_res = bool(addr.get('is_residential', True))
                     rdi = addr.get('smarty_rdi', '')
-                    # Uncertain = Smarty found the area but couldn't classify residential vs commercial
                     is_uncertain = not rdi
                     label = 'residential' if is_res else 'commercial'
                     suffix = ' (uncertain)' if is_uncertain else ''
@@ -202,10 +273,6 @@ def validate_address_full(dest_address: dict) -> dict:
 
 
 def validate_address_residential(dest_address: dict) -> bool:
-    """
-    Simplified wrapper — returns is_residential bool only.
-    Used inside calculate_order_shipping() where a bool is sufficient.
-    """
     result = validate_address_full(dest_address)
     return result['is_residential']
 
@@ -328,9 +395,7 @@ def select_shipping_method(weight: float, items: list):
 def calculate_order_shipping(order_data: dict, dest_address: dict, is_residential_override: Optional[bool] = None) -> Dict:
     """
     Calculate shipping for an entire order, grouped by warehouse.
-
-    is_residential_override: if provided, skips Smarty call and uses this value directly.
-    Used when the customer has already classified their address.
+    is_residential_override: skips Smarty when customer has already classified their address.
     """
     line_items = order_data.get('line_items', []) or order_data.get('products', [])
     b2bwave_total_weight = order_data.get('total_weight', 0)
@@ -400,7 +465,10 @@ def calculate_order_shipping(order_data: dict, dest_address: dict, is_residentia
             shipping_cost = quote['quote'].get('customer_price', 0) if quote.get('success') and quote.get('quote') else 0
 
         shipments.append({
-            'warehouse': warehouse_code, 'warehouse_name': warehouse['name'], 'origin_zip': warehouse['zip'],
+            'warehouse': warehouse_code,
+            'warehouse_name': warehouse['name'],
+            'bol_shipper_name': warehouse.get('bol_shipper_name', 'Cabinets For Contractors'),
+            'origin_zip': warehouse['zip'],
             'items': items, 'weight': weight, 'parcel_length': parcel_length, 'is_oversized': oversized,
             'shipping_method': shipping_method, 'quote': quote, 'shipping_cost': shipping_cost,
             'is_residential': is_residential,
