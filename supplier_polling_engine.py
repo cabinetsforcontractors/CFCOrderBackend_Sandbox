@@ -10,7 +10,8 @@ Flow:
   - check_all_warehouse_polls()  — nightly cron: escalation polls + day-before polls
 
 All public functions return dicts, never raise.
-BOL is fired via HTTP to rl-quote /bol/create (same pattern as bol_routes.py).
+BOL fired via HTTP to rl-quote /bol/create (same pattern as bol_routes.py).
+Warehouse short codes (LI, DL, ROC...) resolved to full names for WAREHOUSE_ADDRESSES lookup.
 """
 
 import os
@@ -31,6 +32,20 @@ RL_QUOTE_API_URL = os.environ.get("RL_QUOTE_API_URL", "https://rl-quote-sandbox.
 
 POLL_2_THRESHOLD_HOURS = 24
 POLL_3_THRESHOLD_HOURS = 48
+
+# Map short codes stored in order_shipments.warehouse → full names used in WAREHOUSE_ADDRESSES
+WAREHOUSE_CODE_TO_FULL = {
+    'LI':    'Cabinetry Distribution',
+    'DL':    'DL Cabinetry',
+    'ROC':   'ROC Cabinetry',
+    'GHI':   'GHI Cabinets',
+    'GB':    'Go Bravura',
+    'LOVE':  'Love-Milestone',
+    'CS':    'Cabinet & Stone',
+    'DS':    'DuraStone',
+    'LC':    'L&C Cabinetry',
+    'Linda': 'Dealer Cabinetry',
+}
 
 
 # =============================================================================
@@ -543,22 +558,21 @@ def warehouse_set_pickup_time(token: str, pickup_time_str: str) -> dict:
 
 
 # =============================================================================
-# BOL FIRE — calls rl-quote /bol/create via HTTP (same pattern as bol_routes.py)
+# BOL FIRE — calls rl-quote /bol/create via HTTP
+# Resolves short warehouse codes (LI, DL...) to full names for WAREHOUSE_ADDRESSES lookup.
 # =============================================================================
 
 def _fire_bol(shipment: dict, pickup_date_str: Optional[str]) -> dict:
-    """
-    Build BOL payload and call rl-quote /bol/create via HTTP.
-    Mirrors bol_routes._call_rl_bol_create exactly.
-    On success, writes PRO number + bol_sent to DB.
-    """
     try:
         from bol_routes import BOL_SHIPPER_NAMES, WAREHOUSE_ADDRESSES
 
+        # Resolve short code → full name (e.g. "LI" → "Cabinetry Distribution")
         warehouse_name = shipment["warehouse"]
+        warehouse_name = WAREHOUSE_CODE_TO_FULL.get(warehouse_name, warehouse_name)
+
         wh_info = WAREHOUSE_ADDRESSES.get(warehouse_name)
         if not wh_info:
-            return {"success": False, "error": f"Unknown warehouse address: {warehouse_name}"}
+            return {"success": False, "error": f"Unknown warehouse address: {warehouse_name} (raw: {shipment['warehouse']})"}
 
         shipper_name = BOL_SHIPPER_NAMES.get(warehouse_name, "Cabinets For Contractors")
         consignee_name = shipment.get("company_name") or shipment.get("customer_name") or "Customer"
@@ -609,7 +623,6 @@ def _fire_bol(shipment: dict, pickup_date_str: Optional[str]) -> dict:
         pro_number = result["pro_number"]
         bol_pdf_url = result.get("bol_pdf_url", "")
 
-        # Write to DB
         try:
             with get_db() as conn:
                 with conn.cursor() as cur:
@@ -709,7 +722,7 @@ def _send_supplier_poll_email(
         urgency_line = "<p style='color:#DC2626;font-weight:700;font-size:16px;'>⚠️ No ship date received. Please respond immediately or call (770) 990-4885.</p>"
     elif poll_number == 2:
         subject = f"📦 Reminder — Order #{order_id} — When Will This Ship?"
-        urgency_line = "<p style='color:#D97706;font-weight:600;'>We have not yet received a ship date. Please enter one at your earliest convenience.</p>"
+        urgency_line = "<p style='color:#D97706;font-weight:600;'>No ship date yet — please enter one at your earliest convenience.</p>"
     else:
         subject = f"📦 Order #{order_id} from Cabinets For Contractors — Ship Date Needed"
         urgency_line = "<p>Please enter the date and pickup time for this order.</p>"
@@ -744,8 +757,8 @@ def _render_day_before_email(
 <body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f5f5;padding:20px;">
 <div style="max-width:560px;margin:0 auto;background:white;border-radius:8px;padding:32px;box-shadow:0 2px 8px rgba(0,0,0,0.1);">
     <h2 style="color:#1a365d;margin-top:0;">Order #{order_id} — Pickup Tomorrow?</h2>
-    <p>Order <strong>#{order_id}</strong> for <strong>{customer_name}</strong> is scheduled for R+L pickup <strong>tomorrow, {date_str}</strong>.</p>
-    <p style="font-size:16px;font-weight:600;color:#1a365d;margin:16px 0;">Is this order still on track for tomorrow?</p>
+    <p>Order <strong>#{order_id}</strong> for <strong>{customer_name}</strong> — R+L pickup <strong>tomorrow, {date_str}</strong>.</p>
+    <p style="font-size:16px;font-weight:600;color:#1a365d;margin:16px 0;">Still on track for tomorrow?</p>
     <div style="display:flex;gap:12px;margin:20px 0;flex-wrap:wrap;">
         <a href="{yes_url}" style="display:inline-block;background:#059669;color:white;padding:14px 28px;border-radius:6px;text-decoration:none;font-weight:700;font-size:16px;">
             ✅ Yes — Enter Pickup Time →
@@ -761,19 +774,19 @@ def _render_day_before_email(
 
 def _send_cfc_date_confirmed_alert(shipment: dict, date_str: str):
     subject = f"✅ Ship Date Confirmed — Order #{shipment['order_id']} — {shipment['warehouse']}"
-    html = f"<p><strong>Order #{shipment['order_id']}</strong> — {shipment['warehouse']} — confirmed pickup <strong>{date_str}</strong>.</p>"
+    html = f"<p>Order #{shipment['order_id']} — {shipment['warehouse']} — confirmed pickup <strong>{date_str}</strong>.</p>"
     _send_raw_email(CFC_INTERNAL_EMAIL, subject, html)
 
 
 def _send_cfc_no_response_alert(shipment: dict, hours: int):
     subject = f"🚨 CALL NEEDED — No Ship Date — Order #{shipment['order_id']} — {shipment['warehouse']}"
-    html = f"<p style='color:#DC2626;font-weight:700;'>No ship date after {hours}hrs — call now.</p><p><strong>Order:</strong> #{shipment['order_id']}</p>"
+    html = f"<p style='color:#DC2626;font-weight:700;'>No ship date after {hours}hrs — call now.</p><p>Order #{shipment['order_id']}</p>"
     _send_raw_email(CFC_INTERNAL_EMAIL, subject, html)
 
 
 def _send_cfc_push_alert(shipment: dict, new_date_str: str, weekday_name: str):
     subject = f"⚠️ CALL NEEDED — {shipment['warehouse']} Pushed #{shipment['order_id']} to {weekday_name}"
-    html = f"<p><strong>Warehouse:</strong> {shipment['warehouse']}<br><strong>New Date:</strong> {new_date_str}<br><strong>Action Required:</strong> Call them.</p>"
+    html = f"<p><strong>Warehouse:</strong> {shipment['warehouse']}<br><strong>New Date:</strong> {new_date_str}</p>"
     _send_raw_email(CFC_INTERNAL_EMAIL, subject, html)
 
 
