@@ -13,6 +13,7 @@ Flow:
 Pickup Request: POST /PickupRequest/FromBOL — only needs PRO + date + ready + close time.
 R+L pulls shipper info from the BOL automatically.
 Time format: "hh:mm tt" e.g. "09:00 AM" — matches form output directly, no conversion needed.
+Poll email: minimal — order number and form link only, no customer data.
 """
 
 import os
@@ -131,10 +132,7 @@ def send_initial_poll(shipment_id: str) -> dict:
     form_url = f"{CHECKOUT_BASE_URL}/supplier/{token}/date-form"
     result = _send_supplier_poll_email(
         to_email=supplier_email,
-        warehouse_name=shipment["warehouse"],
         order_id=shipment["order_id"],
-        customer_name=shipment.get("company_name") or shipment.get("customer_name") or "",
-        order_total=float(shipment.get("order_total") or 0),
         form_url=form_url,
         poll_number=1,
         is_critical=False,
@@ -199,6 +197,7 @@ def process_bol_and_pickup(token: str, pickup_time_str: str, close_time_str: str
     2. Fire BOL via rl-quote /bol/create → get PRO number
     3. Fire Pickup Request via rl-quote /pickup/create (FromBOL)
     4. Return data dict — caller schedules _delayed_bol_email as background task
+    Returns pickup_error in dict so route can surface R+L error message.
     """
     try:
         shipment = get_shipment_by_token(token)
@@ -263,7 +262,7 @@ def process_bol_and_pickup(token: str, pickup_time_str: str, close_time_str: str
         pro_number = bol_result["pro_number"]
         bol_pdf_url = bol_result.get("bol_pdf_url", "")
 
-        # Fire Pickup Request
+        # Fire Pickup Request — log error but always continue (non-blocking)
         pickup_result = _fire_pickup_request(
             pro_number=pro_number,
             pickup_date=pickup_date_fmt or "",
@@ -271,14 +270,17 @@ def process_bol_and_pickup(token: str, pickup_time_str: str, close_time_str: str
             close_time=close_time_str,
             order_id=order_id,
         )
+        pickup_error = None
         if not pickup_result.get("success"):
-            print(f"[SUPPLIER_POLL] Pickup request failed for PRO {pro_number}: {pickup_result.get('error')}")
+            pickup_error = pickup_result.get("error", "unknown")
+            print(f"[SUPPLIER_POLL] Pickup request FAILED for PRO {pro_number}: {pickup_error}")
 
         try:
             _send_cfc_bol_fired_alert(
                 shipment, pro_number, pickup_date_fmt or "", pickup_time_str,
                 close_time=close_time_str,
                 pickup_confirmation=pickup_result.get("confirmation_number"),
+                pickup_error=pickup_error,
             )
         except Exception:
             pass
@@ -291,6 +293,7 @@ def process_bol_and_pickup(token: str, pickup_time_str: str, close_time_str: str
             "pickup_time": pickup_time_str,
             "close_time": close_time_str,
             "pickup_confirmation": pickup_result.get("confirmation_number"),
+            "pickup_error": pickup_error,       # surfaced on success page for debug
             "supplier_email": _get_supplier_email(shipment["warehouse"]),
             "warehouse_name": shipment["warehouse"],
             "order_id": order_id,
@@ -418,8 +421,6 @@ def warehouse_push_date(token: str, new_date_str: str) -> dict:
 
 def warehouse_set_pickup_time(token: str, pickup_time_str: str, close_time_str: str = "5:00 PM") -> dict:
     """Day-before flow: used by set-time route via process_bol_and_pickup."""
-    # Route now calls process_bol_and_pickup directly for both flows.
-    # This shim preserves backwards compatibility with any direct callers.
     return process_bol_and_pickup(token, pickup_time_str, close_time_str)
 
 
@@ -518,10 +519,7 @@ def _send_escalation_poll(shipment: dict, poll_number: int, is_critical: bool):
     except Exception as e:
         print(f"[SUPPLIER_POLL] escalation DB error: {e}")
     _send_supplier_poll_email(
-        to_email=supplier_email, warehouse_name=shipment["warehouse"],
-        order_id=shipment["order_id"],
-        customer_name=shipment.get("company_name") or shipment.get("customer_name") or "",
-        order_total=float(shipment.get("order_total") or 0),
+        to_email=supplier_email, order_id=shipment["order_id"],
         form_url=form_url, poll_number=poll_number, is_critical=is_critical,
     )
     _log_event(shipment["order_id"], f"supplier_poll_{poll_number}_sent", {
@@ -542,8 +540,7 @@ def _send_day_before_poll(shipment: dict):
     no_url = f"{CHECKOUT_BASE_URL}/supplier/{token}/push-date"
     subject = f"⚠️ Order #{shipment['order_id']} — Pickup Confirmation for {date_str}"
     body = _render_day_before_email(
-        warehouse_name=shipment["warehouse"], order_id=shipment["order_id"],
-        customer_name=shipment.get("company_name") or shipment.get("customer_name") or "",
+        order_id=shipment["order_id"],
         date_str=date_str, yes_url=yes_url, no_url=no_url,
     )
     _send_raw_email(to_email=supplier_email, subject=subject, html_body=body)
@@ -657,21 +654,16 @@ def _fire_bol(shipment: dict, pickup_date_str: Optional[str]) -> dict:
 
 # =============================================================================
 # PICKUP REQUEST FIRE — POST /PickupRequest/FromBOL
-# Only needs PRO + date + times. R+L pulls shipper info from BOL automatically.
 # =============================================================================
 
 def _fire_pickup_request(
     pro_number: str,
-    pickup_date: str,    # MM/DD/YYYY
-    ready_time: str,     # "09:00 AM" — hh:mm tt format, matches form output
-    close_time: str,     # "05:00 PM"
+    pickup_date: str,
+    ready_time: str,
+    close_time: str,
     order_id: str = "",
     shipment: dict = None,
 ) -> dict:
-    """
-    Call rl-quote /pickup/create which calls R+L /PickupRequest/FromBOL.
-    Minimal payload — only PRO + date + times needed.
-    """
     try:
         payload = {
             "pro_number": pro_number,
@@ -690,6 +682,7 @@ def _fire_pickup_request(
                 result = json.loads(resp.read().decode())
         except urllib.error.HTTPError as http_err:
             body = http_err.read().decode()[:300]
+            print(f"[SUPPLIER_POLL] Pickup HTTP error {http_err.code}: {body}")
             return {"success": False, "error": f"rl-quote HTTP {http_err.code}: {body}"}
 
         if order_id:
@@ -698,6 +691,7 @@ def _fire_pickup_request(
                 "ready_time": ready_time, "close_time": close_time,
                 "success": result.get("success"),
                 "pickup_request_id": result.get("pickup_request_id"),
+                "error": result.get("error") if not result.get("success") else None,
             })
 
         return result
@@ -923,58 +917,56 @@ def _bol_email_html(warehouse_name, order_id, pro_number, pickup_date, pickup_ti
 <html><body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f5f5;padding:20px;">
 <div style="max-width:560px;margin:0 auto;background:white;border-radius:8px;padding:32px;">
     <h2 style="color:#1a365d;margin-top:0;">Bill of Lading — Order #{order_id}</h2>
-    <p>Hi {warehouse_name} team — your pickup is confirmed. The BOL is attached to this email.</p>
+    <p>The BOL is attached to this email. Please have the shipment ready for R+L pickup.</p>
     <table style="width:100%;border-collapse:collapse;font-size:15px;margin:16px 0;">
         <tr><td style="padding:8px 0;color:#666;width:140px;">PRO Number:</td>
             <td style="font-weight:700;font-size:20px;font-family:monospace;color:#059669;">{pro_number}</td></tr>
         <tr><td style="padding:8px 0;color:#666;">Pickup Date:</td><td style="font-weight:600;">{pickup_date}</td></tr>
         <tr><td style="padding:8px 0;color:#666;">Pickup Time:</td><td style="font-weight:600;">{pickup_time}</td></tr>
     </table>
-    <p>R+L Carriers will arrive as scheduled. Please have the shipment ready.</p>
-    <p style="font-size:12px;color:#999;margin-top:24px;">Questions? Call (770) 990-4885.</p>
+    <p style="font-size:12px;color:#999;margin-top:24px;">Questions? Email <a href="mailto:orders@cabinetsforcontractors.net">orders@cabinetsforcontractors.net</a></p>
 </div>
 </body></html>"""
 
 
 def _send_supplier_poll_email(
-    to_email, warehouse_name, order_id, customer_name,
-    order_total, form_url, poll_number, is_critical
+    to_email: str, order_id: str, form_url: str,
+    poll_number: int = 1, is_critical: bool = False,
+    # kept for backwards compat but ignored:
+    warehouse_name: str = "", customer_name: str = "", order_total: float = 0,
 ) -> dict:
+    """Minimal poll email — order number and form link only."""
     if is_critical:
-        subject = f"🚨 URGENT — Order #{order_id} Ship Date Required"
-        urgency = "<p style='color:#DC2626;font-weight:700;'>⚠️ No ship date received. Respond immediately or call (770) 990-4885.</p>"
+        subject = f"🚨 URGENT — Order #{order_id} — Ship Date Required"
+        urgency = "<p style='color:#DC2626;font-weight:700;'>⚠️ No ship date received. Please respond immediately.</p>"
     elif poll_number == 2:
-        subject = f"📦 Reminder — Order #{order_id} — When Will This Ship?"
-        urgency = "<p style='color:#D97706;font-weight:600;'>No ship date yet — please enter one soon.</p>"
+        subject = f"📦 Reminder — Order #{order_id} — Ship Date Needed"
+        urgency = "<p style='color:#D97706;font-weight:600;'>We are still waiting for a ship date on this order.</p>"
     else:
-        subject = f"📦 Order #{order_id} from Cabinets For Contractors — Ship Date Needed"
-        urgency = "<p>Please enter the date and pickup time for this order.</p>"
+        subject = f"📦 Order #{order_id} — Ship Date Needed"
+        urgency = "<p>Please enter the pickup date and time for this order.</p>"
 
     html = f"""<!DOCTYPE html><html><head><meta charset="UTF-8"></head>
 <body style="font-family:-apple-system,sans-serif;background:#f5f5f5;padding:20px;">
-<div style="max-width:560px;margin:0 auto;background:white;border-radius:8px;padding:32px;">
+<div style="max-width:480px;margin:0 auto;background:white;border-radius:8px;padding:32px;">
     <h2 style="color:#1a365d;margin-top:0;">Cabinets For Contractors — Order #{order_id}</h2>
     {urgency}
-    <table style="width:100%;border-collapse:collapse;margin:16px 0;font-size:14px;">
-        <tr><td style="padding:6px 0;color:#666;width:140px;">Customer:</td><td style="font-weight:600;">{customer_name}</td></tr>
-        <tr><td style="padding:6px 0;color:#666;">Order Total:</td><td style="font-weight:600;">${order_total:,.2f}</td></tr>
-        <tr><td style="padding:6px 0;color:#666;">Warehouse:</td><td>{warehouse_name}</td></tr>
-    </table>
-    <a href="{form_url}" style="display:inline-block;background:#1a365d;color:white;padding:14px 28px;border-radius:6px;text-decoration:none;font-weight:700;font-size:16px;">
+    <a href="{form_url}" style="display:inline-block;background:#1a365d;color:white;padding:14px 28px;border-radius:6px;text-decoration:none;font-weight:700;font-size:16px;margin:16px 0;">
         Enter Ship Date &amp; Time →
     </a>
-    <p style="font-size:12px;color:#999;margin-top:24px;">Questions? Call (770) 990-4885.</p>
+    <p style="font-size:12px;color:#999;margin-top:24px;">Questions? Email <a href="mailto:orders@cabinetsforcontractors.net" style="color:#1a365d;">orders@cabinetsforcontractors.net</a></p>
 </div></body></html>"""
     success = _send_raw_email(to_email=to_email, subject=subject, html_body=html)
     return {"success": success}
 
 
-def _render_day_before_email(warehouse_name, order_id, customer_name, date_str, yes_url, no_url):
+def _render_day_before_email(order_id, date_str, yes_url, no_url,
+                              warehouse_name="", customer_name=""):
     return f"""<!DOCTYPE html><html><head><meta charset="UTF-8"></head>
 <body style="font-family:-apple-system,sans-serif;background:#f5f5f5;padding:20px;">
-<div style="max-width:560px;margin:0 auto;background:white;border-radius:8px;padding:32px;">
+<div style="max-width:480px;margin:0 auto;background:white;border-radius:8px;padding:32px;">
     <h2 style="color:#1a365d;margin-top:0;">Order #{order_id} — Pickup Tomorrow?</h2>
-    <p>Order <strong>#{order_id}</strong> for <strong>{customer_name}</strong> — R+L pickup <strong>tomorrow, {date_str}</strong>.</p>
+    <p>Order <strong>#{order_id}</strong> is scheduled for R+L pickup <strong>tomorrow, {date_str}</strong>.</p>
     <p style="font-weight:600;color:#1a365d;margin:16px 0;">Still on track for tomorrow?</p>
     <div style="display:flex;gap:12px;margin:20px 0;flex-wrap:wrap;">
         <a href="{yes_url}" style="display:inline-block;background:#059669;color:white;padding:14px 28px;border-radius:6px;text-decoration:none;font-weight:700;">
@@ -984,7 +976,7 @@ def _render_day_before_email(warehouse_name, order_id, customer_name, date_str, 
             ❌ No — Enter New Date →
         </a>
     </div>
-    <p style="font-size:12px;color:#999;">Questions? Call (770) 990-4885.</p>
+    <p style="font-size:12px;color:#999;">Questions? Email <a href="mailto:orders@cabinetsforcontractors.net" style="color:#1a365d;">orders@cabinetsforcontractors.net</a></p>
 </div></body></html>"""
 
 
@@ -1001,16 +993,17 @@ def _send_cfc_push_alert(shipment: dict, new_date_str: str, weekday_name: str):
 
 
 def _send_cfc_bol_fired_alert(shipment: dict, pro_number: str, pickup_date: str,
-                               pickup_time: str, close_time: str = "", pickup_confirmation=None):
-    subject = f"✅ BOL + Pickup Scheduled — Order #{shipment['order_id']} — PRO {pro_number}"
-    pickup_line = f"<br><strong>Pickup Confirmation:</strong> {pickup_confirmation}" if pickup_confirmation else ""
+                               pickup_time: str, close_time: str = "",
+                               pickup_confirmation=None, pickup_error=None):
+    subject = f"✅ BOL Fired — Order #{shipment['order_id']} — PRO {pro_number}"
+    pickup_line = f"<br><strong>Pickup ID:</strong> {pickup_confirmation}" if pickup_confirmation else ""
     close_line = f"<br><strong>Close Time:</strong> {close_time}" if close_time else ""
-    html = f"""<p><strong>BOL and Pickup Request auto-generated.</strong></p>
-    <p><strong>Order:</strong> #{shipment['order_id']}<br>
+    error_line = f"<br><span style='color:#DC2626;'>⚠️ Pickup request failed: {pickup_error}</span>" if pickup_error else ""
+    html = f"""<p><strong>Order:</strong> #{shipment['order_id']}<br>
     <strong>Warehouse:</strong> {shipment['warehouse']}<br>
     <strong>PRO:</strong> <span style="font-family:monospace;color:#059669;">{pro_number}</span><br>
     <strong>Pickup Date:</strong> {pickup_date}<br>
-    <strong>Ready Time:</strong> {pickup_time}{close_line}{pickup_line}</p>
+    <strong>Ready Time:</strong> {pickup_time}{close_line}{pickup_line}{error_line}</p>
     <p>BOL PDF will be emailed to warehouse within ~10 minutes.</p>"""
     _send_raw_email(CFC_INTERNAL_EMAIL, subject, html)
 
