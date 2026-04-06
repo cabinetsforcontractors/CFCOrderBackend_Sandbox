@@ -9,8 +9,12 @@ Flow:
   - warehouse_set_pickup_time()  — day-before flow: stores time + fires BOL
   - check_all_warehouse_polls()  — nightly cron: escalation polls + day-before polls
 
+BOL email strategy:
+  Option A: fetch PDF from rl-quote /bol/{pro}/pdf (R+L Document Retrieval API)
+  Option B: generate fallback BOL PDF via reportlab if Option A fails
+  The PDF is attached to the warehouse email either way.
+
 All public functions return dicts, never raise.
-BOL fired via HTTP to rl-quote /bol/create (same pattern as bol_routes.py).
 Warehouse short codes (LI, DL, ROC...) resolved to full names for WAREHOUSE_ADDRESSES lookup.
 """
 
@@ -200,8 +204,7 @@ def warehouse_set_date(token: str, pickup_date_str: str) -> dict:
 def _confirm_for_immediate_bol(token: str, pickup_time_str: str) -> dict:
     """
     Set warehouse_confirmed + day_before_confirmed, store pickup_time,
-    fire BOL via rl-quote API, email BOL to warehouse, notify CFC.
-    Called when warehouse submits date+time in one form.
+    fire BOL, email BOL PDF to warehouse, notify CFC.
     Always returns dict, never raises.
     """
     try:
@@ -243,7 +246,6 @@ def _confirm_for_immediate_bol(token: str, pickup_time_str: str) -> dict:
             "source": "date_form",
         })
 
-        # Re-fetch to get updated pickup_date
         shipment = get_shipment_by_token(token)
         if not shipment:
             return {"success": False, "error": "Could not re-fetch shipment after update"}
@@ -267,6 +269,7 @@ def _confirm_for_immediate_bol(token: str, pickup_time_str: str) -> dict:
                     pickup_date=pickup_date_fmt or "",
                     pickup_time=pickup_time_str,
                     bol_pdf_url=bol_pdf_url,
+                    shipment=shipment,
                 )
 
             try:
@@ -434,7 +437,7 @@ def _send_day_before_poll(shipment: dict):
 
 
 # =============================================================================
-# DAY-BEFORE RESPONSES (automated flow)
+# DAY-BEFORE RESPONSES
 # =============================================================================
 
 def warehouse_confirm_tomorrow(token: str) -> dict:
@@ -546,6 +549,7 @@ def warehouse_set_pickup_time(token: str, pickup_time_str: str) -> dict:
                     pickup_date=pickup_date_fmt or "",
                     pickup_time=pickup_time_str,
                     bol_pdf_url=bol_pdf_url,
+                    shipment=shipment,
                 )
             try:
                 _send_cfc_bol_fired_alert(shipment, pro_number, pickup_date_fmt or "", pickup_time_str)
@@ -559,14 +563,12 @@ def warehouse_set_pickup_time(token: str, pickup_time_str: str) -> dict:
 
 # =============================================================================
 # BOL FIRE — calls rl-quote /bol/create via HTTP
-# Resolves short warehouse codes (LI, DL...) to full names for WAREHOUSE_ADDRESSES lookup.
 # =============================================================================
 
 def _fire_bol(shipment: dict, pickup_date_str: Optional[str]) -> dict:
     try:
         from bol_routes import BOL_SHIPPER_NAMES, WAREHOUSE_ADDRESSES
 
-        # Resolve short code → full name (e.g. "LI" → "Cabinetry Distribution")
         warehouse_name = shipment["warehouse"]
         warehouse_name = WAREHOUSE_CODE_TO_FULL.get(warehouse_name, warehouse_name)
 
@@ -603,11 +605,7 @@ def _fire_bol(shipment: dict, pickup_date_str: Optional[str]) -> dict:
         }
 
         data = json.dumps(payload).encode()
-        req = urllib.request.Request(
-            f"{RL_QUOTE_API_URL}/bol/create",
-            data=data,
-            method="POST",
-        )
+        req = urllib.request.Request(f"{RL_QUOTE_API_URL}/bol/create", data=data, method="POST")
         req.add_header("Content-Type", "application/json")
 
         try:
@@ -663,6 +661,169 @@ def _fire_bol(shipment: dict, pickup_date_str: Optional[str]) -> dict:
 
 
 # =============================================================================
+# BOL PDF FETCH — Option A: R+L Document Retrieval, Option B: reportlab fallback
+# =============================================================================
+
+def _fetch_bol_pdf_bytes(pro_number: str) -> Optional[bytes]:
+    """
+    Option A: Fetch BOL PDF from rl-quote /bol/{pro}/pdf
+    which calls R+L Document Retrieval API with retries.
+    Returns bytes on success, None on failure.
+    """
+    try:
+        url = f"{RL_QUOTE_API_URL}/bol/{pro_number}/pdf"
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            if resp.status == 200:
+                pdf_bytes = resp.read()
+                if len(pdf_bytes) > 500:
+                    print(f"[SUPPLIER_POLL] Option A: fetched BOL PDF for PRO {pro_number} ({len(pdf_bytes)} bytes)")
+                    return pdf_bytes
+                print(f"[SUPPLIER_POLL] Option A: response too small ({len(pdf_bytes)} bytes), using fallback")
+                return None
+    except urllib.error.HTTPError as e:
+        print(f"[SUPPLIER_POLL] Option A HTTP {e.code} for PRO {pro_number} — falling back to Option B")
+    except Exception as e:
+        print(f"[SUPPLIER_POLL] Option A failed for PRO {pro_number}: {e} — falling back to Option B")
+    return None
+
+
+def _generate_fallback_bol_pdf(
+    pro_number: str,
+    order_id: str,
+    shipper_name: str,
+    shipper_address: str,
+    consignee_name: str,
+    consignee_address: str,
+    pickup_date: str,
+    pickup_time: str,
+    weight: int,
+) -> Optional[bytes]:
+    """
+    Option B: Generate a BOL-style PDF via reportlab as fallback.
+    Returns PDF bytes or None if reportlab unavailable.
+    """
+    try:
+        from reportlab.lib.pagesizes import letter
+        from reportlab.lib.units import inch
+        from reportlab.lib import colors
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.enums import TA_CENTER, TA_LEFT
+        import io
+
+        buf = io.BytesIO()
+        doc = SimpleDocTemplate(buf, pagesize=letter,
+                                leftMargin=0.5*inch, rightMargin=0.5*inch,
+                                topMargin=0.5*inch, bottomMargin=0.5*inch)
+
+        styles = getSampleStyleSheet()
+        navy = colors.HexColor("#1a365d")
+        green = colors.HexColor("#059669")
+
+        title_style = ParagraphStyle("title", fontSize=18, fontName="Helvetica-Bold",
+                                     textColor=navy, alignment=TA_CENTER)
+        header_style = ParagraphStyle("header", fontSize=10, fontName="Helvetica-Bold",
+                                      textColor=colors.white)
+        label_style = ParagraphStyle("label", fontSize=8, fontName="Helvetica-Bold",
+                                     textColor=colors.grey)
+        value_style = ParagraphStyle("value", fontSize=10, fontName="Helvetica")
+        pro_style = ParagraphStyle("pro", fontSize=22, fontName="Helvetica-Bold",
+                                   textColor=green, alignment=TA_CENTER)
+
+        elements = []
+
+        # Header
+        elements.append(Paragraph("BILL OF LADING", title_style))
+        elements.append(Paragraph("R+L Carriers — Cabinets For Contractors", styles["Normal"]))
+        elements.append(Spacer(1, 0.15*inch))
+
+        # PRO number box
+        pro_table = Table([[Paragraph(f"PRO: {pro_number}", pro_style)]], colWidths=[7.5*inch])
+        pro_table.setStyle(TableStyle([
+            ("BOX", (0,0), (-1,-1), 2, navy),
+            ("BACKGROUND", (0,0), (-1,-1), colors.HexColor("#f0fdf4")),
+            ("TOPPADDING", (0,0), (-1,-1), 10),
+            ("BOTTOMPADDING", (0,0), (-1,-1), 10),
+        ]))
+        elements.append(pro_table)
+        elements.append(Spacer(1, 0.15*inch))
+
+        # Pickup info row
+        pickup_data = [
+            [Paragraph("Pickup Date", label_style), Paragraph("Pickup Time", label_style), Paragraph("Order #", label_style)],
+            [Paragraph(pickup_date, value_style), Paragraph(pickup_time, value_style), Paragraph(order_id, value_style)],
+        ]
+        pickup_table = Table(pickup_data, colWidths=[2.5*inch, 2.5*inch, 2.5*inch])
+        pickup_table.setStyle(TableStyle([
+            ("BOX", (0,0), (-1,-1), 1, navy),
+            ("INNERGRID", (0,0), (-1,-1), 0.5, colors.grey),
+            ("BACKGROUND", (0,0), (-1,0), navy),
+            ("TEXTCOLOR", (0,0), (-1,0), colors.white),
+            ("TOPPADDING", (0,0), (-1,-1), 6),
+            ("BOTTOMPADDING", (0,0), (-1,-1), 6),
+            ("LEFTPADDING", (0,0), (-1,-1), 8),
+        ]))
+        elements.append(pickup_table)
+        elements.append(Spacer(1, 0.15*inch))
+
+        # Shipper / Consignee
+        addr_data = [
+            [Paragraph("SHIPPER (FROM)", header_style), Paragraph("CONSIGNEE (TO)", header_style)],
+            [Paragraph(shipper_name, value_style), Paragraph(consignee_name, value_style)],
+            [Paragraph(shipper_address, value_style), Paragraph(consignee_address, value_style)],
+        ]
+        addr_table = Table(addr_data, colWidths=[3.75*inch, 3.75*inch])
+        addr_table.setStyle(TableStyle([
+            ("BOX", (0,0), (-1,-1), 1, navy),
+            ("INNERGRID", (0,0), (-1,-1), 0.5, colors.lightgrey),
+            ("BACKGROUND", (0,0), (-1,0), navy),
+            ("TOPPADDING", (0,0), (-1,-1), 6),
+            ("BOTTOMPADDING", (0,0), (-1,-1), 6),
+            ("LEFTPADDING", (0,0), (-1,-1), 8),
+            ("VALIGN", (0,0), (-1,-1), "TOP"),
+        ]))
+        elements.append(addr_table)
+        elements.append(Spacer(1, 0.15*inch))
+
+        # Commodity
+        comm_data = [
+            [Paragraph("PIECES", header_style), Paragraph("WEIGHT (LBS)", header_style),
+             Paragraph("CLASS", header_style), Paragraph("DESCRIPTION", header_style)],
+            [Paragraph("1", value_style), Paragraph(str(weight), value_style),
+             Paragraph("85", value_style), Paragraph("RTA Cabinetry", value_style)],
+        ]
+        comm_table = Table(comm_data, colWidths=[1.5*inch, 2*inch, 1.5*inch, 2.5*inch])
+        comm_table.setStyle(TableStyle([
+            ("BOX", (0,0), (-1,-1), 1, navy),
+            ("INNERGRID", (0,0), (-1,-1), 0.5, colors.lightgrey),
+            ("BACKGROUND", (0,0), (-1,0), navy),
+            ("TOPPADDING", (0,0), (-1,-1), 6),
+            ("BOTTOMPADDING", (0,0), (-1,-1), 6),
+            ("LEFTPADDING", (0,0), (-1,-1), 8),
+        ]))
+        elements.append(comm_table)
+        elements.append(Spacer(1, 0.2*inch))
+
+        # Footer
+        footer_style = ParagraphStyle("footer", fontSize=8, textColor=colors.grey, alignment=TA_CENTER)
+        elements.append(Paragraph(
+            f"Generated by Cabinets For Contractors • PRO {pro_number} • "
+            f"This document is for reference — R+L Carriers will verify at pickup.",
+            footer_style
+        ))
+
+        doc.build(elements)
+        pdf_bytes = buf.getvalue()
+        print(f"[SUPPLIER_POLL] Option B: generated fallback BOL PDF ({len(pdf_bytes)} bytes)")
+        return pdf_bytes
+
+    except Exception as e:
+        print(f"[SUPPLIER_POLL] Option B fallback PDF generation failed: {e}")
+        return None
+
+
+# =============================================================================
 # EMAIL HELPERS
 # =============================================================================
 
@@ -676,11 +837,19 @@ def _get_supplier_email(warehouse_name: str) -> Optional[str]:
     return None
 
 
-def _send_raw_email(to_email: str, subject: str, html_body: str) -> bool:
+def _send_raw_email(to_email: str, subject: str, html_body: str,
+                    pdf_bytes: Optional[bytes] = None,
+                    pdf_filename: str = "BOL.pdf") -> bool:
+    """
+    Send email via Gmail API. Optionally attach a PDF.
+    If pdf_bytes is provided, attaches as application/pdf.
+    """
     try:
         import base64
         from email.mime.text import MIMEText
         from email.mime.multipart import MIMEMultipart
+        from email.mime.base import MIMEBase
+        from email import encoders
         from gmail_sync import get_gmail_access_token
 
         token = get_gmail_access_token()
@@ -688,12 +857,26 @@ def _send_raw_email(to_email: str, subject: str, html_body: str) -> bool:
             print(f"[SUPPLIER_POLL] No Gmail token for email to {to_email}")
             return False
 
-        msg = MIMEMultipart("alternative")
+        if pdf_bytes:
+            msg = MIMEMultipart("mixed")
+            alt = MIMEMultipart("alternative")
+            alt.attach(MIMEText("Please view this email in an HTML email client.", "plain"))
+            alt.attach(MIMEText(html_body, "html"))
+            msg.attach(alt)
+
+            part = MIMEBase("application", "pdf")
+            part.set_payload(pdf_bytes)
+            encoders.encode_base64(part)
+            part.add_header("Content-Disposition", "attachment", filename=pdf_filename)
+            msg.attach(part)
+        else:
+            msg = MIMEMultipart("alternative")
+            msg.attach(MIMEText("Please view this email in an HTML email client.", "plain"))
+            msg.attach(MIMEText(html_body, "html"))
+
         msg["From"] = "william@cabinetsforcontractors.net"
         msg["To"] = to_email
         msg["Subject"] = subject
-        msg.attach(MIMEText("Please view this email in an HTML email client.", "plain"))
-        msg.attach(MIMEText(html_body, "html"))
 
         raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("utf-8")
         payload = json.dumps({"raw": raw}).encode("utf-8")
@@ -705,7 +888,8 @@ def _send_raw_email(to_email: str, subject: str, html_body: str) -> bool:
         req.add_header("Content-Type", "application/json")
         with urllib.request.urlopen(req, timeout=30) as resp:
             resp.read()
-        print(f"[SUPPLIER_POLL] Email sent to {to_email}: {subject}")
+        attachment_note = f" (+ PDF {len(pdf_bytes)} bytes)" if pdf_bytes else ""
+        print(f"[SUPPLIER_POLL] Email sent to {to_email}: {subject}{attachment_note}")
         return True
     except Exception as e:
         print(f"[SUPPLIER_POLL] Email failed to {to_email}: {e}")
@@ -792,14 +976,21 @@ def _send_cfc_push_alert(shipment: dict, new_date_str: str, weekday_name: str):
 
 def _send_bol_to_warehouse(
     to_email: str, warehouse_name: str, order_id: str,
-    pro_number: str, pickup_date: str, pickup_time: str, bol_pdf_url: str
+    pro_number: str, pickup_date: str, pickup_time: str,
+    bol_pdf_url: str, shipment: dict = None,
 ):
+    """
+    Email BOL to warehouse with PDF attached.
+    Option A: fetch PDF from R+L Document Retrieval via rl-quote.
+    Option B: generate fallback PDF via reportlab.
+    """
     subject = f"📄 BOL Created — Order #{order_id} — PRO {pro_number}"
+
     html = f"""<!DOCTYPE html>
 <html><body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f5f5;padding:20px;">
 <div style="max-width:560px;margin:0 auto;background:white;border-radius:8px;padding:32px;">
-    <h2 style="color:#1a365d;margin-top:0;">Bill of Lading Created — Order #{order_id}</h2>
-    <p>Hi {warehouse_name} team — your pickup is confirmed and the BOL is ready.</p>
+    <h2 style="color:#1a365d;margin-top:0;">Bill of Lading — Order #{order_id}</h2>
+    <p>Hi {warehouse_name} team — your pickup is confirmed. The BOL is attached to this email.</p>
     <table style="width:100%;border-collapse:collapse;font-size:15px;margin:16px 0;">
         <tr><td style="padding:8px 0;color:#666;width:140px;">PRO Number:</td>
             <td style="font-weight:700;font-size:20px;font-family:monospace;color:#059669;">{pro_number}</td></tr>
@@ -807,11 +998,55 @@ def _send_bol_to_warehouse(
         <tr><td style="padding:8px 0;color:#666;">Pickup Time:</td><td style="font-weight:600;">{pickup_time}</td></tr>
     </table>
     <p>R+L Carriers will arrive for pickup as scheduled. Please have the shipment ready.</p>
-    {f'<a href="{bol_pdf_url}" style="display:inline-block;background:#1a365d;color:white;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:600;margin-top:8px;">View BOL →</a>' if bol_pdf_url else ''}
     <p style="font-size:12px;color:#999;margin-top:24px;">Questions? Call (770) 990-4885.</p>
 </div>
 </body></html>"""
-    _send_raw_email(to_email=to_email, subject=subject, html_body=html)
+
+    # Option A: fetch from R+L via rl-quote
+    pdf_bytes = _fetch_bol_pdf_bytes(pro_number)
+    pdf_source = "rl_doc_retrieval"
+
+    # Option B: generate fallback
+    if not pdf_bytes and shipment:
+        try:
+            from bol_routes import WAREHOUSE_ADDRESSES
+            wh_name = WAREHOUSE_CODE_TO_FULL.get(shipment.get("warehouse", ""), shipment.get("warehouse", ""))
+            wh_info = WAREHOUSE_ADDRESSES.get(wh_name, {})
+            shipper_addr = f"{wh_info.get('address', '')}, {wh_info.get('city', '')}, {wh_info.get('state', '')} {wh_info.get('zip', '')}"
+            consignee_name = shipment.get("company_name") or shipment.get("customer_name") or "Customer"
+            consignee_addr = f"{shipment.get('street', '')}, {shipment.get('city', '')}, {shipment.get('state', '')} {shipment.get('zip_code', '')}"
+            weight = int(float(shipment.get("weight") or 200))
+        except Exception:
+            shipper_addr = warehouse_name
+            consignee_name = "Customer"
+            consignee_addr = ""
+            weight = 200
+
+        pdf_bytes = _generate_fallback_bol_pdf(
+            pro_number=pro_number,
+            order_id=order_id,
+            shipper_name=warehouse_name,
+            shipper_address=shipper_addr,
+            consignee_name=consignee_name,
+            consignee_address=consignee_addr,
+            pickup_date=pickup_date,
+            pickup_time=pickup_time,
+            weight=weight,
+        )
+        pdf_source = "fallback_reportlab"
+
+    if pdf_bytes:
+        print(f"[SUPPLIER_POLL] Attaching BOL PDF ({pdf_source}, {len(pdf_bytes)} bytes) to email for PRO {pro_number}")
+    else:
+        print(f"[SUPPLIER_POLL] No PDF available for PRO {pro_number} — sending email without attachment")
+
+    _send_raw_email(
+        to_email=to_email,
+        subject=subject,
+        html_body=html,
+        pdf_bytes=pdf_bytes,
+        pdf_filename=f"BOL-{pro_number}.pdf",
+    )
 
 
 def _send_cfc_bol_fired_alert(shipment: dict, pro_number: str, pickup_date: str, pickup_time: str):
