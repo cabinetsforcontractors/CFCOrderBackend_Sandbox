@@ -1,9 +1,10 @@
-# CFC Order Workflow Backend v6.2.0
-# Updated 2026-04-04 — Add reportlab for PDF invoice generation
+# CFC Order Workflow Backend v6.4.0
+# Updated 2026-04-06 — Add python-multipart for form parsing (Phase 9 supplier forms)
 
 # Web framework
 fastapi
 uvicorn[standard]
+python-multipart
 
 # Database
 psycopg2-binary
