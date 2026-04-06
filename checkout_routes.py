@@ -8,6 +8,11 @@ ADDRESS CLASSIFICATION WORKFLOW:
             goes through Step 1 (confirm/correct address) → Step 2 (classify) → Step 3 (pay).
   Case C — Smarty failed entirely:           same as B, edit box pre-opened in Step 1.
 
+BLOCKER 1 FIX (2026-04-06): After successful invoice email send (Case A), the webhook
+now marks payment_link_sent=TRUE and payment_link_sent_at=NOW() on the orders table.
+Without this, order_status showed 'needs_payment_link' forever and the alerts engine
+fired 'needs_invoice' on every B2BWave order indefinitely.
+
 Public endpoints:
     POST /webhook/b2bwave-order
     GET  /checkout/payment-complete
@@ -541,6 +546,24 @@ def b2bwave_order_webhook(payload: dict):
                 triggered_by='b2bwave_webhook'
             )
             print(f"[WEBHOOK] Invoice email order {order_id}: success={email_result.get('success')}")
+
+            # BLOCKER 1 FIX: mark payment_link_sent=TRUE on orders table so the
+            # order_status view advances to 'awaiting_payment' and the alerts engine
+            # resolves the 'needs_invoice' alert automatically after webhook fires.
+            if email_result.get('success'):
+                try:
+                    with get_db() as mark_conn:
+                        with mark_conn.cursor() as mark_cur:
+                            mark_cur.execute(
+                                "UPDATE orders SET payment_link_sent = TRUE, "
+                                "payment_link_sent_at = NOW(), updated_at = NOW() "
+                                "WHERE order_id = %s",
+                                (str(order_id),)
+                            )
+                    print(f"[WEBHOOK] payment_link_sent marked TRUE for order {order_id}")
+                except Exception as mark_e:
+                    print(f"[WEBHOOK] Failed to mark payment_link_sent for order {order_id}: {mark_e}")
+
             _send_internal_order_notification(order_id, order_data, shipping_result, checkout_url)
 
         except Exception as e:
@@ -591,7 +614,6 @@ def get_checkout_data(order_id: str, token: str):
 
     state = _get_checkout_state(order_id)
 
-    # Classification needed and not yet done
     if state.get('address_classification_needed') and not state.get('address_type_confirmed'):
         order_data = fetch_b2bwave_order(order_id)
         shipping_address = (order_data or {}).get("shipping_address") or {}
@@ -608,7 +630,6 @@ def get_checkout_data(order_id: str, token: str):
     if not order_data:
         raise HTTPException(status_code=404, detail="Order not found")
 
-    # Determine is_residential — customer-confirmed takes priority
     is_residential_override = None
     if state.get('address_type_confirmed'):
         is_residential_override = state.get('is_residential_customer_confirmed')
@@ -647,16 +668,6 @@ def get_checkout_data(order_id: str, token: str):
 
 @checkout_router.post("/checkout/{order_id}/confirm-address")
 def confirm_address(order_id: str, token: str, body: ConfirmAddressRequest):
-    """
-    Step 1 submission.
-    If address_is_correct=False, saves the corrected address to DB + B2BWave.
-    Either way, re-runs Smarty on the address.
-
-    Returns:
-        need_classification: True  — go to Step 2 (checkboxes)
-        need_classification: False — Smarty confirmed, go straight to checkout
-        is_residential: bool
-    """
     if not CHECKOUT_ENABLED:
         raise HTTPException(status_code=503, detail="Checkout not enabled")
     if not verify_checkout_token(order_id, token):
@@ -668,7 +679,6 @@ def confirm_address(order_id: str, token: str, body: ConfirmAddressRequest):
 
     shipping_address = order_data.get("shipping_address") or {}
 
-    # If customer corrected the address — save it
     if not body.address_is_correct:
         if not body.street or not body.city or not body.state or not body.zip:
             raise HTTPException(status_code=400, detail="Street, city, state and ZIP required")
@@ -676,7 +686,6 @@ def confirm_address(order_id: str, token: str, body: ConfirmAddressRequest):
             'street': body.street, 'street2': body.street2 or '',
             'city': body.city, 'state': body.state.upper(), 'zip': body.zip
         }
-        # Update local DB
         try:
             with get_db() as conn:
                 with conn.cursor() as cur:
@@ -688,16 +697,13 @@ def confirm_address(order_id: str, token: str, body: ConfirmAddressRequest):
                     )
         except Exception as e:
             print(f"[CHECKOUT] Local DB address update failed for {order_id}: {e}")
-        # Update B2BWave
         update_b2bwave_order_address(order_id, new_address)
         shipping_address = new_address
         print(f"[CHECKOUT] Order {order_id} address corrected by customer: {body.street}, {body.zip}")
 
-    # Re-run Smarty on the (possibly corrected) address
     validation = validate_address_full(shipping_address)
 
     if validation['success'] and not validation.get('is_uncertain'):
-        # Smarty confirmed — update DB, no classification needed
         is_res = validation['is_residential']
         addr_type = 'residential_existing' if is_res else 'commercial_existing'
         try:
@@ -721,7 +727,6 @@ def confirm_address(order_id: str, token: str, body: ConfirmAddressRequest):
             "message": "Address confirmed by Smarty"
         }
     else:
-        # Still uncertain or failed — send to Step 2
         return {
             "status": "ok",
             "need_classification": True,
@@ -731,10 +736,6 @@ def confirm_address(order_id: str, token: str, body: ConfirmAddressRequest):
 
 @checkout_router.post("/checkout/{order_id}/classify-address")
 def classify_address(order_id: str, token: str, body: ClassifyAddressRequest):
-    """
-    Step 2 submission — customer selects their address type.
-    Saves classification, determines is_residential, clears classification_needed flag.
-    """
     if not CHECKOUT_ENABLED:
         raise HTTPException(status_code=503, detail="Checkout not enabled")
     if not verify_checkout_token(order_id, token):
@@ -772,10 +773,6 @@ def classify_address(order_id: str, token: str, body: ClassifyAddressRequest):
 
 @checkout_router.get("/checkout/{order_id}/confirm-commercial")
 def confirm_commercial(order_id: str, token: str):
-    """
-    GET endpoint — linked from the invoice email.
-    Fires a CFC alert email and shows the customer a thank-you page.
-    """
     if not verify_checkout_token(order_id, token):
         return HTMLResponse(content="<h1>Invalid or expired link</h1>", status_code=403)
 
@@ -874,13 +871,6 @@ def create_checkout_payment(order_id: str, token: str):
 
 @checkout_router.get("/checkout-ui/{order_id}")
 def checkout_ui(order_id: str, token: str):
-    """
-    Serves the checkout page.
-    JavaScript drives the step state based on the API response:
-      Step 1 — address confirmation / correction
-      Step 2 — address type classification (shown when Smarty can't classify)
-      Step 3 — normal checkout with totals and Pay button
-    """
     if not verify_checkout_token(order_id, token):
         return HTMLResponse(content="<h1>Invalid or expired checkout link</h1>", status_code=403)
 
@@ -900,60 +890,39 @@ def checkout_ui(order_id: str, token: str):
              border-bottom: 1px solid #eee; padding-bottom: 10px; }}
         .loading {{ text-align: center; padding: 60px; color: #666; font-size: 16px; }}
         .error {{ background: #fee; color: #c00; padding: 15px; border-radius: 4px; margin: 20px 0; }}
-
-        /* STEP CARDS */
         .step-card {{ background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px;
                      padding: 24px; margin-bottom: 20px; }}
         .step-card h2 {{ border: none; margin-top: 0; font-size: 20px; color: #1a365d; }}
         .step-card p {{ color: #4a5568; font-size: 15px; line-height: 1.7; margin-bottom: 12px; }}
-
-        /* ADDRESS DISPLAY */
         .address-highlight {{ background: #FFFBEB; border: 2px solid #F59E0B; border-radius: 6px;
                              padding: 14px 16px; margin: 14px 0; font-size: 15px;
                              color: #1a202c; line-height: 1.7; }}
         .address-label-top {{ font-size: 10px; font-weight: 700; color: #D97706;
-                             text-transform: uppercase; letter-spacing: 0.5px;
-                             margin-bottom: 4px; }}
-
-        /* BUTTONS */
+                             text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }}
         .btn {{ display: inline-block; padding: 11px 24px; border-radius: 6px;
-               font-size: 15px; font-weight: 600; cursor: pointer; border: none;
-               font-family: inherit; }}
+               font-size: 15px; font-weight: 600; cursor: pointer; border: none; font-family: inherit; }}
         .btn-primary {{ background: #2563eb; color: white; }}
         .btn-primary:hover {{ background: #1d4ed8; }}
         .btn-primary:disabled {{ background: #ccc; cursor: not-allowed; }}
         .btn-secondary {{ background: #f1f5f9; color: #334155; }}
         .btn-secondary:hover {{ background: #e2e8f0; }}
-        .btn-danger {{ background: #DC2626; color: white; }}
-        .btn-danger:hover {{ background: #B91C1C; }}
         .btn-row {{ display: flex; gap: 12px; margin-top: 16px; flex-wrap: wrap; }}
-        .btn-full {{ display: block; width: 100%; padding: 15px; font-size: 18px;
-                   font-weight: 700; text-align: center; }}
-
-        /* EDIT FORM */
+        .btn-full {{ display: block; width: 100%; padding: 15px; font-size: 18px; font-weight: 700; text-align: center; }}
         .edit-form {{ margin-top: 14px; display: none; }}
         .edit-form.open {{ display: block; }}
         .edit-form input {{ width: 100%; padding: 9px 11px; border: 1px solid #cbd5e0;
-                          border-radius: 4px; font-size: 14px; margin-bottom: 8px;
-                          font-family: inherit; }}
+                          border-radius: 4px; font-size: 14px; margin-bottom: 8px; font-family: inherit; }}
         .form-row-3 {{ display: grid; grid-template-columns: 1fr 70px 90px; gap: 8px; }}
         .form-actions {{ display: flex; gap: 8px; margin-top: 4px; }}
-        .msg-ok {{ color: #166534; background: #d1fae5; padding: 8px 12px;
-                  border-radius: 4px; font-size: 13px; margin-top: 8px; }}
-        .msg-err {{ color: #991b1b; background: #fee2e2; padding: 8px 12px;
-                   border-radius: 4px; font-size: 13px; margin-top: 8px; }}
-
-        /* CLASSIFICATION CHECKBOXES */
+        .msg-ok {{ color: #166534; background: #d1fae5; padding: 8px 12px; border-radius: 4px; font-size: 13px; margin-top: 8px; }}
+        .msg-err {{ color: #991b1b; background: #fee2e2; padding: 8px 12px; border-radius: 4px; font-size: 13px; margin-top: 8px; }}
         .classify-list {{ margin: 14px 0; }}
         .classify-item {{ display: block; padding: 13px 16px; margin-bottom: 8px;
                          border: 2px solid #e2e8f0; border-radius: 8px; cursor: pointer;
                          font-size: 15px; color: #1a202c; transition: border-color .15s; }}
         .classify-item:hover {{ border-color: #93c5fd; background: #eff6ff; }}
-        .classify-item input {{ margin-right: 10px; width: 18px; height: 18px;
-                               vertical-align: middle; cursor: pointer; }}
+        .classify-item input {{ margin-right: 10px; width: 18px; height: 18px; vertical-align: middle; cursor: pointer; }}
         .classify-item.selected {{ border-color: #2563eb; background: #eff6ff; }}
-
-        /* CHECKOUT TABLE */
         .item {{ display: flex; justify-content: space-between; padding: 10px 0;
                 border-bottom: 1px solid #f0f0f0; font-size: 14px; }}
         .item-sku {{ width: 110px; font-family: monospace; color: #718096; font-size: 12px; }}
@@ -962,18 +931,12 @@ def checkout_ui(order_id: str, token: str):
         .item-price {{ width: 90px; text-align: right; font-weight: 500; }}
         .shipment {{ background: #f9f9f9; padding: 15px; border-radius: 4px; margin: 10px 0; }}
         .totals {{ margin-top: 16px; padding-top: 16px; border-top: 1px solid #ddd; }}
-        .total-row {{ display: flex; justify-content: space-between; padding: 7px 0;
-                     font-size: 14px; color: #555; }}
+        .total-row {{ display: flex; justify-content: space-between; padding: 7px 0; font-size: 14px; color: #555; }}
         .total-row.grand {{ font-size: 20px; font-weight: 700; color: #1a365d;
                            border-top: 2px solid #1a365d; margin-top: 8px; padding-top: 12px; }}
-
-        /* RESIDENTIAL NOTICE */
-        .residential-notice {{ background: #EFF6FF; border: 1px solid #BFDBFE;
-                              border-radius: 8px; padding: 16px; margin: 20px 0; }}
+        .residential-notice {{ background: #EFF6FF; border: 1px solid #BFDBFE; border-radius: 8px; padding: 16px; margin: 20px 0; }}
         .residential-notice p {{ color: #1E40AF; margin-bottom: 8px; font-size: 14px; }}
         .residential-notice p:last-child {{ margin-bottom: 0; }}
-
-        /* ADDRESS BLOCKS */
         .address-row {{ display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 20px; }}
         @media (max-width: 600px) {{ .address-row {{ grid-template-columns: 1fr; }} }}
         .address-block {{ padding: 14px; border-radius: 6px; border: 1px solid #e2e8f0; background: #f7fafc; }}
@@ -982,11 +945,8 @@ def checkout_ui(order_id: str, token: str):
                           text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }}
         .ship-to .address-blabel {{ color: #D97706; }}
         .address-content {{ font-size: 13px; color: #1a202c; line-height: 1.6; }}
-
-        /* POLICY MODAL */
-        .modal-overlay {{ display: none; position: fixed; inset: 0;
-                         background: rgba(0,0,0,0.6); z-index: 1000;
-                         align-items: center; justify-content: center; }}
+        .modal-overlay {{ display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+                         z-index: 1000; align-items: center; justify-content: center; }}
         .modal-overlay.active {{ display: flex; }}
         .modal {{ background: white; border-radius: 8px; padding: 28px;
                  max-width: 520px; width: 90%; max-height: 85vh; overflow-y: auto; }}
@@ -1005,8 +965,7 @@ def checkout_ui(order_id: str, token: str):
 <div class="modal-overlay" id="policyModal">
     <div class="modal">
         <h3>&#x26A0;&#xFE0F; Please Review Our Policies</h3>
-        <p style="font-size:14px;color:#555;margin-bottom:12px;">
-            By proceeding to payment you agree to the following terms:</p>
+        <p style="font-size:14px;color:#555;margin-bottom:12px;">By proceeding to payment you agree to the following terms:</p>
         <ul>
             <li><strong>No returns</strong> on assembled or installed cabinets.</li>
             <li><strong>20% restocking fee</strong> on returned undamaged items in original packaging.</li>
@@ -1029,35 +988,21 @@ const BASE    = window.location.origin;
 let grandTotal = 0;
 let confirmCommercialUrl = '';
 
-// ============================================================
-// BOOTSTRAP
-// ============================================================
 async function boot() {{
     try {{
         const resp = await fetch(`${{BASE}}/checkout/${{ORDER_ID}}?token=${{TOKEN}}`);
         const data = await resp.json();
         if (!resp.ok) throw new Error(data.detail || 'Failed to load order');
-
-        if (data.status === 'classification_needed') {{
-            renderStep1(data);
-        }} else if (data.status === 'ok') {{
-            renderStep3(data);
-        }} else {{
-            showError('Unexpected response from server.');
-        }}
-    }} catch (err) {{
-        showError(err.message);
-    }}
+        if (data.status === 'classification_needed') {{ renderStep1(data); }}
+        else if (data.status === 'ok') {{ renderStep3(data); }}
+        else {{ showError('Unexpected response from server.'); }}
+    }} catch (err) {{ showError(err.message); }}
 }}
 
 function showError(msg) {{
-    document.getElementById('content').innerHTML =
-        `<div class="error">&#x26A0; ${{msg}}</div>`;
+    document.getElementById('content').innerHTML = `<div class="error">&#x26A0; ${{msg}}</div>`;
 }}
 
-// ============================================================
-// STEP 1 — Is this the correct delivery address?
-// ============================================================
 function renderStep1(data) {{
     const addr = data.shipping_address || {{}};
     const street  = addr.address || addr.street || '';
@@ -1065,10 +1010,8 @@ function renderStep1(data) {{
     const city    = addr.city || '';
     const state   = addr.state || '';
     const zip     = addr.zip || '';
-    const addrFull = [street, street2, [city, state, zip].filter(Boolean).join(', ')]
-                       .filter(Boolean).join('<br>');
+    const addrFull = [street, street2, [city, state, zip].filter(Boolean).join(', ')].filter(Boolean).join('<br>');
     const preOpen = !data.address_initially_found;
-
     document.getElementById('content').innerHTML = `
         <div class="step-card">
             <h2>&#x1F4CD; Confirm Your Delivery Address</h2>
@@ -1079,20 +1022,16 @@ function renderStep1(data) {{
             </div>
             ${{!data.address_initially_found ? '<p style="color:#b45309;font-weight:600;">&#x26A0; We could not find this address in our system. Please check it below.</p>' : ''}}
             <div class="btn-row">
-                <button class="btn btn-primary" id="btnYes" onclick="step1Yes('${{city}}','${{state}}','${{zip}}')">
-                    &#x2713;&nbsp; Yes, this is correct
-                </button>
-                <button class="btn btn-secondary" onclick="step1No()">
-                    &#x270E;&nbsp; No, I need to correct it
-                </button>
+                <button class="btn btn-primary" id="btnYes" onclick="step1Yes()">&#x2713;&nbsp; Yes, this is correct</button>
+                <button class="btn btn-secondary" onclick="step1No()">&#x270E;&nbsp; No, I need to correct it</button>
             </div>
             <div class="edit-form${{preOpen ? ' open' : ''}}" id="editForm">
-                <input type="text"   id="eStreet"  placeholder="Street address" value="${{street}}">
-                <input type="text"   id="eStreet2" placeholder="Apt / Suite (optional)" value="${{street2}}">
+                <input type="text" id="eStreet" placeholder="Street address" value="${{street}}">
+                <input type="text" id="eStreet2" placeholder="Apt / Suite (optional)" value="${{street2}}">
                 <div class="form-row-3">
-                    <input type="text" id="eCity"  placeholder="City"  value="${{city}}">
+                    <input type="text" id="eCity" placeholder="City" value="${{city}}">
                     <input type="text" id="eState" placeholder="ST" maxlength="2" value="${{state}}">
-                    <input type="text" id="eZip"   placeholder="ZIP"  maxlength="5" value="${{zip}}">
+                    <input type="text" id="eZip" placeholder="ZIP" maxlength="5" value="${{zip}}">
                 </div>
                 <div class="form-actions">
                     <button class="btn btn-primary" onclick="step1SaveCorrection()">Save &amp; Continue</button>
@@ -1103,12 +1042,8 @@ function renderStep1(data) {{
         </div>`;
 }}
 
-function step1No() {{
-    document.getElementById('editForm').className = 'edit-form open';
-}}
-function cancelEdit() {{
-    document.getElementById('editForm').className = 'edit-form';
-}}
+function step1No() {{ document.getElementById('editForm').className = 'edit-form open'; }}
+function cancelEdit() {{ document.getElementById('editForm').className = 'edit-form'; }}
 
 async function step1Yes() {{
     const btn = document.getElementById('btnYes');
@@ -1123,49 +1058,30 @@ async function step1SaveCorrection() {{
     const zip    = document.getElementById('eZip').value.trim();
     const street2 = (document.getElementById('eStreet2') || {{}}).value || '';
     if (!street || !city || !state || !zip) {{
-        document.getElementById('editMsg').innerHTML =
-            '<div class="msg-err">Please fill in street, city, state, and ZIP.</div>';
+        document.getElementById('editMsg').innerHTML = '<div class="msg-err">Please fill in street, city, state, and ZIP.</div>';
         return;
     }}
-    document.getElementById('editMsg').innerHTML =
-        '<div style="color:#666;font-size:13px;">Saving and verifying\u2026</div>';
-    await _submitConfirmAddress({{
-        address_is_correct: false,
-        street, street2, city, state, zip
-    }});
+    document.getElementById('editMsg').innerHTML = '<div style="color:#666;font-size:13px;">Saving and verifying\u2026</div>';
+    await _submitConfirmAddress({{ address_is_correct: false, street, street2, city, state, zip }});
 }}
 
 async function _submitConfirmAddress(payload) {{
     try {{
-        const resp = await fetch(
-            `${{BASE}}/checkout/${{ORDER_ID}}/confirm-address?token=${{TOKEN}}`,
-            {{ method:'POST', headers:{{'Content-Type':'application/json'}},
-               body: JSON.stringify(payload) }}
-        );
+        const resp = await fetch(`${{BASE}}/checkout/${{ORDER_ID}}/confirm-address?token=${{TOKEN}}`,
+            {{ method:'POST', headers:{{'Content-Type':'application/json'}}, body: JSON.stringify(payload) }});
         const data = await resp.json();
         if (!resp.ok) throw new Error(data.detail || 'Error confirming address');
-
-        if (data.need_classification) {{
-            renderStep2();
-        }} else {{
-            // Smarty confirmed — reload full checkout data
-            await loadStep3();
-        }}
-    }} catch (err) {{
-        showError(err.message);
-    }}
+        if (data.need_classification) {{ renderStep2(); }} else {{ await loadStep3(); }}
+    }} catch (err) {{ showError(err.message); }}
 }}
 
-// ============================================================
-// STEP 2 — Classify your delivery location
-// ============================================================
 const CLASSIFY_OPTIONS = [
-    {{ value:'residential_existing',       label:'Existing residential address',       sub:'House, condo, townhome, apartment' }},
-    {{ value:'commercial_existing',        label:'Existing commercial address',        sub:'Business, office, showroom, warehouse' }},
+    {{ value:'residential_existing', label:'Existing residential address', sub:'House, condo, townhome, apartment' }},
+    {{ value:'commercial_existing', label:'Existing commercial address', sub:'Business, office, showroom, warehouse' }},
     {{ value:'residential_new_construction', label:'New residential construction site', sub:'Home currently being built' }},
-    {{ value:'commercial_new_construction', label:'New commercial construction site',  sub:'Business currently being built' }},
-    {{ value:'rural',                      label:'Rural / farm / remote area',         sub:'' }},
-    {{ value:'military',                   label:'Military / APO / FPO address',       sub:'' }},
+    {{ value:'commercial_new_construction', label:'New commercial construction site', sub:'Business currently being built' }},
+    {{ value:'rural', label:'Rural / farm / remote area', sub:'' }},
+    {{ value:'military', label:'Military / APO / FPO address', sub:'' }},
 ];
 let selectedType = null;
 
@@ -1174,19 +1090,15 @@ function renderStep2() {{
         <label class="classify-item" id="cl_${{o.value}}" onclick="selectType('${{o.value}}')">
             <input type="radio" name="addrtype" value="${{o.value}}">
             <strong>${{o.label}}</strong>
-            ${{o.sub ? `<span style="color:#718096;font-size:13px;margin-left:4px;">— ${{o.sub}}</span>` : ''}}
+            ${{o.sub ? `<span style="color:#718096;font-size:13px;margin-left:4px;">\u2014 ${{o.sub}}</span>` : ''}}
         </label>`).join('');
-
     document.getElementById('content').innerHTML = `
         <div class="step-card">
             <h2>&#x1F3E2; How would you classify this delivery location?</h2>
             <p>This helps us calculate the correct shipping rate.</p>
             <div class="classify-list">${{items}}</div>
             <div class="btn-row">
-                <button class="btn btn-primary btn-full" id="btnClassify"
-                        onclick="submitClassify()" disabled>
-                    Continue &rarr;
-                </button>
+                <button class="btn btn-primary btn-full" id="btnClassify" onclick="submitClassify()" disabled>Continue &rarr;</button>
             </div>
             <div id="classifyMsg"></div>
         </div>`;
@@ -1207,31 +1119,21 @@ async function submitClassify() {{
     const btn = document.getElementById('btnClassify');
     btn.disabled = true; btn.textContent = 'Saving\u2026';
     try {{
-        const resp = await fetch(
-            `${{BASE}}/checkout/${{ORDER_ID}}/classify-address?token=${{TOKEN}}`,
-            {{ method:'POST', headers:{{'Content-Type':'application/json'}},
-               body: JSON.stringify({{ address_type: selectedType }}) }}
-        );
+        const resp = await fetch(`${{BASE}}/checkout/${{ORDER_ID}}/classify-address?token=${{TOKEN}}`,
+            {{ method:'POST', headers:{{'Content-Type':'application/json'}}, body: JSON.stringify({{ address_type: selectedType }}) }});
         const data = await resp.json();
         if (!resp.ok) throw new Error(data.detail || 'Classification failed');
         await loadStep3();
-    }} catch (err) {{
-        showError(err.message);
-    }}
+    }} catch (err) {{ showError(err.message); }}
 }}
 
-// ============================================================
-// STEP 3 — Normal checkout
-// ============================================================
 async function loadStep3() {{
     try {{
         const resp = await fetch(`${{BASE}}/checkout/${{ORDER_ID}}?token=${{TOKEN}}`);
         const data = await resp.json();
         if (!resp.ok) throw new Error(data.detail || 'Failed to load checkout');
         renderStep3(data);
-    }} catch (err) {{
-        showError(err.message);
-    }}
+    }} catch (err) {{ showError(err.message); }}
 }}
 
 function fmtAddr(a) {{
@@ -1250,26 +1152,21 @@ function renderStep3(data) {{
     grandTotal    = shipping.grand_total || 0;
     confirmCommercialUrl = data.confirm_commercial_url || '';
     const displayName = order.company_name || order.customer_name || '';
-
     const shipStreet  = shAddr.address || shAddr.street || '';
     const shipStreet2 = shAddr.address2 || shAddr.street2 || '';
     const shipCity    = shAddr.city || '';
     const shipState   = shAddr.state || '';
     const shipZip     = shAddr.zip || '';
 
-    // Address blocks
     const billHtml = billAddr ? `
         <div class="address-block">
             <div class="address-blabel">&#128184; Bill To</div>
-            <div class="address-content">
-                <strong>${{billAddr.company_name || displayName}}</strong><br>
-                ${{fmtAddr(billAddr)}}
-            </div>
+            <div class="address-content"><strong>${{billAddr.company_name || displayName}}</strong><br>${{fmtAddr(billAddr)}}</div>
         </div>` : '';
 
     const shipHtml = `
         <div class="address-block ship-to">
-            <div class="address-blabel">&#128230; Ship To — Delivery Address</div>
+            <div class="address-blabel">&#128230; Ship To \u2014 Delivery Address</div>
             <div class="address-content">
                 <strong>${{displayName}}</strong><br>
                 ${{shipStreet}}${{shipStreet2 ? '<br>' + shipStreet2 : ''}}<br>
@@ -1277,7 +1174,6 @@ function renderStep3(data) {{
             </div>
         </div>`;
 
-    // Line items
     let itemsHtml = '';
     (order.line_items || []).forEach(item => {{
         const price = parseFloat(item.price || 0);
@@ -1290,63 +1186,42 @@ function renderStep3(data) {{
         </div>`;
     }});
 
-    // Shipments
     let shipmentsHtml = '';
     (shipping.shipments || []).forEach(ship => {{
         const ok = ship.quote && ship.quote.success;
         shipmentsHtml += `<div class="shipment">
-            <div style="font-weight:600;margin-bottom:6px;">
-                &#x1F4E6; From: ${{ship.warehouse_name}} (${{ship.origin_zip}})
-            </div>
-            <div style="font-size:13px;color:#666;">
-                ${{ship.items.length}} item(s) &middot; ${{ship.weight}} lbs
-            </div>
+            <div style="font-weight:600;margin-bottom:6px;">&#x1F4E6; From: ${{ship.warehouse_name}} (${{ship.origin_zip}})</div>
+            <div style="font-size:13px;color:#666;">${{ship.items.length}} item(s) &middot; ${{ship.weight}} lbs</div>
             <div style="font-size:13px;color:#666;margin-top:6px;">
-                ${{ok ? `<strong>Shipping: $${{ship.shipping_cost.toFixed(2)}}</strong>`
-                      : '<span style="color:#c00">Quote unavailable</span>'}}
+                ${{ok ? `<strong>Shipping: $${{ship.shipping_cost.toFixed(2)}}</strong>` : '<span style="color:#c00">Quote unavailable</span>'}}
             </div>
         </div>`;
     }});
 
-    // Residential classification notice — always shown
     const isRes = data.is_residential !== false;
-    const classLabel = isRes ? 'residential' : 'commercial';
     const resNotice = isRes ? `
         <div class="residential-notice">
             <p><strong>&#x1F4CD; Delivery Address Classification</strong></p>
-            <p>Your delivery address has been classified as a <strong>residential address</strong>.
-               Residential deliveries include liftgate service at delivery.</p>
-            <p>If this is actually a <strong>commercial address</strong>
-               (business with a loading dock or forklift),
-               <strong>do not pay this invoice</strong>.</p>
+            <p>Your delivery address has been classified as a <strong>residential address</strong>. Residential deliveries include liftgate service at delivery.</p>
+            <p>If this is actually a <strong>commercial address</strong> (business with a loading dock or forklift), <strong>do not pay this invoice</strong>.</p>
             <p style="margin-top:12px;">
                 <a href="${{confirmCommercialUrl}}" target="_blank"
-                   style="display:inline-block;background:#DC2626;color:white;
-                          padding:9px 20px;border-radius:6px;text-decoration:none;
-                          font-weight:600;font-size:14px;">
+                   style="display:inline-block;background:#DC2626;color:white;padding:9px 20px;border-radius:6px;text-decoration:none;font-weight:600;font-size:14px;">
                     This is a commercial address &rarr;
                 </a>
             </p>
         </div>` : `
-        <div style="background:#f0fdf4;border:1px solid #86efac;border-radius:8px;
-                    padding:12px 16px;margin:16px 0;font-size:14px;color:#166534;">
-            &#x1F3E2; Your delivery address has been classified as <strong>commercial</strong>.
-            No liftgate surcharge applies.
+        <div style="background:#f0fdf4;border:1px solid #86efac;border-radius:8px;padding:12px 16px;margin:16px 0;font-size:14px;color:#166534;">
+            &#x1F3E2; Your delivery address has been classified as <strong>commercial</strong>. No liftgate surcharge applies.
         </div>`;
 
     const tariffPct = Math.round((shipping.tariff_rate || 0.08) * 100);
-
     document.getElementById('content').innerHTML = `
         <h2>Order #${{ORDER_ID}}</h2>
         <p style="color:#666;margin-bottom:16px;">${{displayName}}</p>
-        <div class="address-row">
-            ${{billHtml}}
-            ${{shipHtml}}
-        </div>
-        <h2>Items</h2>
-        ${{itemsHtml}}
-        <h2>Shipping</h2>
-        ${{shipmentsHtml}}
+        <div class="address-row">${{billHtml}}${{shipHtml}}</div>
+        <h2>Items</h2>${{itemsHtml}}
+        <h2>Shipping</h2>${{shipmentsHtml}}
         ${{resNotice}}
         <div class="totals">
             <div class="total-row"><span>Items Subtotal</span><span>$${{shipping.total_items.toFixed(2)}}</span></div>
@@ -1354,8 +1229,7 @@ function renderStep3(data) {{
             <div class="total-row"><span>Shipping</span><span>$${{shipping.total_shipping.toFixed(2)}}</span></div>
             <div class="total-row grand"><span>Total Due</span><span>$${{shipping.grand_total.toFixed(2)}}</span></div>
         </div>
-        <button class="btn btn-primary btn-full" onclick="showPolicyModal()" id="payBtn"
-                style="margin-top:20px;">
+        <button class="btn btn-primary btn-full" onclick="showPolicyModal()" id="payBtn" style="margin-top:20px;">
             Pay $${{shipping.grand_total.toFixed(2)}} with Card
         </button>`;
 }}
@@ -1368,10 +1242,7 @@ async function agreeAndPay() {{
     const btn = document.getElementById('payBtn');
     btn.disabled = true; btn.textContent = 'Creating payment link\u2026';
     try {{
-        const resp = await fetch(
-            `${{BASE}}/checkout/${{ORDER_ID}}/create-payment?token=${{TOKEN}}`,
-            {{ method: 'POST' }}
-        );
+        const resp = await fetch(`${{BASE}}/checkout/${{ORDER_ID}}/create-payment?token=${{TOKEN}}`, {{ method: 'POST' }});
         const data = await resp.json();
         if (data.payment_url) {{ window.location.href = data.payment_url; }}
         else throw new Error(data.detail || 'Failed to create payment');
