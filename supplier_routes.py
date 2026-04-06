@@ -4,9 +4,12 @@ WS6 Phase 9 — Supplier-facing public HTML endpoints
 
 Flow:
   GET  /supplier/{token}/date-form        — date + ready time + close time form
-  POST /supplier/{token}/set-date         — BOL + Pickup Request fired; email arrives within ~10min
+  POST /supplier/{token}/set-date         — BOL + Pickup Request fired; two emails scheduled:
+                                            1. _delayed_bol_email → supplier (BOL PDF, ~10min)
+                                            2. _send_customer_pickup_scheduled_email → customer
+                                               (pickup confirmed, tracking coming when moving)
   GET  /supplier/{token}/confirm-tomorrow — day-before YES → time + close time form
-  POST /supplier/{token}/set-time         — BOL + Pickup Request fired
+  POST /supplier/{token}/set-time         — BOL + Pickup Request fired; same two emails
   GET  /supplier/{token}/push-date        — day-before NO → new date
   POST /supplier/{token}/submit-push-date — store new date
   POST /supplier/{shipment_id}/send-poll  — admin re-send [admin]
@@ -26,6 +29,7 @@ from supplier_polling_engine import (
     send_initial_poll,
     process_bol_and_pickup,
     _delayed_bol_email,
+    _send_customer_pickup_scheduled_email,
 )
 
 supplier_router = APIRouter(tags=["supplier"])
@@ -211,6 +215,7 @@ async def set_date(token: str, request: Request, background_tasks: BackgroundTas
                     f"Please email us.",
         ))
 
+    # Background task 1: Email BOL PDF to supplier (~10 min delay for R+L to process)
     background_tasks.add_task(
         _delayed_bol_email,
         to_email=result["supplier_email"],
@@ -223,13 +228,24 @@ async def set_date(token: str, request: Request, background_tasks: BackgroundTas
         shipment=result["shipment"],
     )
 
-    # Show pickup confirmation OR the raw error for debugging
+    # Background task 2: Email customer that pickup is scheduled
+    # No PRO shared — tracking email fires separately when R+L shows first scan
+    if result.get("customer_email"):
+        background_tasks.add_task(
+            _send_customer_pickup_scheduled_email,
+            to_email=result["customer_email"],
+            customer_name=result.get("customer_name", ""),
+            order_id=result["order_id"],
+            pickup_date=result["pickup_date"] or pickup_date_str,
+            pickup_time=pickup_time_str,
+            close_time=close_time_str,
+        )
+
     pickup_confirmation = result.get("pickup_confirmation")
     pickup_note = ""
     if pickup_confirmation:
         pickup_note = f"<p style='font-size:13px;color:#059669;margin-top:4px;'>R+L Pickup ID: <strong>{pickup_confirmation}</strong></p>"
     else:
-        # Surface the error so we can debug — remove once pickup is confirmed working
         pickup_err = result.get("pickup_error", "no error returned")
         pickup_note = f"<p style='font-size:12px;color:#DC2626;margin-top:4px;'>⚠️ Pickup scheduling failed: {pickup_err}</p>"
 
@@ -319,6 +335,7 @@ async def set_time(token: str, request: Request, background_tasks: BackgroundTas
             f"Could not generate BOL: {result.get('error', 'Unknown error')}. Please email us."
         ), status_code=500)
 
+    # Background task 1: Email BOL PDF to supplier
     background_tasks.add_task(
         _delayed_bol_email,
         to_email=result["supplier_email"],
@@ -330,6 +347,18 @@ async def set_time(token: str, request: Request, background_tasks: BackgroundTas
         bol_pdf_url=result.get("bol_pdf_url", ""),
         shipment=result["shipment"],
     )
+
+    # Background task 2: Email customer that pickup is scheduled
+    if result.get("customer_email"):
+        background_tasks.add_task(
+            _send_customer_pickup_scheduled_email,
+            to_email=result["customer_email"],
+            customer_name=result.get("customer_name", ""),
+            order_id=result["order_id"],
+            pickup_date=result.get("pickup_date", ""),
+            pickup_time=pickup_time_str,
+            close_time=close_time_str,
+        )
 
     pickup_confirmation = result.get("pickup_confirmation")
     pickup_note = ""
