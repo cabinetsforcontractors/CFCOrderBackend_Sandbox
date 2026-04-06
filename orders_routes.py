@@ -6,6 +6,7 @@ Trusted Customers, and the is_trusted_customer helper.
 Phase 5: Extracted from main.py (was ~900 lines inline)
 Phase 5C: require_admin wired to all write/delete endpoints
 Phase 5C: run-check + reactivate endpoints added
+Phase 9: sent_to_warehouse checkpoint fires supplier poll for each shipment
 
 Mount in main.py with:
     from orders_routes import orders_router, is_trusted_customer
@@ -452,7 +453,12 @@ def update_order(order_id: str, update: OrderUpdate, _: bool = Depends(require_a
 
 @orders_router.patch("/orders/{order_id}/checkpoint")
 def update_checkpoint(order_id: str, update: CheckpointUpdate, _: bool = Depends(require_admin)):
-    """Update order checkpoint. [admin]"""
+    """
+    Update order checkpoint. [admin]
+
+    Phase 9: When checkpoint = 'sent_to_warehouse', automatically fires
+    supplier polling emails to all shipments for this order.
+    """
     valid_checkpoints = [
         "payment_link_sent",
         "payment_received",
@@ -521,7 +527,33 @@ def update_checkpoint(order_id: str, update: CheckpointUpdate, _: bool = Depends
                 ),
             )
 
-            return {"status": "ok", "checkpoint": update.checkpoint}
+            # Phase 9: fire supplier poll for each shipment when sent to warehouse
+            polls_fired = []
+            if update.checkpoint == "sent_to_warehouse":
+                try:
+                    from supplier_polling_engine import send_initial_poll
+                    cur.execute(
+                        "SELECT shipment_id FROM order_shipments WHERE order_id = %s",
+                        (order_id,)
+                    )
+                    shipment_rows = cur.fetchall()
+                    for row in shipment_rows:
+                        sid = row[0] if isinstance(row, tuple) else row["shipment_id"]
+                        poll_result = send_initial_poll(sid)
+                        polls_fired.append({
+                            "shipment_id": sid,
+                            "poll_sent": poll_result.get("success"),
+                            "sent_to": poll_result.get("sent_to"),
+                        })
+                    print(f"[ORDERS] Supplier polls fired for order {order_id}: {len(polls_fired)} shipment(s)")
+                except Exception as poll_err:
+                    print(f"[ORDERS] Supplier poll failed for order {order_id}: {poll_err}")
+
+            return {
+                "status": "ok",
+                "checkpoint": update.checkpoint,
+                "supplier_polls": polls_fired if polls_fired else None,
+            }
 
 
 @orders_router.patch("/orders/{order_id}/set-status")
@@ -775,7 +807,6 @@ def update_shipment(
             detail=f"Invalid status. Must be one of: {valid_statuses}",
         )
 
-    # Shippo added — all valid shipping methods
     valid_methods = ["LTL", "Shippo", "Pirateship", "Pickup", "BoxTruck", "LiDelivery", "Manual", None]
     if ship_method and ship_method not in valid_methods:
         raise HTTPException(
@@ -984,9 +1015,6 @@ def get_rl_quote_data(shipment_id: str):
                     shipment_weight = round(order_weight, 1)
                     weight_note = "from order"
                 elif not is_single_warehouse:
-                    # Sales-based weight allocation (TEMPORARY — not production-ready)
-                    # ⚠️ Real per-item weights needed from Lane C (WS5) before this is accurate.
-                    # Uses price * quantity as fallback when line_total is null (sync_service gap).
                     if order_weight > 0:
                         cur.execute(
                             """
