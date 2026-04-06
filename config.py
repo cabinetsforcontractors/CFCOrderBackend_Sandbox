@@ -2,6 +2,9 @@
 config.py
 Centralized configuration for CFC Order Backend.
 All environment variables and constants in one place.
+
+⚠️ SMOKE TEST — LI email set to wpjob1@gmail.com
+   Restore to cabinetrydistribution@gmail.com after test.
 """
 
 import os
@@ -25,16 +28,12 @@ B2BWAVE_USERNAME = os.environ.get("B2BWAVE_USERNAME", "").strip()
 B2BWAVE_API_KEY = os.environ.get("B2BWAVE_API_KEY", "").strip()
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "").strip()
-
 SHIPPO_API_KEY = os.environ.get("SHIPPO_API_KEY", "").strip()
-
 SQUARE_ACCESS_TOKEN = os.environ.get("SQUARE_ACCESS_TOKEN", "").strip()
 SQUARE_ENVIRONMENT = os.environ.get("SQUARE_ENVIRONMENT", "sandbox").strip()
-
 CHECKOUT_BASE_URL = os.environ.get("CHECKOUT_BASE_URL", "").strip()
 CHECKOUT_SECRET = os.environ.get("CHECKOUT_SECRET", "default-secret-change-me")
 GMAIL_SEND_ENABLED = os.environ.get("GMAIL_SEND_ENABLED", "false").lower() == "true"
-
 RL_QUOTE_SANDBOX_URL = os.environ.get("RL_QUOTE_SANDBOX_URL", "https://rl-quote-sandbox.onrender.com").strip()
 
 # =============================================================================
@@ -46,6 +45,7 @@ AUTO_SYNC_DAYS_BACK = 7
 
 # =============================================================================
 # SUPPLIER INFO
+# ⚠️ LI email temporarily wpjob1@gmail.com for smoke test
 # =============================================================================
 
 SUPPLIER_INFO = {
@@ -53,7 +53,7 @@ SUPPLIER_INFO = {
         'name': 'Cabinetry Distribution',
         'address': '561 Keuka Rd, Interlachen FL 32148',
         'contact': 'Li Yang (615) 410-6775',
-        'email': 'cabinetrydistribution@gmail.com'
+        'email': 'wpjob1@gmail.com'  # SMOKE TEST — restore to cabinetrydistribution@gmail.com
     },
     'DL': {
         'name': 'DL Cabinetry',
