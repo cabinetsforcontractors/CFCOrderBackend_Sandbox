@@ -3,17 +3,25 @@ supplier_polling_engine.py
 WS6 Phase 9 — Warehouse Polling Engine
 
 Flow:
-  - send_initial_poll()       — fires when admin clicks "Sent to Warehouse"
-  - warehouse_set_date()      — stores pickup date
-  - process_bol_and_pickup()  — BOL + Pickup Request fired; returns data for background email task
-  - _delayed_bol_email()      — background task: tries PDF at 2/5/7 min, then reportlab fallback
-  - warehouse_set_pickup_time() — day-before flow
-  - check_all_warehouse_polls() — nightly cron
+  - send_initial_poll()           — fires when admin clicks "Sent to Warehouse"
+  - warehouse_set_date()          — stores pickup date
+  - process_bol_and_pickup()      — BOL + Pickup Request fired; returns data for background email tasks
+  - _delayed_bol_email()          — background task: tries PDF at 2/5/7 min, then reportlab fallback
+  - _send_customer_pickup_scheduled_email() — background task: tells customer pickup is scheduled,
+                                    tracking will follow when freight starts moving
+  - check_tracking_updates()      — cron: polls R+L ShipmentTracing; sends customer tracking email
+                                    when first scan detected (freight is moving)
+  - warehouse_set_pickup_time()   — day-before flow
+  - check_all_warehouse_polls()   — nightly cron
 
 Pickup Request: POST /PickupRequest/FromBOL — only needs PRO + date + ready + close time.
 R+L pulls shipper info from the BOL automatically.
 Time format: "hh:mm tt" e.g. "09:00 AM" — matches form output directly, no conversion needed.
 Poll email: minimal — order number and form link only, no customer data.
+Quote number: fetched from order_shipments.quote_number (saved at checkout) and passed
+  in BOL ReferenceNumbers to lock in the quoted rate with R+L.
+Tracking email: sent only when R+L ShipmentTracing shows first scan event (freight moving),
+  NOT at BOL creation time. PRO is not shared with customer until confirmed in motion.
 """
 
 import os
@@ -69,7 +77,7 @@ def get_shipment_by_token(token: str) -> Optional[dict]:
                            o.street, o.city, o.state, o.zip_code, o.phone,
                            o.order_total, o.order_date,
                            o.payment_received, o.warehouse_confirmed,
-                           o.bol_sent
+                           o.bol_sent, o.email
                     FROM order_shipments s
                     JOIN orders o ON s.order_id = o.order_id
                     WHERE s.supplier_token = %s
@@ -194,10 +202,13 @@ def warehouse_set_date(token: str, pickup_date_str: str) -> dict:
 def process_bol_and_pickup(token: str, pickup_time_str: str, close_time_str: str) -> dict:
     """
     1. Set warehouse_confirmed + store pickup_time/close_time
-    2. Fire BOL via rl-quote /bol/create → get PRO number
+    2. Fire BOL via rl-quote /bol/create — includes quote_number to lock quoted rate
     3. Fire Pickup Request via rl-quote /pickup/create (FromBOL)
-    4. Return data dict — caller schedules _delayed_bol_email as background task
-    Returns pickup_error in dict so route can surface R+L error message.
+    4. Return data dict — caller schedules _delayed_bol_email and
+       _send_customer_pickup_scheduled_email as background tasks.
+
+    Customer tracking email is NOT sent here — it fires later via check_tracking_updates()
+    when R+L ShipmentTracing shows first scan (freight actually moving).
     """
     try:
         shipment = get_shipment_by_token(token)
@@ -254,7 +265,7 @@ def process_bol_and_pickup(token: str, pickup_time_str: str, close_time_str: str
         pickup_date = shipment.get("pickup_date")
         pickup_date_fmt = pickup_date.strftime("%m/%d/%Y") if hasattr(pickup_date, "strftime") else None
 
-        # Fire BOL
+        # Fire BOL — passes quote_number to lock in the rate
         bol_result = _fire_bol(shipment, pickup_date_fmt)
         if not bol_result.get("success"):
             return {"success": False, "error": f"BOL failed: {bol_result.get('error')}"}
@@ -285,6 +296,10 @@ def process_bol_and_pickup(token: str, pickup_time_str: str, close_time_str: str
         except Exception:
             pass
 
+        # Build customer info for pickup scheduled email
+        customer_email = shipment.get("email") or ""
+        customer_name = shipment.get("customer_name") or ""
+
         return {
             "success": True,
             "pro_number": pro_number,
@@ -293,11 +308,14 @@ def process_bol_and_pickup(token: str, pickup_time_str: str, close_time_str: str
             "pickup_time": pickup_time_str,
             "close_time": close_time_str,
             "pickup_confirmation": pickup_result.get("confirmation_number"),
-            "pickup_error": pickup_error,       # surfaced on success page for debug
+            "pickup_error": pickup_error,
             "supplier_email": _get_supplier_email(shipment["warehouse"]),
             "warehouse_name": shipment["warehouse"],
             "order_id": order_id,
             "shipment": dict(shipment),
+            # Customer notification — pickup scheduled (no PRO yet)
+            "customer_email": customer_email,
+            "customer_name": customer_name,
         }
 
     except Exception as e:
@@ -352,6 +370,264 @@ def _delayed_bol_email(
         "pdf_source": pdf_source,
         "pdf_bytes": len(pdf_bytes) if pdf_bytes else 0,
     })
+
+
+# =============================================================================
+# CUSTOMER PICKUP SCHEDULED EMAIL — background task
+# Fires simultaneously with BOL email. No PRO shared — tracking sent separately
+# when R+L shows first scan.
+# =============================================================================
+
+def _send_customer_pickup_scheduled_email(
+    to_email: str,
+    customer_name: str,
+    order_id: str,
+    pickup_date: str,
+    pickup_time: str,
+    close_time: str = "",
+):
+    """
+    Tells the customer their order has been scheduled for pickup.
+    Does NOT include the PRO number — tracking email fires separately
+    when check_tracking_updates() detects first R+L scan.
+    """
+    if not to_email:
+        print(f"[SUPPLIER_POLL] No customer email for pickup scheduled notification — order {order_id}")
+        return
+
+    first_name = customer_name.split()[0] if customer_name else "there"
+    time_window = f"{pickup_time} — {close_time}" if close_time else pickup_time
+
+    try:
+        from datetime import datetime as dt
+        date_display = dt.strptime(pickup_date, "%m/%d/%Y").strftime("%A, %B %d, %Y")
+    except Exception:
+        date_display = pickup_date
+
+    html = f"""<!DOCTYPE html>
+<html><head><meta charset="UTF-8"></head>
+<body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f5f5;padding:20px;">
+<div style="max-width:560px;margin:0 auto;background:white;border-radius:8px;padding:32px;box-shadow:0 2px 8px rgba(0,0,0,.1);">
+    <div style="background:#1a365d;margin:-32px -32px 24px;padding:24px 32px;border-radius:8px 8px 0 0;">
+        <h2 style="color:white;margin:0;font-size:18px;">Cabinets For Contractors</h2>
+        <p style="color:#93c5fd;margin:4px 0 0;font-size:12px;">Wholesale RTA Cabinets &bull; (770) 990-4885</p>
+    </div>
+    <p style="color:#4a5568;">Hi {first_name},</p>
+    <p style="color:#4a5568;">Your cabinets for Order <strong>#{order_id}</strong> are scheduled for pickup by R+L Carriers.</p>
+    <div style="background:#EFF6FF;border:1px solid #BFDBFE;border-radius:8px;padding:20px;margin:20px 0;">
+        <div style="margin-bottom:12px;">
+            <div style="font-size:11px;font-weight:700;color:#1E40AF;text-transform:uppercase;letter-spacing:0.5px;">Pickup Date</div>
+            <div style="font-size:18px;font-weight:700;color:#1E40AF;margin-top:4px;">{date_display}</div>
+        </div>
+        <div>
+            <div style="font-size:11px;font-weight:700;color:#1E40AF;text-transform:uppercase;letter-spacing:0.5px;">Pickup Window</div>
+            <div style="font-size:16px;font-weight:600;color:#1E40AF;margin-top:4px;">{time_window}</div>
+        </div>
+    </div>
+    <p style="color:#4a5568;">We'll send you tracking information as soon as R+L picks up your shipment and it starts moving.</p>
+    <p style="color:#4a5568;font-size:14px;"><strong>Delivery tip:</strong> LTL freight requires someone present to receive. The carrier will call ahead to schedule delivery. Please inspect all boxes and note any damage on the delivery receipt before signing.</p>
+    <p style="color:#4a5568;">Questions? Reply to this email or call <strong>(770) 990-4885</strong>.</p>
+    <p style="color:#4a5568;">Thanks,<br><strong>William Prince</strong><br>Cabinets For Contractors</p>
+    <hr style="border:none;border-top:1px solid #e2e8f0;margin:20px 0;">
+    <p style="font-size:12px;color:#999;text-align:center;">Cabinets For Contractors &bull; (770) 990-4885 &bull; orders@cabinetsforcontractors.net</p>
+</div>
+</body></html>"""
+
+    success = _send_raw_email(
+        to_email=to_email,
+        subject=f"Your Order #{order_id} is Scheduled for Pickup — {date_display}",
+        html_body=html,
+    )
+    _log_event(order_id, "customer_pickup_scheduled_email_sent", {
+        "to": to_email,
+        "pickup_date": pickup_date,
+        "pickup_time": pickup_time,
+        "close_time": close_time,
+        "success": success,
+    })
+    print(f"[SUPPLIER_POLL] Customer pickup scheduled email {'sent' if success else 'FAILED'} — order {order_id} to {to_email}")
+
+
+# =============================================================================
+# TRACKING UPDATES — cron task
+# Polls R+L ShipmentTracing for all BOL'd orders with no tracking email sent.
+# Sends customer tracking email only when first scan detected.
+# =============================================================================
+
+def check_tracking_updates() -> dict:
+    """
+    Poll R+L ShipmentTracing for all orders where:
+      - bol_sent = TRUE (PRO number exists in orders.tracking)
+      - is_complete = FALSE
+      - No 'tracking_email_sent' event in order_events
+
+    When R+L shows any trace events (first scan = freight picked up and moving),
+    send the customer their tracking link and log the event.
+
+    Called by POST /tracking/check-all cron endpoint.
+    """
+    summary = {
+        "checked": 0,
+        "tracking_emails_sent": 0,
+        "not_yet_moving": 0,
+        "errors": [],
+    }
+
+    try:
+        with get_db() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT o.order_id, o.tracking, o.pro_number,
+                           o.customer_name, o.company_name, o.email,
+                           o.order_total
+                    FROM orders o
+                    WHERE o.bol_sent = TRUE
+                      AND (o.is_complete = FALSE OR o.is_complete IS NULL)
+                      AND o.tracking IS NOT NULL AND o.tracking != ''
+                      AND NOT EXISTS (
+                          SELECT 1 FROM order_events e
+                          WHERE e.order_id = o.order_id
+                          AND e.event_type = 'tracking_email_sent'
+                      )
+                    ORDER BY o.bol_sent_at ASC
+                """)
+                orders = [dict(r) for r in cur.fetchall()]
+    except Exception as e:
+        summary["errors"].append({"phase": "query", "error": str(e)})
+        return summary
+
+    for order in orders:
+        order_id = order["order_id"]
+        pro_number = order.get("tracking") or order.get("pro_number") or ""
+        if not pro_number:
+            continue
+
+        summary["checked"] += 1
+
+        try:
+            from rl_carriers import track_shipment, RLCarriersError
+            try:
+                shipment_data = track_shipment(pro_number)
+            except RLCarriersError as rl_err:
+                # PRO not found yet — normal for recently created BOLs
+                print(f"[TRACKING] PRO {pro_number} not yet in R+L system: {rl_err}")
+                summary["not_yet_moving"] += 1
+                continue
+            except Exception as track_err:
+                summary["errors"].append({"order_id": order_id, "error": str(track_err)})
+                continue
+
+            # Detect if shipment has started moving
+            # R+L TraceEvents = list of scan events; any entry = picked up and in transit
+            trace_events = shipment_data.get("TraceEvents") or shipment_data.get("Events") or []
+            status_code = shipment_data.get("StatusCode") or shipment_data.get("Status") or ""
+
+            # Status codes that mean freight is moving: PU=Picked Up, OFD=Out for Delivery,
+            # DEL=Delivered, any trace events at all
+            is_moving = (
+                len(trace_events) > 0 or
+                status_code.upper() in ("PU", "OFD", "DEL", "IT", "AR")
+            )
+
+            if not is_moving:
+                summary["not_yet_moving"] += 1
+                print(f"[TRACKING] PRO {pro_number} — order {order_id} — not yet moving (status: {status_code})")
+                continue
+
+            # Freight is moving — send tracking email
+            customer_email = order.get("email") or ""
+            customer_name = order.get("customer_name") or ""
+            if not customer_email:
+                print(f"[TRACKING] No customer email for order {order_id} — skipping tracking email")
+                _log_event(order_id, "tracking_email_sent", {
+                    "pro_number": pro_number,
+                    "skipped": True,
+                    "reason": "no_customer_email",
+                    "status_code": status_code,
+                })
+                summary["tracking_emails_sent"] += 1  # count it as handled
+                continue
+
+            _send_customer_tracking_email(
+                to_email=customer_email,
+                customer_name=customer_name,
+                order_id=order_id,
+                pro_number=pro_number,
+                status_code=status_code,
+            )
+            _log_event(order_id, "tracking_email_sent", {
+                "pro_number": pro_number,
+                "status_code": status_code,
+                "trace_events_count": len(trace_events),
+                "to": customer_email,
+            })
+            summary["tracking_emails_sent"] += 1
+            print(f"[TRACKING] Tracking email sent — order {order_id} PRO {pro_number} to {customer_email}")
+
+        except Exception as e:
+            summary["errors"].append({"order_id": order_id, "pro": pro_number, "error": str(e)})
+
+    return summary
+
+
+def _send_customer_tracking_email(
+    to_email: str,
+    customer_name: str,
+    order_id: str,
+    pro_number: str,
+    status_code: str = "",
+):
+    """
+    Send customer their R+L tracking link once freight is confirmed moving.
+    """
+    first_name = customer_name.split()[0] if customer_name else "there"
+    tracking_url = f"https://www2.rlcarriers.com/freight/shipping/shipment-tracing?pro={pro_number}"
+
+    status_msg = ""
+    if status_code.upper() == "DEL":
+        status_msg = "<p style='color:#059669;font-weight:600;'>✅ Your shipment has been delivered.</p>"
+    elif status_code.upper() == "OFD":
+        status_msg = "<p style='color:#D97706;font-weight:600;'>🚚 Your shipment is out for delivery today.</p>"
+    else:
+        status_msg = "<p style='color:#4a5568;'>Your shipment has been picked up and is in transit.</p>"
+
+    html = f"""<!DOCTYPE html>
+<html><head><meta charset="UTF-8"></head>
+<body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f5f5;padding:20px;">
+<div style="max-width:560px;margin:0 auto;background:white;border-radius:8px;padding:32px;box-shadow:0 2px 8px rgba(0,0,0,.1);">
+    <div style="background:#1a365d;margin:-32px -32px 24px;padding:24px 32px;border-radius:8px 8px 0 0;">
+        <h2 style="color:white;margin:0;font-size:18px;">Cabinets For Contractors</h2>
+        <p style="color:#93c5fd;margin:4px 0 0;font-size:12px;">Wholesale RTA Cabinets &bull; (770) 990-4885</p>
+    </div>
+    <p style="color:#4a5568;">Hi {first_name},</p>
+    <p style="color:#4a5568;">Your cabinets for Order <strong>#{order_id}</strong> are on their way!</p>
+    {status_msg}
+    <div style="background:#ecfdf5;border:1px solid #86efac;border-radius:8px;padding:20px;margin:20px 0;text-align:center;">
+        <div style="font-size:11px;font-weight:700;color:#166534;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px;">
+            R+L Carriers PRO Number
+        </div>
+        <div style="font-size:26px;font-weight:700;color:#166534;font-family:monospace;letter-spacing:2px;margin-bottom:16px;">
+            {pro_number}
+        </div>
+        <a href="{tracking_url}"
+           style="display:inline-block;background:#16a34a;color:white;padding:12px 28px;border-radius:6px;text-decoration:none;font-weight:600;font-size:15px;">
+            Track Your Shipment →
+        </a>
+    </div>
+    <p style="color:#4a5568;font-size:14px;"><strong>Delivery reminder:</strong> LTL freight requires someone present to receive. R+L Carriers will call ahead to schedule your delivery window. Please inspect all boxes and note any damage on the delivery receipt <strong>before signing</strong>.</p>
+    <p style="color:#4a5568;">Questions? Reply to this email or call <strong>(770) 990-4885</strong>.</p>
+    <p style="color:#4a5568;">Thanks,<br><strong>William Prince</strong><br>Cabinets For Contractors</p>
+    <hr style="border:none;border-top:1px solid #e2e8f0;margin:20px 0;">
+    <p style="font-size:12px;color:#999;text-align:center;">Cabinets For Contractors &bull; (770) 990-4885 &bull; orders@cabinetsforcontractors.net</p>
+</div>
+</body></html>"""
+
+    success = _send_raw_email(
+        to_email=to_email,
+        subject=f"Your Order #{order_id} Has Shipped! — Track with R+L PRO {pro_number}",
+        html_body=html,
+    )
+    print(f"[TRACKING] Tracking email {'sent' if success else 'FAILED'} — order {order_id} PRO {pro_number}")
 
 
 # =============================================================================
@@ -577,6 +853,13 @@ def _fire_bol(shipment: dict, pickup_date_str: Optional[str]) -> dict:
         weight = int(float(shipment.get("weight") or 200))
         is_residential = bool(shipment.get("is_residential", True))
 
+        # Fetch quote number to lock in the R+L quoted rate
+        quote_number = (
+            shipment.get("quote_number") or
+            shipment.get("rl_quote_number") or
+            ""
+        )
+
         payload = {
             "shipper_name": shipper_name,
             "shipper_address": wh_info["address"],
@@ -597,6 +880,7 @@ def _fire_bol(shipment: dict, pickup_date_str: Optional[str]) -> dict:
             "description": "RTA Cabinetry",
             "pickup_date": pickup_date_str,
             "special_instructions": f"CFC Order #{shipment['order_id']}",
+            "quote_number": quote_number,
         }
 
         data = json.dumps(payload).encode()
@@ -627,20 +911,23 @@ def _fire_bol(shipment: dict, pickup_date_str: Optional[str]) -> dict:
                         """,
                         (pro_number, bol_pdf_url, shipment["shipment_id"])
                     )
+                    # Write PRO to orders.pro_number only — orders.tracking stays empty
+                    # until check_tracking_updates() confirms first R+L scan
                     cur.execute(
                         """
                         UPDATE orders
                         SET bol_sent = TRUE, bol_sent_at = NOW(),
-                            tracking = %s, pro_number = %s, updated_at = NOW()
+                            pro_number = %s, updated_at = NOW()
                         WHERE order_id = %s
                         """,
-                        (pro_number, pro_number, shipment["order_id"])
+                        (pro_number, shipment["order_id"])
                     )
                     cur.execute(
                         "INSERT INTO order_events (order_id, event_type, event_data, source) "
                         "VALUES (%s, 'bol_created', %s, 'supplier_polling')",
                         (shipment["order_id"], json.dumps({
                             "pro_number": pro_number, "pickup_date": pickup_date_str,
+                            "quote_number": quote_number,
                         }))
                     )
         except Exception as db_err:
@@ -702,7 +989,7 @@ def _fire_pickup_request(
 
 
 # =============================================================================
-# BOL PDF FETCH — Option A: R+L Document Retrieval
+# BOL PDF FETCH — Option A: R+L Document Retrieval (via rl-quote)
 # =============================================================================
 
 def _fetch_bol_pdf_bytes(pro_number: str) -> Optional[bytes]:
@@ -1004,7 +1291,9 @@ def _send_cfc_bol_fired_alert(shipment: dict, pro_number: str, pickup_date: str,
     <strong>PRO:</strong> <span style="font-family:monospace;color:#059669;">{pro_number}</span><br>
     <strong>Pickup Date:</strong> {pickup_date}<br>
     <strong>Ready Time:</strong> {pickup_time}{close_line}{pickup_line}{error_line}</p>
-    <p>BOL PDF will be emailed to warehouse within ~10 minutes.</p>"""
+    <p>BOL PDF will be emailed to warehouse within ~10 minutes.<br>
+    Customer pickup scheduled email sent immediately.<br>
+    Customer tracking email will fire when R+L shows first scan.</p>"""
     _send_raw_email(CFC_INTERNAL_EMAIL, subject, html)
 
 
