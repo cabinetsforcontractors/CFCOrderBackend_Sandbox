@@ -22,6 +22,7 @@ try:
         add_is_residential_to_shipments as _add_is_residential,
         add_address_pending_to_checkouts as _add_address_pending,
         add_address_classification_to_checkouts as _add_address_classification,
+        add_bol_columns_to_shipments as _add_bol_columns,
     )
     DB_MIGRATIONS_LOADED = True
 except ImportError:
@@ -109,14 +110,18 @@ def add_address_pending(_: bool = Depends(require_admin)):
 def add_address_classification(_: bool = Depends(require_admin)):
     """
     Add address classification columns to pending_checkouts.
-
-    WS6 — drives the multi-step customer checkout flow:
-      address_classification_needed  — Cases B/C: customer must classify
-      address_initially_found        — FALSE = Smarty found nothing, open edit box
-      address_type_confirmed         — what customer selected in Step 2
-      is_residential_customer_confirmed — derived bool, used as shipping override
+    WS6 — drives the multi-step customer checkout flow.
     """
     return _run(_add_address_classification)
+
+
+@migration_router.post("/add-bol-columns")
+def add_bol_columns(_: bool = Depends(require_admin)):
+    """
+    Add bol_url and bol_number columns to order_shipments.
+    Phase 8 — BOL generation via R+L API.
+    """
+    return _run(_add_bol_columns)
 
 
 @migration_router.post("/init-db")
@@ -127,7 +132,7 @@ def init_db(_: bool = Depends(require_admin)):
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(SCHEMA_SQL)
-    return {"status": "ok", "message": "Database schema initialized", "version": "5.7.0"}
+    return {"status": "ok", "message": "Database schema initialized", "version": "5.8.0"}
 
 
 # =============================================================================
@@ -152,7 +157,15 @@ def debug_orders_columns(_: bool = Depends(require_admin)):
                 ORDER BY ordinal_position
             """)
             checkout_cols = cur.fetchall()
+            cur.execute("""
+                SELECT column_name, data_type
+                FROM information_schema.columns
+                WHERE table_name = 'order_shipments'
+                ORDER BY ordinal_position
+            """)
+            shipment_cols = cur.fetchall()
             return {
                 "orders_columns": [c[0] for c in orders_cols],
                 "pending_checkouts_columns": [c[0] for c in checkout_cols],
+                "order_shipments_columns": [c[0] for c in shipment_cols],
             }
