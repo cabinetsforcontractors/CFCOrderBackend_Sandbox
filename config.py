@@ -2,6 +2,9 @@
 config.py
 Centralized configuration for CFC Order Backend.
 All environment variables and constants in one place.
+
+⚠️ SMOKE TEST IN PROGRESS — LI warehouse email swapped to wpjob1@gmail.com
+   Swap back to cabinetrydistribution@gmail.com after test is complete.
 """
 
 import os
@@ -41,11 +44,12 @@ RL_QUOTE_SANDBOX_URL = os.environ.get("RL_QUOTE_SANDBOX_URL", "https://rl-quote-
 # AUTO-SYNC CONFIG
 # =============================================================================
 
-AUTO_SYNC_INTERVAL_MINUTES = 7.5   # sync every 7.5 minutes
+AUTO_SYNC_INTERVAL_MINUTES = 7.5
 AUTO_SYNC_DAYS_BACK = 7
 
 # =============================================================================
 # SUPPLIER INFO
+# ⚠️ LI email temporarily set to wpjob1@gmail.com for smoke test
 # =============================================================================
 
 SUPPLIER_INFO = {
@@ -53,7 +57,7 @@ SUPPLIER_INFO = {
         'name': 'Cabinetry Distribution',
         'address': '561 Keuka Rd, Interlachen FL 32148',
         'contact': 'Li Yang (615) 410-6775',
-        'email': 'cabinetrydistribution@gmail.com'
+        'email': 'wpjob1@gmail.com'  # SMOKE TEST — restore to cabinetrydistribution@gmail.com
     },
     'DL': {
         'name': 'DL Cabinetry',
@@ -127,7 +131,6 @@ WAREHOUSE_ZIPS = {
     'DuraStone': '77037',
     'L&C Cabinetry': '23454',
     'Linda': '30110',
-    # Full names for compatibility
     'Cabinetry Distribution': '32148',
     'DL Cabinetry': '32256',
     'ROC Cabinetry': '30071',
