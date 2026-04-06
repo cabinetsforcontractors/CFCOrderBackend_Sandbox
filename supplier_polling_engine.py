@@ -2,19 +2,14 @@
 supplier_polling_engine.py
 WS6 Phase 9 — Warehouse Polling Engine
 
-Manages the full warehouse polling lifecycle:
-  1. Initial poll: "When will this order be ready to ship?" (fires when admin sends to warehouse)
-  2. Escalation polls: +24hr no response → Poll #2, +48hr → Poll #3 CRITICAL + CFC alert
-  3. Day-before confirmation: night before pickup_date → "Still on for tomorrow? Yes/No"
-     - Yes → warehouse enters time → BOL fires + R+L pickup request scheduled
-     - No (Monday push) → store new date, reset poll cycle, no CFC alert
-     - No (Tuesday+ push) → store new date, reset poll cycle, CFC alert "call them"
+Flow:
+  - send_initial_poll()        — fires when admin clicks "Sent to Warehouse"
+  - warehouse_set_date()       — stores pickup date (called from set-date POST)
+  - _confirm_for_immediate_bol() — sets day_before_confirmed + fires BOL (called from set-date POST)
+  - warehouse_set_pickup_time() — day-before flow: stores time + fires BOL
+  - check_all_warehouse_polls() — nightly cron: escalation polls + day-before polls
 
-All supplier-facing pages are tokenized HTML served by supplier_routes.py.
-This module handles the logic; supplier_routes.py handles the HTTP endpoints.
-
-IMPORTANT: All public-facing functions return dicts, never raise.
-           get_db() re-raises exceptions so every DB block is wrapped in try/except.
+All public functions return dicts, never raise.
 """
 
 import os
@@ -31,7 +26,6 @@ from config import SUPPLIER_INFO
 
 CHECKOUT_BASE_URL = os.environ.get("CHECKOUT_BASE_URL", "https://cfcorderbackend-sandbox.onrender.com").strip()
 CFC_INTERNAL_EMAIL = os.environ.get("WAREHOUSE_NOTIFICATION_EMAIL", "cabinetsforcontractors@gmail.com").strip()
-RL_QUOTE_API_URL = os.environ.get("RL_QUOTE_API_URL", "https://rl-quote-sandbox.onrender.com").strip()
 
 POLL_2_THRESHOLD_HOURS = 24
 POLL_3_THRESHOLD_HOURS = 48
@@ -72,7 +66,7 @@ def get_shipment_by_token(token: str) -> Optional[dict]:
 
 
 # =============================================================================
-# INITIAL POLL — fires when admin clicks "Send to Warehouse"
+# INITIAL POLL
 # =============================================================================
 
 def send_initial_poll(shipment_id: str) -> dict:
@@ -142,11 +136,142 @@ def send_initial_poll(shipment_id: str) -> dict:
 
 
 # =============================================================================
-# ESCALATION POLLS — called by nightly cron
+# DATE SET
+# =============================================================================
+
+def warehouse_set_date(token: str, pickup_date_str: str) -> dict:
+    """Store pickup_date. Always returns dict, never raises."""
+    try:
+        shipment = get_shipment_by_token(token)
+        if not shipment:
+            return {"success": False, "error": "Invalid or expired link"}
+
+        try:
+            pickup_date = datetime.strptime(pickup_date_str, "%Y-%m-%d").date()
+        except ValueError:
+            return {"success": False, "error": f"Invalid date format: {pickup_date_str}"}
+
+        shipment_id = shipment.get("shipment_id")
+        order_id = shipment.get("order_id")
+
+        try:
+            with get_db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE order_shipments SET pickup_date = %s, updated_at = NOW() WHERE shipment_id = %s",
+                        (pickup_date, shipment_id)
+                    )
+        except Exception as db_err:
+            return {"success": False, "error": f"Database error: {str(db_err)}"}
+
+        _log_event(order_id, "warehouse_set_pickup_date", {
+            "shipment_id": shipment_id,
+            "warehouse": shipment.get("warehouse"),
+            "pickup_date": str(pickup_date),
+        })
+
+        return {"success": True, "pickup_date": str(pickup_date)}
+
+    except Exception as e:
+        return {"success": False, "error": f"Unexpected error: {str(e)}"}
+
+
+# =============================================================================
+# IMMEDIATE BOL — called from set-date form when date+time submitted together
+# =============================================================================
+
+def _confirm_for_immediate_bol(token: str, pickup_time_str: str) -> dict:
+    """
+    Set day_before_confirmed=TRUE, store pickup_time, set warehouse_confirmed,
+    fire BOL, email warehouse, notify CFC. Used when date+time entered at same time.
+    """
+    try:
+        shipment = get_shipment_by_token(token)
+        if not shipment:
+            return {"success": False, "error": "Invalid or expired link"}
+
+        shipment_id = shipment["shipment_id"]
+        order_id = shipment["order_id"]
+
+        try:
+            with get_db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE order_shipments
+                        SET day_before_confirmed = TRUE,
+                            pickup_time = %s,
+                            updated_at = NOW()
+                        WHERE shipment_id = %s
+                        """,
+                        (pickup_time_str, shipment_id)
+                    )
+                    cur.execute(
+                        """
+                        UPDATE orders
+                        SET warehouse_confirmed = TRUE, warehouse_confirmed_at = NOW(),
+                            updated_at = NOW()
+                        WHERE order_id = %s
+                        """,
+                        (order_id,)
+                    )
+        except Exception as db_err:
+            return {"success": False, "error": f"Database error: {str(db_err)}"}
+
+        _log_event(order_id, "warehouse_confirmed_with_time", {
+            "shipment_id": shipment_id,
+            "pickup_time": pickup_time_str,
+            "source": "date_form",
+        })
+
+        # Re-fetch shipment to get updated pickup_date
+        shipment = get_shipment_by_token(token)
+        if not shipment:
+            return {"success": False, "error": "Could not re-fetch shipment"}
+
+        pickup_date = shipment.get("pickup_date")
+        pickup_date_str = pickup_date.strftime("%m/%d/%Y") if hasattr(pickup_date, "strftime") else None
+
+        bol_result = _fire_bol(shipment, pickup_date_str)
+
+        if bol_result.get("success"):
+            pro_number = bol_result.get("pro_number")
+            bol_pdf_url = bol_result.get("bol_pdf_url", "")
+
+            supplier_email = _get_supplier_email(shipment["warehouse"])
+            if supplier_email:
+                _send_bol_to_warehouse(
+                    to_email=supplier_email,
+                    warehouse_name=shipment["warehouse"],
+                    order_id=order_id,
+                    pro_number=pro_number,
+                    pickup_date=pickup_date_str,
+                    pickup_time=pickup_time_str,
+                    bol_pdf_url=bol_pdf_url,
+                )
+
+            try:
+                _send_cfc_bol_fired_alert(shipment, pro_number, pickup_date_str, pickup_time_str)
+            except Exception:
+                pass
+
+            return {
+                "success": True,
+                "pro_number": pro_number,
+                "bol_pdf_url": bol_pdf_url,
+            }
+        return {"success": False, "error": bol_result.get("error", "BOL generation failed")}
+
+    except Exception as e:
+        return {"success": False, "error": f"Unexpected error: {str(e)}"}
+
+
+# =============================================================================
+# ESCALATION POLLS
 # =============================================================================
 
 def check_all_warehouse_polls() -> dict:
-    """Check all active shipments for polling actions. Called nightly by cron."""
+    """Nightly cron: escalation polls + day-before polls."""
     now = datetime.now(timezone.utc)
     tomorrow = (now + timedelta(days=1)).date()
     summary = {"polls_escalated": 0, "day_before_sent": 0, "errors": []}
@@ -161,31 +286,30 @@ def check_all_warehouse_polls() -> dict:
                     JOIN orders o ON s.order_id = o.order_id
                     WHERE o.sent_to_warehouse = TRUE
                       AND o.bol_sent = FALSE
-                      AND (s.pickup_date IS NULL)
+                      AND s.pickup_date IS NULL
                       AND s.supplier_poll_1_sent_at IS NOT NULL
                       AND o.is_complete = FALSE
                     """,
                 )
-                pending_date_shipments = [dict(r) for r in cur.fetchall()]
+                pending = [dict(r) for r in cur.fetchall()]
     except Exception as e:
         summary["errors"].append({"phase": "escalation_query", "error": str(e)})
-        pending_date_shipments = []
+        pending = []
 
-    for s in pending_date_shipments:
+    for s in pending:
         try:
             poll_sent_at = s.get("supplier_poll_1_sent_at")
             if not poll_sent_at:
                 continue
             if poll_sent_at.tzinfo is None:
                 poll_sent_at = poll_sent_at.replace(tzinfo=timezone.utc)
-            hours_elapsed = (now - poll_sent_at).total_seconds() / 3600
-            poll_count = s.get("supplier_poll_sent_count") or 1
-
-            if hours_elapsed >= POLL_3_THRESHOLD_HOURS and poll_count < 3:
+            hours = (now - poll_sent_at).total_seconds() / 3600
+            count = s.get("supplier_poll_sent_count") or 1
+            if hours >= POLL_3_THRESHOLD_HOURS and count < 3:
                 _send_escalation_poll(s, poll_number=3, is_critical=True)
-                _send_cfc_no_response_alert(s, hours=int(hours_elapsed))
+                _send_cfc_no_response_alert(s, hours=int(hours))
                 summary["polls_escalated"] += 1
-            elif hours_elapsed >= POLL_2_THRESHOLD_HOURS and poll_count < 2:
+            elif hours >= POLL_2_THRESHOLD_HOURS and count < 2:
                 _send_escalation_poll(s, poll_number=2, is_critical=False)
                 summary["polls_escalated"] += 1
         except Exception as e:
@@ -202,17 +326,17 @@ def check_all_warehouse_polls() -> dict:
                     JOIN orders o ON s.order_id = o.order_id
                     WHERE s.pickup_date = %s
                       AND s.day_before_poll_sent_at IS NULL
-                      AND o.bol_sent = FALSE
+                      AND s.bol_sent = FALSE
                       AND o.is_complete = FALSE
                     """,
                     (tomorrow,),
                 )
-                day_before_shipments = [dict(r) for r in cur.fetchall()]
+                day_before = [dict(r) for r in cur.fetchall()]
     except Exception as e:
         summary["errors"].append({"phase": "day_before_query", "error": str(e)})
-        day_before_shipments = []
+        day_before = []
 
-    for s in day_before_shipments:
+    for s in day_before:
         try:
             _send_day_before_poll(s)
             summary["day_before_sent"] += 1
@@ -233,20 +357,14 @@ def _send_escalation_poll(shipment: dict, poll_number: int, is_critical: bool):
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
-                if poll_number == 2:
-                    cur.execute(
-                        "UPDATE order_shipments SET supplier_poll_2_sent_at = NOW(), "
-                        "supplier_poll_sent_count = 2 WHERE shipment_id = %s",
-                        (shipment["shipment_id"],)
-                    )
-                else:
-                    cur.execute(
-                        "UPDATE order_shipments SET supplier_poll_3_sent_at = NOW(), "
-                        "supplier_poll_sent_count = 3 WHERE shipment_id = %s",
-                        (shipment["shipment_id"],)
-                    )
+                col = "supplier_poll_2_sent_at" if poll_number == 2 else "supplier_poll_3_sent_at"
+                cnt = 2 if poll_number == 2 else 3
+                cur.execute(
+                    f"UPDATE order_shipments SET {col} = NOW(), supplier_poll_sent_count = %s WHERE shipment_id = %s",
+                    (cnt, shipment["shipment_id"])
+                )
     except Exception as e:
-        print(f"[SUPPLIER_POLL] escalation poll DB error: {e}")
+        print(f"[SUPPLIER_POLL] escalation DB error: {e}")
     _send_supplier_poll_email(
         to_email=supplier_email,
         warehouse_name=shipment["warehouse"],
@@ -292,71 +410,18 @@ def _send_day_before_poll(shipment: dict):
                     (shipment["shipment_id"],)
                 )
     except Exception as e:
-        print(f"[SUPPLIER_POLL] day_before poll DB error: {e}")
+        print(f"[SUPPLIER_POLL] day_before DB error: {e}")
     _log_event(shipment["order_id"], "day_before_poll_sent", {
         "shipment_id": shipment["shipment_id"],
         "pickup_date": str(pickup_date),
-        "supplier_email": supplier_email,
     })
 
 
 # =============================================================================
-# WAREHOUSE DATE SET (supplier submits expected date)
-# =============================================================================
-
-def warehouse_set_date(token: str, pickup_date_str: str) -> dict:
-    """
-    Warehouse submitted the date form. Stores pickup_date, notifies CFC.
-    Always returns a dict — never raises.
-    """
-    try:
-        shipment = get_shipment_by_token(token)
-        if not shipment:
-            return {"success": False, "error": "Invalid or expired link"}
-
-        try:
-            pickup_date = datetime.strptime(pickup_date_str, "%Y-%m-%d").date()
-        except ValueError:
-            return {"success": False, "error": f"Invalid date format: {pickup_date_str}"}
-
-        shipment_id = shipment.get("shipment_id")
-        order_id = shipment.get("order_id")
-
-        try:
-            with get_db() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "UPDATE order_shipments SET pickup_date = %s, updated_at = NOW() WHERE shipment_id = %s",
-                        (pickup_date, shipment_id)
-                    )
-        except Exception as db_err:
-            return {"success": False, "error": f"Database error: {str(db_err)}"}
-
-        _log_event(order_id, "warehouse_set_pickup_date", {
-            "shipment_id": shipment_id,
-            "warehouse": shipment.get("warehouse"),
-            "pickup_date": str(pickup_date),
-        })
-
-        # Notify CFC — best effort, don't fail if email errors
-        try:
-            date_str = pickup_date.strftime("%A, %B %d, %Y")
-            _send_cfc_date_confirmed_alert(shipment, date_str)
-        except Exception as email_err:
-            print(f"[SUPPLIER_POLL] CFC alert email failed: {email_err}")
-
-        return {"success": True, "pickup_date": str(pickup_date)}
-
-    except Exception as e:
-        return {"success": False, "error": f"Unexpected error: {str(e)}"}
-
-
-# =============================================================================
-# DAY-BEFORE RESPONSES
+# DAY-BEFORE RESPONSES (automated flow)
 # =============================================================================
 
 def warehouse_confirm_tomorrow(token: str) -> dict:
-    """Warehouse clicked YES on day-before poll."""
     try:
         shipment = get_shipment_by_token(token)
         if not shipment:
@@ -365,22 +430,18 @@ def warehouse_confirm_tomorrow(token: str) -> dict:
             with get_db() as conn:
                 with conn.cursor() as cur:
                     cur.execute(
-                        "UPDATE order_shipments SET day_before_confirmed = TRUE, updated_at = NOW() "
-                        "WHERE shipment_id = %s",
+                        "UPDATE order_shipments SET day_before_confirmed = TRUE, updated_at = NOW() WHERE shipment_id = %s",
                         (shipment["shipment_id"],)
                     )
         except Exception as db_err:
             return {"success": False, "error": f"Database error: {str(db_err)}"}
-        _log_event(shipment["order_id"], "day_before_confirmed_yes", {
-            "shipment_id": shipment["shipment_id"],
-        })
+        _log_event(shipment["order_id"], "day_before_confirmed_yes", {"shipment_id": shipment["shipment_id"]})
         return {"success": True, "next": "time_entry"}
     except Exception as e:
         return {"success": False, "error": f"Unexpected error: {str(e)}"}
 
 
 def warehouse_push_date(token: str, new_date_str: str) -> dict:
-    """Warehouse clicked NO on day-before poll and entered a new date."""
     try:
         shipment = get_shipment_by_token(token)
         if not shipment:
@@ -423,7 +484,7 @@ def warehouse_push_date(token: str, new_date_str: str) -> dict:
 
 
 def warehouse_set_pickup_time(token: str, pickup_time_str: str) -> dict:
-    """Warehouse entered pickup time → fires BOL."""
+    """Day-before flow: store time + fire BOL."""
     try:
         shipment = get_shipment_by_token(token)
         if not shipment:
@@ -470,14 +531,12 @@ def warehouse_set_pickup_time(token: str, pickup_time_str: str) -> dict:
                     pickup_time=pickup_time_str,
                     bol_pdf_url=bol_pdf_url,
                 )
-            _send_cfc_bol_fired_alert(shipment, pro_number, pickup_date_str, pickup_time_str)
-            return {
-                "success": True,
-                "pro_number": pro_number,
-                "bol_pdf_url": bol_pdf_url,
-                "message": f"BOL created — PRO {pro_number}. Pickup scheduled {pickup_date_str} at {pickup_time_str}.",
-            }
-        return {"success": False, "error": f"BOL creation failed: {bol_result.get('error')}"}
+            try:
+                _send_cfc_bol_fired_alert(shipment, pro_number, pickup_date_str, pickup_time_str)
+            except Exception:
+                pass
+            return {"success": True, "pro_number": pro_number, "bol_pdf_url": bol_pdf_url}
+        return {"success": False, "error": bol_result.get("error", "BOL failed")}
     except Exception as e:
         return {"success": False, "error": f"Unexpected error: {str(e)}"}
 
@@ -550,14 +609,12 @@ def _fire_bol(shipment: dict, pickup_date_str: Optional[str]) -> dict:
                             (pro_number, pro_number, shipment["order_id"])
                         )
                         cur.execute(
-                            """
-                            INSERT INTO order_events (order_id, event_type, event_data, source)
-                            VALUES (%s, 'bol_created', %s, 'supplier_polling')
-                            """,
+                            "INSERT INTO order_events (order_id, event_type, event_data, source) "
+                            "VALUES (%s, 'bol_created', %s, 'supplier_polling')",
                             (shipment["order_id"], json.dumps({
                                 "pro_number": pro_number,
                                 "pickup_date": pickup_date_str,
-                                "triggered_by": "supplier_time_entry",
+                                "triggered_by": "supplier_form",
                             }))
                         )
             except Exception as db_err:
@@ -635,7 +692,7 @@ def _send_supplier_poll_email(
 
     html = f"""<!DOCTYPE html>
 <html>
-<head><meta charset="UTF-8"><title>Ship Date Request</title></head>
+<head><meta charset="UTF-8"></head>
 <body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f5f5;padding:20px;">
 <div style="max-width:560px;margin:0 auto;background:white;border-radius:8px;padding:32px;box-shadow:0 2px 8px rgba(0,0,0,0.1);">
     <h2 style="color:#1a365d;margin-top:0;">Cabinets For Contractors — Order #{order_id}</h2>
@@ -645,9 +702,9 @@ def _send_supplier_poll_email(
         <tr><td style="padding:6px 0;color:#666;">Order Total:</td><td style="font-weight:600;">${order_total:,.2f}</td></tr>
         <tr><td style="padding:6px 0;color:#666;">Warehouse:</td><td>{warehouse_name}</td></tr>
     </table>
-    <p style="font-size:15px;font-weight:600;color:#1a365d;">When will this order be ready for pickup?</p>
+    <p style="font-size:15px;font-weight:600;color:#1a365d;">When will this order be ready for pickup? Please enter the date and pickup time.</p>
     <a href="{form_url}" style="display:inline-block;background:#1a365d;color:white;padding:14px 28px;border-radius:6px;text-decoration:none;font-weight:700;font-size:16px;margin:8px 0;">
-        Enter Ship Date →
+        Enter Ship Date &amp; Time →
     </a>
     <p style="font-size:12px;color:#999;margin-top:24px;">Questions? Call (770) 990-4885 or reply to this email.</p>
 </div>
@@ -663,7 +720,7 @@ def _render_day_before_email(
 ) -> str:
     return f"""<!DOCTYPE html>
 <html>
-<head><meta charset="UTF-8"><title>Pickup Confirmation</title></head>
+<head><meta charset="UTF-8"></head>
 <body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f5f5;padding:20px;">
 <div style="max-width:560px;margin:0 auto;background:white;border-radius:8px;padding:32px;box-shadow:0 2px 8px rgba(0,0,0,0.1);">
     <h2 style="color:#1a365d;margin-top:0;">Order #{order_id} — Pickup Tomorrow?</h2>
@@ -686,28 +743,19 @@ def _render_day_before_email(
 
 def _send_cfc_date_confirmed_alert(shipment: dict, date_str: str):
     subject = f"✅ Ship Date Confirmed — Order #{shipment['order_id']} — {shipment['warehouse']}"
-    html = f"""<p><strong>Order #{shipment['order_id']}</strong> from <strong>{shipment['warehouse']}</strong>
-    has confirmed a ship date of <strong>{date_str}</strong>.</p>
-    <p>The day-before confirmation poll will fire automatically the night before.</p>"""
+    html = f"<p><strong>Order #{shipment['order_id']}</strong> from <strong>{shipment['warehouse']}</strong> confirmed pickup <strong>{date_str}</strong>.</p>"
     _send_raw_email(CFC_INTERNAL_EMAIL, subject, html)
 
 
 def _send_cfc_no_response_alert(shipment: dict, hours: int):
     subject = f"🚨 CALL NEEDED — No Ship Date — Order #{shipment['order_id']} — {shipment['warehouse']}"
-    html = f"""<p style='color:#DC2626;font-weight:700;font-size:16px;'>No ship date received after {hours} hours.</p>
-    <p><strong>Warehouse:</strong> {shipment['warehouse']}<br>
-    <strong>Order:</strong> #{shipment['order_id']}<br>
-    <strong>Action Required:</strong> Call the warehouse now.</p>"""
+    html = f"<p style='color:#DC2626;font-weight:700;'>No ship date received after {hours} hours.</p><p><strong>Order:</strong> #{shipment['order_id']}<br><strong>Action Required:</strong> Call now.</p>"
     _send_raw_email(CFC_INTERNAL_EMAIL, subject, html)
 
 
 def _send_cfc_push_alert(shipment: dict, new_date_str: str, weekday_name: str):
     subject = f"⚠️ CALL NEEDED — {shipment['warehouse']} Pushed Order #{shipment['order_id']} to {weekday_name}"
-    html = f"""<p style='color:#D97706;font-weight:700;'>The warehouse has pushed the pickup date.</p>
-    <p><strong>Warehouse:</strong> {shipment['warehouse']}<br>
-    <strong>Order:</strong> #{shipment['order_id']}<br>
-    <strong>New Date:</strong> {new_date_str} ({weekday_name})<br>
-    <strong>Action Required:</strong> Call them — {weekday_name} is past the acceptable window.</p>"""
+    html = f"<p><strong>Warehouse:</strong> {shipment['warehouse']}<br><strong>New Date:</strong> {new_date_str}<br><strong>Action Required:</strong> Call them.</p>"
     _send_raw_email(CFC_INTERNAL_EMAIL, subject, html)
 
 
@@ -721,15 +769,15 @@ def _send_bol_to_warehouse(
 <body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f5f5;padding:20px;">
 <div style="max-width:560px;margin:0 auto;background:white;border-radius:8px;padding:32px;">
     <h2 style="color:#1a365d;margin-top:0;">Bill of Lading Created — Order #{order_id}</h2>
-    <p>Hi {warehouse_name} team,</p>
-    <p>Your pickup confirmation has been received and the Bill of Lading has been generated.</p>
+    <p>Hi {warehouse_name} team — your pickup has been confirmed and the BOL is ready.</p>
     <table style="width:100%;border-collapse:collapse;font-size:15px;margin:16px 0;">
-        <tr><td style="padding:8px 0;color:#666;width:140px;">PRO Number:</td><td style="font-weight:700;font-size:18px;font-family:monospace;color:#059669;">{pro_number}</td></tr>
+        <tr><td style="padding:8px 0;color:#666;width:140px;">PRO Number:</td>
+            <td style="font-weight:700;font-size:20px;font-family:monospace;color:#059669;">{pro_number}</td></tr>
         <tr><td style="padding:8px 0;color:#666;">Pickup Date:</td><td style="font-weight:600;">{pickup_date}</td></tr>
         <tr><td style="padding:8px 0;color:#666;">Pickup Time:</td><td style="font-weight:600;">{pickup_time}</td></tr>
     </table>
     <p>R+L Carriers will arrive for pickup as scheduled. Please have the shipment ready.</p>
-    {f'<a href="{bol_pdf_url}" style="display:inline-block;background:#1a365d;color:white;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:600;">Track Shipment →</a>' if bol_pdf_url else ''}
+    {f'<a href="{bol_pdf_url}" style="display:inline-block;background:#1a365d;color:white;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:600;margin-top:8px;">View BOL →</a>' if bol_pdf_url else ''}
     <p style="font-size:12px;color:#999;margin-top:24px;">Questions? Call (770) 990-4885.</p>
 </div>
 </body>
@@ -739,13 +787,11 @@ def _send_bol_to_warehouse(
 
 def _send_cfc_bol_fired_alert(shipment: dict, pro_number: str, pickup_date: str, pickup_time: str):
     subject = f"✅ BOL Fired — Order #{shipment['order_id']} — PRO {pro_number}"
-    html = f"""<p><strong>BOL has been generated automatically via warehouse confirmation.</strong></p>
+    html = f"""<p><strong>BOL auto-generated via supplier form.</strong></p>
     <p><strong>Order:</strong> #{shipment['order_id']}<br>
     <strong>Warehouse:</strong> {shipment['warehouse']}<br>
-    <strong>PRO Number:</strong> <span style="font-family:monospace;font-size:16px;color:#059669;">{pro_number}</span><br>
-    <strong>Pickup Date:</strong> {pickup_date}<br>
-    <strong>Pickup Time:</strong> {pickup_time}</p>
-    <p>BOL emailed to warehouse. No action needed.</p>"""
+    <strong>PRO:</strong> <span style="font-family:monospace;color:#059669;">{pro_number}</span><br>
+    <strong>Pickup:</strong> {pickup_date} at {pickup_time}</p>"""
     _send_raw_email(CFC_INTERNAL_EMAIL, subject, html)
 
 
