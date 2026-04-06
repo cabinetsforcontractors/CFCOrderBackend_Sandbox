@@ -3,13 +3,14 @@ supplier_polling_engine.py
 WS6 Phase 9 — Warehouse Polling Engine
 
 Flow:
-  - send_initial_poll()        — fires when admin clicks "Sent to Warehouse"
-  - warehouse_set_date()       — stores pickup date (called from set-date POST)
-  - _confirm_for_immediate_bol() — sets day_before_confirmed + fires BOL (called from set-date POST)
-  - warehouse_set_pickup_time() — day-before flow: stores time + fires BOL
-  - check_all_warehouse_polls() — nightly cron: escalation polls + day-before polls
+  - send_initial_poll()          — fires when admin clicks "Sent to Warehouse"
+  - warehouse_set_date()         — stores pickup date (called from set-date POST)
+  - _confirm_for_immediate_bol() — sets warehouse_confirmed + fires BOL immediately
+  - warehouse_set_pickup_time()  — day-before flow: stores time + fires BOL
+  - check_all_warehouse_polls()  — nightly cron: escalation polls + day-before polls
 
 All public functions return dicts, never raise.
+BOL is fired via HTTP to rl-quote /bol/create (same pattern as bol_routes.py).
 """
 
 import os
@@ -26,6 +27,7 @@ from config import SUPPLIER_INFO
 
 CHECKOUT_BASE_URL = os.environ.get("CHECKOUT_BASE_URL", "https://cfcorderbackend-sandbox.onrender.com").strip()
 CFC_INTERNAL_EMAIL = os.environ.get("WAREHOUSE_NOTIFICATION_EMAIL", "cabinetsforcontractors@gmail.com").strip()
+RL_QUOTE_API_URL = os.environ.get("RL_QUOTE_API_URL", "https://rl-quote-sandbox.onrender.com").strip()
 
 POLL_2_THRESHOLD_HOURS = 24
 POLL_3_THRESHOLD_HOURS = 48
@@ -182,8 +184,10 @@ def warehouse_set_date(token: str, pickup_date_str: str) -> dict:
 
 def _confirm_for_immediate_bol(token: str, pickup_time_str: str) -> dict:
     """
-    Set day_before_confirmed=TRUE, store pickup_time, set warehouse_confirmed,
-    fire BOL, email warehouse, notify CFC. Used when date+time entered at same time.
+    Set warehouse_confirmed + day_before_confirmed, store pickup_time,
+    fire BOL via rl-quote API, email BOL to warehouse, notify CFC.
+    Called when warehouse submits date+time in one form.
+    Always returns dict, never raises.
     """
     try:
         shipment = get_shipment_by_token(token)
@@ -224,15 +228,15 @@ def _confirm_for_immediate_bol(token: str, pickup_time_str: str) -> dict:
             "source": "date_form",
         })
 
-        # Re-fetch shipment to get updated pickup_date
+        # Re-fetch to get updated pickup_date
         shipment = get_shipment_by_token(token)
         if not shipment:
-            return {"success": False, "error": "Could not re-fetch shipment"}
+            return {"success": False, "error": "Could not re-fetch shipment after update"}
 
         pickup_date = shipment.get("pickup_date")
-        pickup_date_str = pickup_date.strftime("%m/%d/%Y") if hasattr(pickup_date, "strftime") else None
+        pickup_date_fmt = pickup_date.strftime("%m/%d/%Y") if hasattr(pickup_date, "strftime") else None
 
-        bol_result = _fire_bol(shipment, pickup_date_str)
+        bol_result = _fire_bol(shipment, pickup_date_fmt)
 
         if bol_result.get("success"):
             pro_number = bol_result.get("pro_number")
@@ -245,21 +249,18 @@ def _confirm_for_immediate_bol(token: str, pickup_time_str: str) -> dict:
                     warehouse_name=shipment["warehouse"],
                     order_id=order_id,
                     pro_number=pro_number,
-                    pickup_date=pickup_date_str,
+                    pickup_date=pickup_date_fmt or "",
                     pickup_time=pickup_time_str,
                     bol_pdf_url=bol_pdf_url,
                 )
 
             try:
-                _send_cfc_bol_fired_alert(shipment, pro_number, pickup_date_str, pickup_time_str)
+                _send_cfc_bol_fired_alert(shipment, pro_number, pickup_date_fmt or "", pickup_time_str)
             except Exception:
                 pass
 
-            return {
-                "success": True,
-                "pro_number": pro_number,
-                "bol_pdf_url": bol_pdf_url,
-            }
+            return {"success": True, "pro_number": pro_number, "bol_pdf_url": bol_pdf_url}
+
         return {"success": False, "error": bol_result.get("error", "BOL generation failed")}
 
     except Exception as e:
@@ -514,8 +515,8 @@ def warehouse_set_pickup_time(token: str, pickup_time_str: str) -> dict:
         })
 
         pickup_date = shipment.get("pickup_date")
-        pickup_date_str = pickup_date.strftime("%m/%d/%Y") if hasattr(pickup_date, "strftime") else None
-        bol_result = _fire_bol(shipment, pickup_date_str)
+        pickup_date_fmt = pickup_date.strftime("%m/%d/%Y") if hasattr(pickup_date, "strftime") else None
+        bol_result = _fire_bol(shipment, pickup_date_fmt)
 
         if bol_result.get("success"):
             pro_number = bol_result.get("pro_number")
@@ -527,12 +528,12 @@ def warehouse_set_pickup_time(token: str, pickup_time_str: str) -> dict:
                     warehouse_name=shipment["warehouse"],
                     order_id=shipment["order_id"],
                     pro_number=pro_number,
-                    pickup_date=pickup_date_str,
+                    pickup_date=pickup_date_fmt or "",
                     pickup_time=pickup_time_str,
                     bol_pdf_url=bol_pdf_url,
                 )
             try:
-                _send_cfc_bol_fired_alert(shipment, pro_number, pickup_date_str, pickup_time_str)
+                _send_cfc_bol_fired_alert(shipment, pro_number, pickup_date_fmt or "", pickup_time_str)
             except Exception:
                 pass
             return {"success": True, "pro_number": pro_number, "bol_pdf_url": bol_pdf_url}
@@ -542,19 +543,22 @@ def warehouse_set_pickup_time(token: str, pickup_time_str: str) -> dict:
 
 
 # =============================================================================
-# BOL FIRE
+# BOL FIRE — calls rl-quote /bol/create via HTTP (same pattern as bol_routes.py)
 # =============================================================================
 
 def _fire_bol(shipment: dict, pickup_date_str: Optional[str]) -> dict:
+    """
+    Build BOL payload and call rl-quote /bol/create via HTTP.
+    Mirrors bol_routes._call_rl_bol_create exactly.
+    On success, writes PRO number + bol_sent to DB.
+    """
     try:
         from bol_routes import BOL_SHIPPER_NAMES, WAREHOUSE_ADDRESSES
-        from bol_api import create_bol
-        import asyncio
 
         warehouse_name = shipment["warehouse"]
         wh_info = WAREHOUSE_ADDRESSES.get(warehouse_name)
         if not wh_info:
-            return {"success": False, "error": f"Unknown warehouse: {warehouse_name}"}
+            return {"success": False, "error": f"Unknown warehouse address: {warehouse_name}"}
 
         shipper_name = BOL_SHIPPER_NAMES.get(warehouse_name, "Cabinets For Contractors")
         consignee_name = shipment.get("company_name") or shipment.get("customer_name") or "Customer"
@@ -562,65 +566,85 @@ def _fire_bol(shipment: dict, pickup_date_str: Optional[str]) -> dict:
         weight = int(float(shipment.get("weight") or 200))
         is_residential = bool(shipment.get("is_residential", True))
 
-        loop = asyncio.new_event_loop()
-        result = loop.run_until_complete(create_bol(
-            shipper_name=shipper_name,
-            shipper_address=wh_info["address"],
-            shipper_city=wh_info["city"],
-            shipper_state=wh_info["state"],
-            shipper_zip=wh_info["zip"],
-            shipper_phone=wh_info["phone"],
-            consignee_name=consignee_name,
-            consignee_address=shipment.get("street") or "",
-            consignee_city=shipment.get("city") or "",
-            consignee_state=shipment.get("state") or "",
-            consignee_zip=dest_zip,
-            consignee_phone=shipment.get("phone") or "",
-            weight_lbs=weight,
-            is_residential=is_residential,
-            order_id=shipment["order_id"],
-            pickup_date=pickup_date_str,
-            special_instructions=f"CFC Order #{shipment['order_id']}",
-        ))
-        loop.close()
+        payload = {
+            "shipper_name": shipper_name,
+            "shipper_address": wh_info["address"],
+            "shipper_city": wh_info["city"],
+            "shipper_state": wh_info["state"],
+            "shipper_zip": wh_info["zip"],
+            "shipper_phone": wh_info["phone"],
+            "consignee_name": consignee_name,
+            "consignee_address": shipment.get("street") or "",
+            "consignee_city": shipment.get("city") or "",
+            "consignee_state": shipment.get("state") or "",
+            "consignee_zip": dest_zip,
+            "consignee_phone": shipment.get("phone") or "",
+            "weight_lbs": weight,
+            "is_residential": is_residential,
+            "order_id": shipment["order_id"],
+            "pieces": 1,
+            "description": "RTA Cabinetry",
+            "pickup_date": pickup_date_str,
+            "special_instructions": f"CFC Order #{shipment['order_id']}",
+        }
 
-        if result.get("success") and result.get("pro_number"):
-            pro_number = result["pro_number"]
-            bol_pdf_url = result.get("bol_pdf_url", "")
-            try:
-                with get_db() as conn:
-                    with conn.cursor() as cur:
-                        cur.execute(
-                            """
-                            UPDATE order_shipments
-                            SET pro_number = %s, bol_url = %s, bol_sent = TRUE,
-                                bol_sent_at = NOW(), status = 'ready_ship', updated_at = NOW()
-                            WHERE shipment_id = %s
-                            """,
-                            (pro_number, bol_pdf_url, shipment["shipment_id"])
-                        )
-                        cur.execute(
-                            """
-                            UPDATE orders
-                            SET bol_sent = TRUE, bol_sent_at = NOW(),
-                                tracking = %s, pro_number = %s, updated_at = NOW()
-                            WHERE order_id = %s
-                            """,
-                            (pro_number, pro_number, shipment["order_id"])
-                        )
-                        cur.execute(
-                            "INSERT INTO order_events (order_id, event_type, event_data, source) "
-                            "VALUES (%s, 'bol_created', %s, 'supplier_polling')",
-                            (shipment["order_id"], json.dumps({
-                                "pro_number": pro_number,
-                                "pickup_date": pickup_date_str,
-                                "triggered_by": "supplier_form",
-                            }))
-                        )
-            except Exception as db_err:
-                print(f"[SUPPLIER_POLL] BOL DB write error: {db_err}")
-            return {"success": True, "pro_number": pro_number, "bol_pdf_url": bol_pdf_url}
-        return {"success": False, "error": result.get("error", "BOL API returned no PRO number")}
+        data = json.dumps(payload).encode()
+        req = urllib.request.Request(
+            f"{RL_QUOTE_API_URL}/bol/create",
+            data=data,
+            method="POST",
+        )
+        req.add_header("Content-Type", "application/json")
+
+        try:
+            with urllib.request.urlopen(req, timeout=45) as resp:
+                result = json.loads(resp.read().decode())
+        except urllib.error.HTTPError as http_err:
+            body = http_err.read().decode()[:300]
+            return {"success": False, "error": f"rl-quote HTTP {http_err.code}: {body}"}
+
+        if not result.get("success") or not result.get("pro_number"):
+            return {"success": False, "error": result.get("error", "No PRO number returned from R+L")}
+
+        pro_number = result["pro_number"]
+        bol_pdf_url = result.get("bol_pdf_url", "")
+
+        # Write to DB
+        try:
+            with get_db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE order_shipments
+                        SET pro_number = %s, bol_url = %s, bol_sent = TRUE,
+                            bol_sent_at = NOW(), status = 'ready_ship', updated_at = NOW()
+                        WHERE shipment_id = %s
+                        """,
+                        (pro_number, bol_pdf_url, shipment["shipment_id"])
+                    )
+                    cur.execute(
+                        """
+                        UPDATE orders
+                        SET bol_sent = TRUE, bol_sent_at = NOW(),
+                            tracking = %s, pro_number = %s, updated_at = NOW()
+                        WHERE order_id = %s
+                        """,
+                        (pro_number, pro_number, shipment["order_id"])
+                    )
+                    cur.execute(
+                        "INSERT INTO order_events (order_id, event_type, event_data, source) "
+                        "VALUES (%s, 'bol_created', %s, 'supplier_polling')",
+                        (shipment["order_id"], json.dumps({
+                            "pro_number": pro_number,
+                            "pickup_date": pickup_date_str,
+                            "triggered_by": "supplier_form",
+                        }))
+                    )
+        except Exception as db_err:
+            print(f"[SUPPLIER_POLL] BOL DB write error (BOL was created): {db_err}")
+
+        return {"success": True, "pro_number": pro_number, "bol_pdf_url": bol_pdf_url}
+
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -682,17 +706,16 @@ def _send_supplier_poll_email(
 ) -> dict:
     if is_critical:
         subject = f"🚨 URGENT — Order #{order_id} Ship Date Required — No Response Received"
-        urgency_line = "<p style='color:#DC2626;font-weight:700;font-size:16px;'>⚠️ We have not received a ship date for this order. Please respond immediately or call (770) 990-4885.</p>"
+        urgency_line = "<p style='color:#DC2626;font-weight:700;font-size:16px;'>⚠️ No ship date received. Please respond immediately or call (770) 990-4885.</p>"
     elif poll_number == 2:
         subject = f"📦 Reminder — Order #{order_id} — When Will This Ship?"
-        urgency_line = "<p style='color:#D97706;font-weight:600;'>We have not yet received a ship date for this order. Please enter one at your earliest convenience.</p>"
+        urgency_line = "<p style='color:#D97706;font-weight:600;'>We have not yet received a ship date. Please enter one at your earliest convenience.</p>"
     else:
         subject = f"📦 Order #{order_id} from Cabinets For Contractors — Ship Date Needed"
-        urgency_line = "<p>Please enter the date this order will be ready for pickup by R+L Carriers.</p>"
+        urgency_line = "<p>Please enter the date and pickup time for this order.</p>"
 
     html = f"""<!DOCTYPE html>
-<html>
-<head><meta charset="UTF-8"></head>
+<html><head><meta charset="UTF-8"></head>
 <body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f5f5;padding:20px;">
 <div style="max-width:560px;margin:0 auto;background:white;border-radius:8px;padding:32px;box-shadow:0 2px 8px rgba(0,0,0,0.1);">
     <h2 style="color:#1a365d;margin-top:0;">Cabinets For Contractors — Order #{order_id}</h2>
@@ -702,14 +725,12 @@ def _send_supplier_poll_email(
         <tr><td style="padding:6px 0;color:#666;">Order Total:</td><td style="font-weight:600;">${order_total:,.2f}</td></tr>
         <tr><td style="padding:6px 0;color:#666;">Warehouse:</td><td>{warehouse_name}</td></tr>
     </table>
-    <p style="font-size:15px;font-weight:600;color:#1a365d;">When will this order be ready for pickup? Please enter the date and pickup time.</p>
     <a href="{form_url}" style="display:inline-block;background:#1a365d;color:white;padding:14px 28px;border-radius:6px;text-decoration:none;font-weight:700;font-size:16px;margin:8px 0;">
         Enter Ship Date &amp; Time →
     </a>
     <p style="font-size:12px;color:#999;margin-top:24px;">Questions? Call (770) 990-4885 or reply to this email.</p>
 </div>
-</body>
-</html>"""
+</body></html>"""
     success = _send_raw_email(to_email=to_email, subject=subject, html_body=html)
     return {"success": success}
 
@@ -719,14 +740,12 @@ def _render_day_before_email(
     date_str: str, yes_url: str, no_url: str
 ) -> str:
     return f"""<!DOCTYPE html>
-<html>
-<head><meta charset="UTF-8"></head>
+<html><head><meta charset="UTF-8"></head>
 <body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f5f5;padding:20px;">
 <div style="max-width:560px;margin:0 auto;background:white;border-radius:8px;padding:32px;box-shadow:0 2px 8px rgba(0,0,0,0.1);">
     <h2 style="color:#1a365d;margin-top:0;">Order #{order_id} — Pickup Tomorrow?</h2>
-    <p>Hi {warehouse_name} team,</p>
     <p>Order <strong>#{order_id}</strong> for <strong>{customer_name}</strong> is scheduled for R+L pickup <strong>tomorrow, {date_str}</strong>.</p>
-    <p style="font-size:16px;font-weight:600;color:#1a365d;">Is this order still on track for tomorrow?</p>
+    <p style="font-size:16px;font-weight:600;color:#1a365d;margin:16px 0;">Is this order still on track for tomorrow?</p>
     <div style="display:flex;gap:12px;margin:20px 0;flex-wrap:wrap;">
         <a href="{yes_url}" style="display:inline-block;background:#059669;color:white;padding:14px 28px;border-radius:6px;text-decoration:none;font-weight:700;font-size:16px;">
             ✅ Yes — Enter Pickup Time →
@@ -737,24 +756,23 @@ def _render_day_before_email(
     </div>
     <p style="font-size:12px;color:#999;">Questions? Call (770) 990-4885.</p>
 </div>
-</body>
-</html>"""
+</body></html>"""
 
 
 def _send_cfc_date_confirmed_alert(shipment: dict, date_str: str):
     subject = f"✅ Ship Date Confirmed — Order #{shipment['order_id']} — {shipment['warehouse']}"
-    html = f"<p><strong>Order #{shipment['order_id']}</strong> from <strong>{shipment['warehouse']}</strong> confirmed pickup <strong>{date_str}</strong>.</p>"
+    html = f"<p><strong>Order #{shipment['order_id']}</strong> — {shipment['warehouse']} — confirmed pickup <strong>{date_str}</strong>.</p>"
     _send_raw_email(CFC_INTERNAL_EMAIL, subject, html)
 
 
 def _send_cfc_no_response_alert(shipment: dict, hours: int):
     subject = f"🚨 CALL NEEDED — No Ship Date — Order #{shipment['order_id']} — {shipment['warehouse']}"
-    html = f"<p style='color:#DC2626;font-weight:700;'>No ship date received after {hours} hours.</p><p><strong>Order:</strong> #{shipment['order_id']}<br><strong>Action Required:</strong> Call now.</p>"
+    html = f"<p style='color:#DC2626;font-weight:700;'>No ship date after {hours}hrs — call now.</p><p><strong>Order:</strong> #{shipment['order_id']}</p>"
     _send_raw_email(CFC_INTERNAL_EMAIL, subject, html)
 
 
 def _send_cfc_push_alert(shipment: dict, new_date_str: str, weekday_name: str):
-    subject = f"⚠️ CALL NEEDED — {shipment['warehouse']} Pushed Order #{shipment['order_id']} to {weekday_name}"
+    subject = f"⚠️ CALL NEEDED — {shipment['warehouse']} Pushed #{shipment['order_id']} to {weekday_name}"
     html = f"<p><strong>Warehouse:</strong> {shipment['warehouse']}<br><strong>New Date:</strong> {new_date_str}<br><strong>Action Required:</strong> Call them.</p>"
     _send_raw_email(CFC_INTERNAL_EMAIL, subject, html)
 
@@ -765,11 +783,10 @@ def _send_bol_to_warehouse(
 ):
     subject = f"📄 BOL Created — Order #{order_id} — PRO {pro_number}"
     html = f"""<!DOCTYPE html>
-<html>
-<body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f5f5;padding:20px;">
+<html><body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f5f5;padding:20px;">
 <div style="max-width:560px;margin:0 auto;background:white;border-radius:8px;padding:32px;">
     <h2 style="color:#1a365d;margin-top:0;">Bill of Lading Created — Order #{order_id}</h2>
-    <p>Hi {warehouse_name} team — your pickup has been confirmed and the BOL is ready.</p>
+    <p>Hi {warehouse_name} team — your pickup is confirmed and the BOL is ready.</p>
     <table style="width:100%;border-collapse:collapse;font-size:15px;margin:16px 0;">
         <tr><td style="padding:8px 0;color:#666;width:140px;">PRO Number:</td>
             <td style="font-weight:700;font-size:20px;font-family:monospace;color:#059669;">{pro_number}</td></tr>
@@ -780,8 +797,7 @@ def _send_bol_to_warehouse(
     {f'<a href="{bol_pdf_url}" style="display:inline-block;background:#1a365d;color:white;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:600;margin-top:8px;">View BOL →</a>' if bol_pdf_url else ''}
     <p style="font-size:12px;color:#999;margin-top:24px;">Questions? Call (770) 990-4885.</p>
 </div>
-</body>
-</html>"""
+</body></html>"""
     _send_raw_email(to_email=to_email, subject=subject, html_body=html)
 
 
