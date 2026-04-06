@@ -4,7 +4,10 @@ FastAPI router for BOL generation — Phase 8.
 
 Admin triggers BOL creation for a specific shipment.
 Calls rl-quote /bol/create, stores PRO number + BOL URL on order_shipments,
-marks bol_sent=TRUE, updates order checkpoint.
+marks bol_sent=TRUE, syncs PRO to orders.tracking, updates order checkpoint.
+
+Blocker 2 fix: BOL requires warehouse_confirmed=TRUE before generating.
+Blocker 3 fix: PRO number written to orders.tracking so alerts engine sees it.
 
 Endpoints:
     POST /bol/{shipment_id}/create   — generate BOL via R+L API  [admin]
@@ -44,7 +47,6 @@ BOL_SHIPPER_NAMES = {
     "Dealer Cabinetry":        "Cabinets For Contractors-D10",
 }
 
-# Warehouse physical addresses — shipper block on BOL
 WAREHOUSE_ADDRESSES = {
     "Cabinetry Distribution":  {"address": "561 Keuka Rd",        "city": "Interlachen",   "state": "FL", "zip": "32148", "phone": "6154106775"},
     "DL Cabinetry":            {"address": "7825 Parramore Rd",   "city": "Jacksonville",  "state": "FL", "zip": "32256", "phone": "9048865000"},
@@ -64,7 +66,6 @@ bol_router = APIRouter(tags=["bol"])
 
 
 def _get_shipment_with_order(shipment_id: str) -> Optional[dict]:
-    """Fetch shipment row joined with order data."""
     with get_db() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
@@ -72,7 +73,8 @@ def _get_shipment_with_order(shipment_id: str) -> Optional[dict]:
                 SELECT s.*,
                        o.customer_name, o.company_name,
                        o.street, o.street2, o.city, o.state, o.zip_code, o.phone,
-                       o.order_total, o.total_weight
+                       o.order_total, o.total_weight,
+                       o.payment_received, o.warehouse_confirmed
                 FROM order_shipments s
                 JOIN orders o ON s.order_id = o.order_id
                 WHERE s.shipment_id = %s
@@ -83,7 +85,6 @@ def _get_shipment_with_order(shipment_id: str) -> Optional[dict]:
 
 
 def _call_rl_bol_create(payload: dict) -> dict:
-    """POST to rl-quote /bol/create and return the result dict."""
     data = json.dumps(payload).encode()
     req = urllib.request.Request(
         f"{RL_QUOTE_API_URL}/bol/create",
@@ -104,31 +105,31 @@ def create_bol_for_shipment(
     """
     Generate a Bill of Lading for a shipment via R+L API.
 
-    - Reads shipment + order data from DB
-    - Determines shipper name ("Cabinets For Contractors-{code}") from warehouse
-    - Calls rl-quote /bol/create
-    - Stores pro_number, bol_url, marks bol_sent=TRUE on order_shipments
-    - Marks bol_sent checkpoint on orders table
+    BLOCKER 2 FIX: Requires payment_received=TRUE AND warehouse_confirmed=TRUE.
+    BOL can only be generated after the warehouse has confirmed they have the order.
 
-    pickup_date: optional MM/DD/YYYY — defaults to today if not supplied
+    BLOCKER 3 FIX: PRO number is written to both order_shipments.pro_number AND
+    orders.tracking so the alerts engine's 'ready_ship_long' rule resolves correctly.
+
+    pickup_date: optional MM/DD/YYYY — defaults to today if not supplied.
     """
     shipment = _get_shipment_with_order(shipment_id)
     if not shipment:
         raise HTTPException(status_code=404, detail=f"Shipment {shipment_id} not found")
 
-    # Must have payment received before BOL
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT payment_received FROM orders WHERE order_id = %s",
-                (shipment["order_id"],)
-            )
-            row = cur.fetchone()
-            if not row or not row[0]:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Cannot generate BOL — payment not yet received for this order"
-                )
+    # BLOCKER 2 FIX — enforce correct step order
+    if not shipment.get("payment_received"):
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot generate BOL — payment not yet received for this order"
+        )
+
+    if not shipment.get("warehouse_confirmed"):
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot generate BOL — warehouse has not yet confirmed this order. "
+                   "Mark 'Warehouse Confirmed' in the admin panel first."
+        )
 
     if shipment.get("bol_sent"):
         raise HTTPException(
@@ -145,13 +146,9 @@ def create_bol_for_shipment(
         )
 
     shipper_name = BOL_SHIPPER_NAMES.get(warehouse_name, "Cabinets For Contractors")
-
-    # Consignee from order
     consignee_name = shipment.get("company_name") or shipment.get("customer_name") or "Customer"
     dest_zip = (shipment.get("zip_code") or "").split("-")[0][:5]
-
     weight = int(float(shipment.get("weight") or shipment.get("total_weight") or 200))
-
     is_residential = bool(shipment.get("is_residential", True))
 
     payload = {
@@ -190,7 +187,7 @@ def create_bol_for_shipment(
     pro_number = result["pro_number"]
     bol_pdf_url = result.get("bol_pdf_url", "")
 
-    # Save to DB
+    # Save to DB — both shipment record and orders table
     with get_db() as conn:
         with conn.cursor() as cur:
             # Update order_shipments
@@ -208,16 +205,20 @@ def create_bol_for_shipment(
                 (pro_number, bol_pdf_url, shipment_id),
             )
 
-            # Mark bol_sent checkpoint on orders
+            # BLOCKER 3 FIX: write PRO to orders.tracking AND orders.pro_number
+            # The alerts engine 'ready_ship_long' checks orders.tracking.
+            # Without this, the alert fires on every BOL'd order indefinitely.
             cur.execute(
                 """
                 UPDATE orders
                 SET bol_sent = TRUE,
                     bol_sent_at = NOW(),
+                    tracking = %s,
+                    pro_number = %s,
                     updated_at = NOW()
                 WHERE order_id = %s
                 """,
-                (shipment["order_id"],),
+                (pro_number, pro_number, shipment["order_id"]),
             )
 
             # Log event
