@@ -1,25 +1,23 @@
 """
-CFC Order Workflow Backend - v6.3.0
-Phase 8: BOL generation added (bol_routes.py).
+CFC Order Workflow Backend - v6.4.0
+Phase 9: Supplier polling engine added (supplier_routes.py, supplier_polling_engine.py).
 
 Module Map:
-  orders_routes.py    — /orders /shipments /warehouse-mapping /trusted-customers
-  shipping_routes.py  — /rl /shippo /rta
-  alerts_routes.py    — /alerts/*
-  detection_routes.py — /parse-email /detect-* /check-payment-alerts
-  sync_routes.py      — /b2bwave/* /gmail/* /square/*
-  migration_routes.py — /init-db /add-* /fix-* /debug/orders-columns
-  checkout_routes.py  — /checkout* /checkout-ui/* /webhook/*
-  bol_routes.py       — /bol/{shipment_id}/create  /bol/{shipment_id}/status
-  invoice_routes.py   — /invoice/scan /invoice/status /invoice/emails /invoice/flags
-  routes/audit.py     — /audit/log (POST write, GET read)
-  auth.py             — require_admin Depends() — X-Admin-Token or Bearer JWT
-  rate_limit.py       — shared slowapi Limiter instance
+  orders_routes.py         — /orders /shipments /warehouse-mapping /trusted-customers
+  shipping_routes.py       — /rl /shippo /rta
+  alerts_routes.py         — /alerts/*
+  detection_routes.py      — /parse-email /detect-* /check-payment-alerts
+  sync_routes.py           — /b2bwave/* /gmail/* /square/*
+  migration_routes.py      — /init-db /add-* /fix-* /debug/orders-columns
+  checkout_routes.py       — /checkout* /checkout-ui/* /webhook/*
+  bol_routes.py            — /bol/{shipment_id}/create  /bol/{shipment_id}/status
+  supplier_routes.py       — /supplier/{token}/* (public) + /supplier/{id}/send-poll [admin]
+  invoice_routes.py        — /invoice/scan /invoice/status /invoice/emails /invoice/flags
+  routes/audit.py          — /audit/log (POST write, GET read)
+  auth.py                  — require_admin Depends() — X-Admin-Token or Bearer JWT
+  rate_limit.py            — shared slowapi Limiter instance
 
-CORS: whitelist only (no wildcard). Add origins via CORS_ORIGINS env var.
-Auth: set ADMIN_JWT_SECRET on Render to enable signed JWTs.
-      Generate token: python -c "from auth import create_admin_token; print(create_admin_token())"
-Rate limits: global default 200/minute per IP. Override per-route with @limiter.limit().
+CORS: whitelist only. Add origins via CORS_ORIGINS env var.
 """
 
 import os
@@ -33,14 +31,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 from rate_limit import limiter
 
-# =============================================================================
-# CONFIG + DB
-# =============================================================================
-
-from config import (
-    AUTO_SYNC_INTERVAL_MINUTES,
-)
-
+from config import AUTO_SYNC_INTERVAL_MINUTES
 from db_helpers import get_db  # noqa: F401
 
 # =============================================================================
@@ -55,36 +46,22 @@ except ImportError:
     print("[STARTUP] sync_service module not found")
 
     def get_sync_status():
-        return {
-            "enabled": False,
-            "interval_minutes": AUTO_SYNC_INTERVAL_MINUTES,
-            "last_sync": None,
-            "running": False,
-        }
+        return {"enabled": False, "interval_minutes": AUTO_SYNC_INTERVAL_MINUTES,
+                "last_sync": None, "running": False}
 
 try:
     from gmail_sync import run_gmail_sync, gmail_configured
 except ImportError:
     print("[STARTUP] gmail_sync module not found, email sync disabled")
-
-    def run_gmail_sync(conn, hours_back=2):
-        return {"status": "disabled", "reason": "module_not_found"}
-
-    def gmail_configured():
-        return False
-
+    def run_gmail_sync(conn, hours_back=2): return {"status": "disabled", "reason": "module_not_found"}
+    def gmail_configured(): return False
 
 try:
     from square_sync import run_square_sync, square_configured
 except ImportError:
     print("[STARTUP] square_sync module not found, payment sync disabled")
-
-    def run_square_sync(conn, hours_back=24):
-        return {"status": "disabled", "reason": "module_not_found"}
-
-    def square_configured():
-        return False
-
+    def run_square_sync(conn, hours_back=24): return {"status": "disabled", "reason": "module_not_found"}
+    def square_configured(): return False
 
 # =============================================================================
 # ROUTE MODULE IMPORTS
@@ -109,6 +86,7 @@ from sync_routes import sync_router
 from migration_routes import migration_router
 from checkout_routes import checkout_router
 from bol_routes import bol_router
+from supplier_routes import supplier_router
 
 try:
     from invoice_routes import invoice_router
@@ -124,9 +102,8 @@ except ImportError:
     AUDIT_LOADED = False
     print("[STARTUP] routes.audit module not found, audit log disabled")
 
-
 # =============================================================================
-# FASTAPI APP — CORS whitelist
+# FASTAPI APP
 # =============================================================================
 
 _cors_env = os.environ.get("CORS_ORIGINS", "")
@@ -143,7 +120,7 @@ ALLOWED_ORIGINS = [
     "http://127.0.0.1:5173",
 ] + _extra_origins
 
-app = FastAPI(title="CFC Order Workflow", version="6.3.0")
+app = FastAPI(title="CFC Order Workflow", version="6.4.0")
 
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
@@ -176,12 +153,50 @@ app.include_router(sync_router)               # Phase 5B: /b2bwave/* /gmail/* /s
 app.include_router(migration_router)          # Phase 5B: /init-db /add-* /fix-* /debug/orders-columns
 app.include_router(checkout_router)           # Phase 5B: /checkout* /checkout-ui/* /webhook/*
 app.include_router(bol_router)                # Phase 8:  /bol/{shipment_id}/create  /bol/{shipment_id}/status
+app.include_router(supplier_router)           # Phase 9:  /supplier/{token}/* + /supplier/{id}/send-poll
 
 if INVOICE_LOADED:
     app.include_router(invoice_router)        # WS17: /invoice/scan /status /emails /flags
 
 if AUDIT_LOADED:
     app.include_router(audit_router)          # Phase 5: /audit/log
+
+
+# =============================================================================
+# MIGRATION ENDPOINT — supplier polling columns
+# =============================================================================
+
+from fastapi import Depends
+from auth import require_admin
+
+@app.post("/add-supplier-poll-columns")
+def add_supplier_poll_columns(_: bool = Depends(require_admin)):
+    """Add supplier polling columns to order_shipments. Phase 9."""
+    try:
+        from add_supplier_polling_columns import add_supplier_polling_columns
+        return add_supplier_polling_columns()
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+# =============================================================================
+# LIFECYCLE / POLLING CRON ENDPOINT
+# =============================================================================
+
+@app.post("/lifecycle/run-warehouse-polls")
+def run_warehouse_polls(_: bool = Depends(require_admin)):
+    """
+    Run the warehouse polling engine for all active shipments.
+    Phase 9: checks escalation polls (24hr/48hr no response) and
+    day-before confirmation polls (pickup_date = tomorrow).
+    Wire this to the same nightly cron as /lifecycle/check-all.
+    """
+    try:
+        from supplier_polling_engine import check_all_warehouse_polls
+        result = check_all_warehouse_polls()
+        return {"status": "ok", **result}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 
 # =============================================================================
@@ -205,7 +220,7 @@ def root():
     return {
         "status": "ok",
         "service": "CFC Order Workflow",
-        "version": "6.3.0",
+        "version": "6.4.0",
         "auto_sync": get_sync_status(),
         "gmail_sync": {"enabled": gmail_configured()},
         "square_sync": {"enabled": square_configured()},
@@ -217,12 +232,13 @@ def root():
         "audit_log": {"enabled": AUDIT_LOADED},
         "rate_limiting": {"enabled": True, "default_limit": "200/minute"},
         "bol_generation": {"enabled": True},
+        "supplier_polling": {"enabled": True},
     }
 
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": "6.3.0"}
+    return {"status": "ok", "version": "6.4.0"}
 
 
 if __name__ == "__main__":
