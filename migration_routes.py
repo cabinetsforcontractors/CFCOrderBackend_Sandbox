@@ -23,6 +23,7 @@ try:
         add_address_pending_to_checkouts as _add_address_pending,
         add_address_classification_to_checkouts as _add_address_classification,
         add_bol_columns_to_shipments as _add_bol_columns,
+        add_ws6_supplier_workflow_fields as _add_ws6_fields,
     )
     DB_MIGRATIONS_LOADED = True
 except ImportError:
@@ -122,6 +123,19 @@ def add_bol_columns(_: bool = Depends(require_admin)):
     Phase 8 — BOL generation via R+L API.
     """
     return _run(_add_bol_columns)
+
+
+@migration_router.post("/add-ws6-supplier-fields")
+def add_ws6_supplier_fields(_: bool = Depends(require_admin)):
+    """
+    WS6 Phase 9 — Add supplier workflow columns to order_shipments and orders:
+      order_shipments.quote_number  — R+L rate quote number (saved at checkout, passed in BOL)
+      order_shipments.close_time   — pickup window close time from supplier form
+      order_shipments.pickup_scheduled_email_sent — customer pickup email flag
+      orders.pro_number             — R+L PRO (separate from orders.tracking)
+    Run once after deploy. Safe to re-run.
+    """
+    return _run(_add_ws6_fields)
 
 
 @migration_router.post("/init-db")
