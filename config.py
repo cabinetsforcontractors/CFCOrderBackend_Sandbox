@@ -2,9 +2,6 @@
 config.py
 Centralized configuration for CFC Order Backend.
 All environment variables and constants in one place.
-
-⚠️ SMOKE TEST IN PROGRESS — LI warehouse email swapped to wpjob1@gmail.com
-   Swap back to cabinetrydistribution@gmail.com after test is complete.
 """
 
 import os
@@ -49,7 +46,6 @@ AUTO_SYNC_DAYS_BACK = 7
 
 # =============================================================================
 # SUPPLIER INFO
-# ⚠️ LI email temporarily set to wpjob1@gmail.com for smoke test
 # =============================================================================
 
 SUPPLIER_INFO = {
@@ -57,7 +53,7 @@ SUPPLIER_INFO = {
         'name': 'Cabinetry Distribution',
         'address': '561 Keuka Rd, Interlachen FL 32148',
         'contact': 'Li Yang (615) 410-6775',
-        'email': 'wpjob1@gmail.com'  # SMOKE TEST — restore to cabinetrydistribution@gmail.com
+        'email': 'cabinetrydistribution@gmail.com'
     },
     'DL': {
         'name': 'DL Cabinetry',
