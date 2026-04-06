@@ -1,6 +1,6 @@
 """
-CFC Order Workflow Backend - v6.4.0
-Phase 9: Supplier polling engine added (supplier_routes.py, supplier_polling_engine.py).
+CFC Order Workflow Backend - v6.5.0
+Phase 9: Supplier polling engine — BOL + Pickup Request + delayed email with PDF attachment.
 
 Module Map:
   orders_routes.py         — /orders /shipments /warehouse-mapping /trusted-customers
@@ -120,7 +120,7 @@ ALLOWED_ORIGINS = [
     "http://127.0.0.1:5173",
 ] + _extra_origins
 
-app = FastAPI(title="CFC Order Workflow", version="6.4.0")
+app = FastAPI(title="CFC Order Workflow", version="6.5.0")
 
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
@@ -163,11 +163,12 @@ if AUDIT_LOADED:
 
 
 # =============================================================================
-# MIGRATION ENDPOINT — supplier polling columns
+# MIGRATION ENDPOINTS — Phase 9
 # =============================================================================
 
 from fastapi import Depends
 from auth import require_admin
+
 
 @app.post("/add-supplier-poll-columns")
 def add_supplier_poll_columns(_: bool = Depends(require_admin)):
@@ -179,17 +180,25 @@ def add_supplier_poll_columns(_: bool = Depends(require_admin)):
         return {"status": "error", "message": str(e)}
 
 
+@app.post("/add-close-time-column")
+def add_close_time_column_endpoint(_: bool = Depends(require_admin)):
+    """Add close_time column to order_shipments. Phase 9 — required for Pickup Request."""
+    try:
+        from add_close_time_column import add_close_time_column
+        return add_close_time_column()
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
 # =============================================================================
-# LIFECYCLE / POLLING CRON ENDPOINT
+# LIFECYCLE / POLLING CRON
 # =============================================================================
 
 @app.post("/lifecycle/run-warehouse-polls")
 def run_warehouse_polls(_: bool = Depends(require_admin)):
     """
-    Run the warehouse polling engine for all active shipments.
-    Phase 9: checks escalation polls (24hr/48hr no response) and
-    day-before confirmation polls (pickup_date = tomorrow).
-    Wire this to the same nightly cron as /lifecycle/check-all.
+    Nightly cron: escalation polls (24hr/48hr no response) + day-before confirmation.
+    Wire alongside /lifecycle/check-all.
     """
     try:
         from supplier_polling_engine import check_all_warehouse_polls
@@ -220,7 +229,7 @@ def root():
     return {
         "status": "ok",
         "service": "CFC Order Workflow",
-        "version": "6.4.0",
+        "version": "6.5.0",
         "auto_sync": get_sync_status(),
         "gmail_sync": {"enabled": gmail_configured()},
         "square_sync": {"enabled": square_configured()},
@@ -238,7 +247,7 @@ def root():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": "6.4.0"}
+    return {"status": "ok", "version": "6.5.0"}
 
 
 if __name__ == "__main__":
