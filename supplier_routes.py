@@ -18,7 +18,8 @@ Admin endpoints:
     POST /supplier/{shipment_id}/send-poll  — Manually re-send poll to warehouse [admin]
 """
 
-from fastapi import APIRouter, HTTPException, Depends
+from datetime import date as date_today
+from fastapi import APIRouter, HTTPException, Depends, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from typing import Optional
@@ -81,6 +82,11 @@ def date_form(token: str):
     order_total = float(shipment.get("order_total") or 0)
     existing_date = shipment.get("pickup_date")
     existing_str = existing_date.strftime("%Y-%m-%d") if hasattr(existing_date, "strftime") else ""
+    today_str = date_today.today().isoformat()
+
+    existing_banner = ""
+    if existing_str:
+        existing_banner = f"<div style='background:#d1fae5;border:1px solid #6ee7b7;border-radius:6px;padding:12px;margin-bottom:16px;font-size:14px;color:#065f46;'>Current date on file: <strong>{existing_str}</strong> — you may update it below.</div>"
 
     html = f"""<!DOCTYPE html>
 <html>
@@ -104,13 +110,13 @@ def date_form(token: str):
                  font-size:16px;font-weight:700;cursor:pointer;font-family:inherit; }}
         button:hover {{ background:#153059; }}
         .note {{ font-size:12px;color:#999;margin-top:16px;text-align:center; }}
-        {"" if not existing_str else "<div style='background:#d1fae5;border:1px solid #6ee7b7;border-radius:6px;padding:12px;margin-bottom:16px;font-size:14px;color:#065f46;'>Current date on file: <strong>" + existing_str + "</strong> — you may update it below.</div>"}
     </style>
 </head>
 <body>
 <div class="card">
     <h1>Order #{order_id} — Ship Date</h1>
     <div class="subtitle">Cabinets For Contractors</div>
+    {existing_banner}
     <table>
         <tr><td>Customer:</td><td><strong>{customer}</strong></td></tr>
         <tr><td>Order Total:</td><td><strong>${order_total:,.2f}</strong></td></tr>
@@ -118,8 +124,7 @@ def date_form(token: str):
     </table>
     <form method="POST" action="/supplier/{token}/set-date">
         <label for="pickup_date">When will this order be ready for R+L pickup?</label>
-        <input type="date" id="pickup_date" name="pickup_date" value="{existing_str}" required
-               min="{__import__('datetime').date.today().isoformat()}">
+        <input type="date" id="pickup_date" name="pickup_date" value="{existing_str}" required min="{today_str}">
         <button type="submit">Confirm Ship Date →</button>
     </form>
     <div class="note">Questions? Call (770) 990-4885 or reply to the email you received.</div>
@@ -130,7 +135,7 @@ def date_form(token: str):
 
 
 @supplier_router.post("/supplier/{token}/set-date", response_class=HTMLResponse)
-async def set_date(token: str, request: __import__("fastapi").Request):
+async def set_date(token: str, request: Request):
     """Warehouse submits expected ship date."""
     form = await request.form()
     pickup_date_str = form.get("pickup_date", "")
@@ -233,7 +238,7 @@ def confirm_tomorrow(token: str):
 
 
 @supplier_router.post("/supplier/{token}/set-time", response_class=HTMLResponse)
-async def set_time(token: str, request: __import__("fastapi").Request):
+async def set_time(token: str, request: Request):
     """Warehouse submits pickup time → fires BOL."""
     form = await request.form()
     pickup_time_str = form.get("pickup_time", "")
@@ -277,6 +282,7 @@ def push_date_form(token: str):
     order_id = shipment["order_id"]
     pickup_date = shipment.get("pickup_date")
     old_date_display = pickup_date.strftime("%A, %B %d") if hasattr(pickup_date, "strftime") else "the scheduled date"
+    today_str = date_today.today().isoformat()
 
     html = f"""<!DOCTYPE html>
 <html>
@@ -306,8 +312,7 @@ def push_date_form(token: str):
     Please enter the new expected date below.</div>
     <form method="POST" action="/supplier/{token}/submit-push-date">
         <label for="new_date">New Expected Pickup Date</label>
-        <input type="date" id="new_date" name="new_date" required
-               min="{__import__('datetime').date.today().isoformat()}">
+        <input type="date" id="new_date" name="new_date" required min="{today_str}">
         <button type="submit">Submit New Date →</button>
     </form>
     <div class="note">Questions? Call (770) 990-4885.</div>
@@ -318,7 +323,7 @@ def push_date_form(token: str):
 
 
 @supplier_router.post("/supplier/{token}/submit-push-date", response_class=HTMLResponse)
-async def submit_push_date(token: str, request: __import__("fastapi").Request):
+async def submit_push_date(token: str, request: Request):
     """Warehouse submits a new date after pushing."""
     form = await request.form()
     new_date_str = form.get("new_date", "")
