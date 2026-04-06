@@ -30,9 +30,10 @@ from supplier_polling_engine import (
 
 supplier_router = APIRouter(tags=["supplier"])
 
+CFC_EMAIL = "orders@cabinetsforcontractors.net"
+
 
 def _time_options(selected: str = "", start_hour: int = 7, end_hour: int = 17) -> str:
-    """Generate 15-minute increment time options."""
     opts = ['<option value="">— Select time —</option>']
     for hour in range(start_hour, end_hour + 1):
         for minute in (0, 15, 30, 45):
@@ -54,7 +55,7 @@ def _error_page(message: str, title: str = "Error") -> str:
 <style>body{{font-family:-apple-system,sans-serif;background:#f5f5f5;padding:40px;text-align:center;}}
 .card{{max-width:480px;margin:0 auto;background:white;border-radius:8px;padding:40px;box-shadow:0 2px 8px rgba(0,0,0,.1);}}</style>
 </head><body><div class="card"><h2>⚠️ {title}</h2><p>{message}</p>
-<p style="font-size:14px;color:#666;">Questions? Call (770) 990-4885</p></div></body></html>"""
+<p style="font-size:14px;color:#666;">Questions? <a href="mailto:{CFC_EMAIL}">{CFC_EMAIL}</a></p></div></body></html>"""
 
 
 def _success_page(title: str, message: str, extra_html: str = "") -> str:
@@ -68,7 +69,7 @@ p{{color:#4a5568;font-size:15px;line-height:1.7;}}
 .contact{{margin-top:24px;font-size:13px;color:#999;}}</style>
 </head><body><div class="card"><div class="ok">✅</div>
 <h2>{title}</h2><p>{message}</p>{extra_html}
-<div class="contact">Questions? Call (770) 990-4885</div>
+<div class="contact">Questions? <a href="mailto:{CFC_EMAIL}" style="color:#1a365d;">{CFC_EMAIL}</a></div>
 </div></body></html>"""
 
 
@@ -78,8 +79,6 @@ _FORM_STYLE = """
     .card{max-width:560px;margin:0 auto;background:white;border-radius:10px;padding:36px;box-shadow:0 2px 12px rgba(0,0,0,.1);}
     h1{color:#1a365d;font-size:22px;margin-bottom:6px;}
     .subtitle{color:#718096;font-size:14px;margin-bottom:24px;}
-    table{width:100%;border-collapse:collapse;font-size:14px;margin-bottom:24px;}
-    td{padding:6px 0;color:#4a5568;} td:first-child{color:#718096;width:130px;}
     label{display:block;font-weight:600;color:#1a365d;margin-bottom:6px;font-size:14px;}
     .field{margin-bottom:18px;}
     .field-row{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:18px;}
@@ -87,9 +86,30 @@ _FORM_STYLE = """
     input[type=date]:focus,select:focus{outline:none;border-color:#2563eb;}
     hr{border:none;border-top:1px solid #e2e8f0;margin:18px 0;}
     .bol-note{background:#EFF6FF;border:1px solid #BFDBFE;border-radius:6px;padding:10px 14px;font-size:13px;color:#1E40AF;margin-bottom:18px;}
-    button{width:100%;background:#059669;color:white;padding:14px;border:none;border-radius:6px;font-size:16px;font-weight:700;cursor:pointer;font-family:inherit;}
+    button{width:100%;background:#059669;color:white;padding:14px;border:none;border-radius:6px;font-size:16px;font-weight:700;cursor:pointer;font-family:inherit;display:flex;align-items:center;justify-content:center;gap:10px;}
     button:hover{background:#047857;}
+    button:disabled{background:#6b7280;cursor:not-allowed;}
+    .spinner{display:none;width:18px;height:18px;border:3px solid rgba(255,255,255,.4);border-top-color:white;border-radius:50%;animation:spin .7s linear infinite;}
+    @keyframes spin{to{transform:rotate(360deg)}}
     .note{font-size:12px;color:#999;margin-top:16px;text-align:center;}
+    .contact{font-size:12px;color:#999;margin-top:12px;text-align:center;}
+"""
+
+_SPINNER_JS = """
+<script>
+document.querySelectorAll('form').forEach(function(form) {
+  form.addEventListener('submit', function() {
+    var btn = form.querySelector('button[type=submit]');
+    if (btn) {
+      btn.disabled = true;
+      var spinner = btn.querySelector('.spinner');
+      if (spinner) spinner.style.display = 'block';
+      var label = btn.querySelector('.btn-label');
+      if (label) label.textContent = 'Processing...';
+    }
+  });
+});
+</script>
 """
 
 
@@ -104,9 +124,6 @@ def date_form(token: str):
         return HTMLResponse(_error_page("This link is invalid or has expired."), status_code=404)
 
     order_id = shipment["order_id"]
-    warehouse = shipment["warehouse"]
-    customer = shipment.get("company_name") or shipment.get("customer_name") or "Customer"
-    order_total = float(shipment.get("order_total") or 0)
     existing_date = shipment.get("pickup_date")
     existing_str = existing_date.strftime("%Y-%m-%d") if hasattr(existing_date, "strftime") else ""
     existing_time = shipment.get("pickup_time") or ""
@@ -119,20 +136,15 @@ def date_form(token: str):
 
     html = f"""<!DOCTYPE html>
 <html><head>
-    <title>Order #{order_id} — Ship Date &amp; Times</title>
+    <title>Order #{order_id} — Pickup Schedule</title>
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <style>{_FORM_STYLE}</style>
 </head><body>
 <div class="card">
     <h1>Order #{order_id}</h1>
-    <div class="subtitle">Cabinets For Contractors — Ship Date &amp; Pickup Times</div>
+    <div class="subtitle">Cabinets For Contractors — Pickup Schedule</div>
     {existing_banner}
-    <table>
-        <tr><td>Customer:</td><td><strong>{customer}</strong></td></tr>
-        <tr><td>Order Total:</td><td><strong>${order_total:,.2f}</strong></td></tr>
-        <tr><td>Warehouse:</td><td>{warehouse}</td></tr>
-    </table>
-    <div class="bol-note">📄 R+L Carriers pickup will be scheduled automatically. The BOL will be emailed to you — allow up to 10 minutes for delivery.</div>
+    <div class="bol-note">📄 R+L Carriers pickup will be scheduled automatically. The BOL will be emailed to you — allow up to 10 minutes.</div>
     <form method="POST" action="/supplier/{token}/set-date">
         <div class="field">
             <label for="pickup_date">Pickup Date</label>
@@ -141,7 +153,7 @@ def date_form(token: str):
         <hr>
         <div class="field-row">
             <div>
-                <label for="pickup_time">Ready Time <span style="font-weight:400;color:#718096;">(when shipment is ready)</span></label>
+                <label for="pickup_time">Ready Time <span style="font-weight:400;color:#718096;">(when ready)</span></label>
                 <select id="pickup_time" name="pickup_time" required>
                     {_time_options(existing_time)}
                 </select>
@@ -153,21 +165,17 @@ def date_form(token: str):
                 </select>
             </div>
         </div>
-        <button type="submit">Confirm &amp; Schedule Pickup →</button>
+        <button type="submit"><span class="btn-label">Confirm &amp; Schedule Pickup →</span><span class="spinner"></span></button>
     </form>
-    <div class="note">Questions? Call (770) 990-4885 or reply to the email you received.</div>
+    <div class="contact">Questions? <a href="mailto:{CFC_EMAIL}" style="color:#1a365d;">{CFC_EMAIL}</a></div>
 </div>
+{_SPINNER_JS}
 </body></html>"""
     return HTMLResponse(html)
 
 
 @supplier_router.post("/supplier/{token}/set-date", response_class=HTMLResponse)
 async def set_date(token: str, request: Request, background_tasks: BackgroundTasks):
-    """
-    Warehouse submits date + ready time + close time.
-    BOL and Pickup Request fire immediately.
-    Email with BOL PDF is sent as a background task (~2-7 min, real R+L PDF or fallback).
-    """
     try:
         form = await request.form()
         pickup_date_str = form.get("pickup_date", "")
@@ -183,12 +191,10 @@ async def set_date(token: str, request: Request, background_tasks: BackgroundTas
     if not close_time_str:
         return HTMLResponse(_error_page("Please select a close time."), status_code=400)
 
-    # Store date
     date_result = warehouse_set_date(token, pickup_date_str)
     if not date_result.get("success"):
-        return HTMLResponse(_error_page(date_result.get("error", "Could not save date. Call (770) 990-4885.")), status_code=400)
+        return HTMLResponse(_error_page(date_result.get("error", "Could not save date.")), status_code=400)
 
-    # Fire BOL + Pickup Request
     result = process_bol_and_pickup(token, pickup_time_str, close_time_str)
 
     try:
@@ -202,10 +208,9 @@ async def set_date(token: str, request: Request, background_tasks: BackgroundTas
             title="Date Confirmed",
             message=f"Pickup date recorded as <strong>{date_display}</strong> at <strong>{pickup_time_str}</strong>.<br><br>"
                     f"⚠️ BOL could not be auto-generated: {result.get('error', 'unknown')}. "
-                    f"Please call (770) 990-4885.",
+                    f"Please email us.",
         ))
 
-    # Schedule delayed email as background task
     background_tasks.add_task(
         _delayed_bol_email,
         to_email=result["supplier_email"],
@@ -218,9 +223,15 @@ async def set_date(token: str, request: Request, background_tasks: BackgroundTas
         shipment=result["shipment"],
     )
 
+    # Show pickup confirmation OR the raw error for debugging
+    pickup_confirmation = result.get("pickup_confirmation")
     pickup_note = ""
-    if result.get("pickup_confirmation"):
-        pickup_note = f"<p style='font-size:13px;color:#059669;margin-top:4px;'>R+L Pickup Confirmation: <strong>{result['pickup_confirmation']}</strong></p>"
+    if pickup_confirmation:
+        pickup_note = f"<p style='font-size:13px;color:#059669;margin-top:4px;'>R+L Pickup ID: <strong>{pickup_confirmation}</strong></p>"
+    else:
+        # Surface the error so we can debug — remove once pickup is confirmed working
+        pickup_err = result.get("pickup_error", "no error returned")
+        pickup_note = f"<p style='font-size:12px;color:#DC2626;margin-top:4px;'>⚠️ Pickup scheduling failed: {pickup_err}</p>"
 
     return HTMLResponse(_success_page(
         title="You're All Set",
@@ -262,12 +273,8 @@ def confirm_tomorrow(token: str):
 <div class="card">
     <h1>Order #{order_id} — Confirm Pickup Times</h1>
     <div style="background:#d1fae5;border:1px solid #6ee7b7;border-radius:6px;padding:12px;color:#065f46;font-weight:600;font-size:14px;margin-bottom:20px;">
-        ✅ Confirmed — Order is on track for {date_display}
+        ✅ Confirmed — on track for {date_display}
     </div>
-    <p style="color:#4a5568;font-size:14px;margin-bottom:20px;">
-        Enter the ready time and latest close time for R+L pickup.
-        The BOL will be emailed to you within 10 minutes.
-    </p>
     <div class="bol-note">📄 R+L Carriers pickup will be scheduled automatically when you submit.</div>
     <form method="POST" action="/supplier/{token}/set-time">
         <div class="field-row">
@@ -284,17 +291,17 @@ def confirm_tomorrow(token: str):
                 </select>
             </div>
         </div>
-        <button type="submit">Schedule Pickup &amp; Generate BOL →</button>
+        <button type="submit"><span class="btn-label">Schedule Pickup &amp; Generate BOL →</span><span class="spinner"></span></button>
     </form>
-    <div class="note">Questions? Call (770) 990-4885.</div>
+    <div class="contact">Questions? <a href="mailto:{CFC_EMAIL}" style="color:#1a365d;">{CFC_EMAIL}</a></div>
 </div>
+{_SPINNER_JS}
 </body></html>"""
     return HTMLResponse(html)
 
 
 @supplier_router.post("/supplier/{token}/set-time", response_class=HTMLResponse)
 async def set_time(token: str, request: Request, background_tasks: BackgroundTasks):
-    """Day-before time entry — fires BOL + Pickup Request, schedules delayed email."""
     try:
         form = await request.form()
         pickup_time_str = form.get("pickup_time", "")
@@ -305,12 +312,11 @@ async def set_time(token: str, request: Request, background_tasks: BackgroundTas
     if not pickup_time_str:
         return HTMLResponse(_error_page("Please select a ready time."), status_code=400)
 
-    # Use process_bol_and_pickup for day-before flow too (it handles day_before_confirmed internally)
     result = process_bol_and_pickup(token, pickup_time_str, close_time_str)
 
     if not result.get("success"):
         return HTMLResponse(_error_page(
-            f"Could not generate BOL: {result.get('error', 'Unknown error')}. Call (770) 990-4885."
+            f"Could not generate BOL: {result.get('error', 'Unknown error')}. Please email us."
         ), status_code=500)
 
     background_tasks.add_task(
@@ -325,14 +331,18 @@ async def set_time(token: str, request: Request, background_tasks: BackgroundTas
         shipment=result["shipment"],
     )
 
+    pickup_confirmation = result.get("pickup_confirmation")
     pickup_note = ""
-    if result.get("pickup_confirmation"):
-        pickup_note = f"<p style='font-size:13px;color:#059669;'>R+L Pickup Confirmation: <strong>{result['pickup_confirmation']}</strong></p>"
+    if pickup_confirmation:
+        pickup_note = f"<p style='font-size:13px;color:#059669;'>R+L Pickup ID: <strong>{pickup_confirmation}</strong></p>"
+    else:
+        pickup_err = result.get("pickup_error", "no error returned")
+        pickup_note = f"<p style='font-size:12px;color:#DC2626;'>⚠️ Pickup scheduling failed: {pickup_err}</p>"
 
     return HTMLResponse(_success_page(
         title="BOL Created — You're All Set",
         message=f"Pickup confirmed at <strong>{pickup_time_str}</strong> (close: {close_time_str}).<br><br>"
-                f"R+L Carriers has been notified and will arrive for pickup as scheduled.",
+                f"R+L Carriers has been notified.",
         extra_html=f"""{pickup_note}
         <div class="email-note">
             📧 The Bill of Lading will be emailed to you within <strong>10 minutes</strong>.
@@ -359,7 +369,7 @@ def push_date_form(token: str):
 <html><head>
     <title>Order #{order_id} — New Date</title>
     <meta name="viewport" content="width=device-width,initial-scale=1">
-    <style>{_FORM_STYLE.replace('button{width:100%;background:#059669;', 'button{width:100%;background:#DC2626;')}</style>
+    <style>{_FORM_STYLE}</style>
 </head><body>
 <div class="card">
     <h1>Order #{order_id} — New Pickup Date</h1>
@@ -371,10 +381,11 @@ def push_date_form(token: str):
             <label for="new_date">New Expected Pickup Date</label>
             <input type="date" id="new_date" name="new_date" required min="{today_str}">
         </div>
-        <button type="submit" style="background:#DC2626;">Submit New Date →</button>
+        <button type="submit" style="background:#DC2626;"><span class="btn-label">Submit New Date →</span><span class="spinner"></span></button>
     </form>
-    <div class="note">Questions? Call (770) 990-4885.</div>
+    <div class="contact">Questions? <a href="mailto:{CFC_EMAIL}" style="color:#1a365d;">{CFC_EMAIL}</a></div>
 </div>
+{_SPINNER_JS}
 </body></html>"""
     return HTMLResponse(html)
 
@@ -402,7 +413,7 @@ async def submit_push_date(token: str, request: Request):
 
     extra = ""
     if result.get("cfc_alerted"):
-        extra = "<p style='font-size:13px;color:#D97706;margin-top:12px;'>The Cabinets For Contractors team has been notified of the date change.</p>"
+        extra = "<p style='font-size:13px;color:#D97706;margin-top:12px;'>The team has been notified of the date change.</p>"
 
     return HTMLResponse(_success_page(
         title="New Date Recorded",
