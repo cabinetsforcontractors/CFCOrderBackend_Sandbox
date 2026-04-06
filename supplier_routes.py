@@ -1,27 +1,11 @@
 """
 supplier_routes.py
 WS6 Phase 9 — Supplier-facing public HTML endpoints (no login required, token-authenticated)
-
-All endpoints are public — the warehouse receives a link via email and clicks it.
-Token is stored on order_shipments.supplier_token (generated at send-to-warehouse time).
-
-Endpoints:
-    GET  /supplier/{token}/date-form        — HTML form: "When will this ship?"
-    POST /supplier/{token}/set-date         — Warehouse submits expected date
-    GET  /supplier/{token}/confirm-tomorrow — Day-before YES link (warehouse confirms)
-    GET  /supplier/{token}/time-form        — HTML form: "What time will it be ready?"
-    POST /supplier/{token}/set-time         — Warehouse submits pickup time → BOL fires
-    GET  /supplier/{token}/push-date        — Day-before NO link (warehouse enters new date)
-    POST /supplier/{token}/submit-push-date — Warehouse submits new date after pushing
-
-Admin endpoints:
-    POST /supplier/{shipment_id}/send-poll  — Manually re-send poll to warehouse [admin]
 """
 
 from datetime import date as date_today
 from fastapi import APIRouter, HTTPException, Depends, Request
 from fastapi.responses import HTMLResponse
-from pydantic import BaseModel
 from typing import Optional
 
 from auth import require_admin
@@ -66,12 +50,11 @@ p{{color:#4a5568;font-size:15px;line-height:1.7;}}
 
 
 # =============================================================================
-# DATE FORM — warehouse enters expected ship date
+# DATE FORM
 # =============================================================================
 
 @supplier_router.get("/supplier/{token}/date-form", response_class=HTMLResponse)
 def date_form(token: str):
-    """Serve the ship date entry form to the warehouse."""
     shipment = get_shipment_by_token(token)
     if not shipment:
         return HTMLResponse(_error_page("This link is invalid or has expired."), status_code=404)
@@ -103,11 +86,9 @@ def date_form(token: str):
         td {{ padding:6px 0;color:#4a5568; }}
         td:first-child {{ color:#718096;width:130px; }}
         label {{ display:block;font-weight:600;color:#1a365d;margin-bottom:6px;font-size:15px; }}
-        input[type=date] {{ width:100%;padding:12px;border:2px solid #e2e8f0;border-radius:6px;
-                           font-size:16px;font-family:inherit;margin-bottom:20px; }}
+        input[type=date] {{ width:100%;padding:12px;border:2px solid #e2e8f0;border-radius:6px;font-size:16px;font-family:inherit;margin-bottom:20px; }}
         input[type=date]:focus {{ outline:none;border-color:#2563eb; }}
-        button {{ width:100%;background:#1a365d;color:white;padding:14px;border:none;border-radius:6px;
-                 font-size:16px;font-weight:700;cursor:pointer;font-family:inherit; }}
+        button {{ width:100%;background:#1a365d;color:white;padding:14px;border:none;border-radius:6px;font-size:16px;font-weight:700;cursor:pointer;font-family:inherit; }}
         button:hover {{ background:#153059; }}
         .note {{ font-size:12px;color:#999;margin-top:16px;text-align:center; }}
     </style>
@@ -136,17 +117,22 @@ def date_form(token: str):
 
 @supplier_router.post("/supplier/{token}/set-date", response_class=HTMLResponse)
 async def set_date(token: str, request: Request):
-    """Warehouse submits expected ship date."""
-    form = await request.form()
-    pickup_date_str = form.get("pickup_date", "")
+    try:
+        form = await request.form()
+        pickup_date_str = form.get("pickup_date", "")
+    except Exception as e:
+        return HTMLResponse(_error_page(f"Could not read form data: {str(e)}"), status_code=400)
 
     if not pickup_date_str:
         return HTMLResponse(_error_page("Please enter a date."), status_code=400)
 
-    result = warehouse_set_date(token, pickup_date_str)
+    try:
+        result = warehouse_set_date(token, pickup_date_str)
+    except Exception as e:
+        return HTMLResponse(_error_page(f"An unexpected error occurred: {str(e)}. Please call (770) 990-4885."), status_code=500)
 
     if not result.get("success"):
-        return HTMLResponse(_error_page(result.get("error", "Something went wrong.")), status_code=400)
+        return HTMLResponse(_error_page(result.get("error", "Something went wrong. Please call (770) 990-4885.")), status_code=400)
 
     try:
         from datetime import datetime
@@ -164,12 +150,11 @@ async def set_date(token: str, request: Request):
 
 
 # =============================================================================
-# DAY-BEFORE — YES branch (warehouse confirms, then enters time)
+# DAY-BEFORE — YES branch
 # =============================================================================
 
 @supplier_router.get("/supplier/{token}/confirm-tomorrow", response_class=HTMLResponse)
 def confirm_tomorrow(token: str):
-    """Warehouse clicked YES on day-before poll. Show time entry form."""
     shipment = get_shipment_by_token(token)
     if not shipment:
         return HTMLResponse(_error_page("This link is invalid or has expired."), status_code=404)
@@ -192,15 +177,11 @@ def confirm_tomorrow(token: str):
         body {{ font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f5f5;padding:24px; }}
         .card {{ max-width:520px;margin:0 auto;background:white;border-radius:10px;padding:36px;box-shadow:0 2px 12px rgba(0,0,0,.1); }}
         h1 {{ color:#1a365d;font-size:22px;margin-bottom:16px; }}
-        .confirmed {{ background:#d1fae5;border:1px solid #6ee7b7;border-radius:6px;padding:12px 16px;
-                     color:#065f46;font-weight:600;font-size:14px;margin-bottom:20px; }}
+        .confirmed {{ background:#d1fae5;border:1px solid #6ee7b7;border-radius:6px;padding:12px 16px;color:#065f46;font-weight:600;font-size:14px;margin-bottom:20px; }}
         label {{ display:block;font-weight:600;color:#1a365d;margin-bottom:6px;font-size:15px; }}
-        select {{ width:100%;padding:12px;border:2px solid #e2e8f0;border-radius:6px;
-                 font-size:16px;font-family:inherit;margin-bottom:20px;background:white; }}
+        select {{ width:100%;padding:12px;border:2px solid #e2e8f0;border-radius:6px;font-size:16px;font-family:inherit;margin-bottom:20px;background:white; }}
         select:focus {{ outline:none;border-color:#2563eb; }}
-        button {{ width:100%;background:#059669;color:white;padding:14px;border:none;border-radius:6px;
-                 font-size:16px;font-weight:700;cursor:pointer;font-family:inherit; }}
-        button:hover {{ background:#047857; }}
+        button {{ width:100%;background:#059669;color:white;padding:14px;border:none;border-radius:6px;font-size:16px;font-weight:700;cursor:pointer;font-family:inherit; }}
         .note {{ font-size:12px;color:#999;margin-top:16px;text-align:center; }}
     </style>
 </head>
@@ -239,14 +220,19 @@ def confirm_tomorrow(token: str):
 
 @supplier_router.post("/supplier/{token}/set-time", response_class=HTMLResponse)
 async def set_time(token: str, request: Request):
-    """Warehouse submits pickup time → fires BOL."""
-    form = await request.form()
-    pickup_time_str = form.get("pickup_time", "")
+    try:
+        form = await request.form()
+        pickup_time_str = form.get("pickup_time", "")
+    except Exception as e:
+        return HTMLResponse(_error_page(f"Could not read form data: {str(e)}"), status_code=400)
 
     if not pickup_time_str:
         return HTMLResponse(_error_page("Please select a pickup time."), status_code=400)
 
-    result = warehouse_set_pickup_time(token, pickup_time_str)
+    try:
+        result = warehouse_set_pickup_time(token, pickup_time_str)
+    except Exception as e:
+        return HTMLResponse(_error_page(f"An unexpected error occurred: {str(e)}. Please call (770) 990-4885."), status_code=500)
 
     if not result.get("success"):
         return HTMLResponse(_error_page(
@@ -254,13 +240,11 @@ async def set_time(token: str, request: Request):
         ), status_code=500)
 
     pro_number = result.get("pro_number", "")
-
     return HTMLResponse(_success_page(
         title="Bill of Lading Created",
         message=f"The Bill of Lading has been created and R+L Carriers has been notified.<br><br>"
                 f"Pickup is scheduled for <strong>{pickup_time_str}</strong>.",
-        extra_html=f"""<div style="background:#f0fdf4;border:1px solid #86efac;border-radius:8px;
-                       padding:16px;margin:16px 0;">
+        extra_html=f"""<div style="background:#f0fdf4;border:1px solid #86efac;border-radius:8px;padding:16px;margin:16px 0;">
             <div style="font-size:12px;color:#666;margin-bottom:4px;">PRO Number (R+L Tracking)</div>
             <div style="font-size:22px;font-weight:700;font-family:monospace;color:#059669;">{pro_number}</div>
         </div>
@@ -269,12 +253,11 @@ async def set_time(token: str, request: Request):
 
 
 # =============================================================================
-# DAY-BEFORE — NO branch (warehouse pushes date)
+# DAY-BEFORE — NO branch
 # =============================================================================
 
 @supplier_router.get("/supplier/{token}/push-date", response_class=HTMLResponse)
 def push_date_form(token: str):
-    """Warehouse clicked NO on day-before poll. Show new date form."""
     shipment = get_shipment_by_token(token)
     if not shipment:
         return HTMLResponse(_error_page("This link is invalid or has expired."), status_code=404)
@@ -294,14 +277,11 @@ def push_date_form(token: str):
         body {{ font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f5f5;padding:24px; }}
         .card {{ max-width:520px;margin:0 auto;background:white;border-radius:10px;padding:36px;box-shadow:0 2px 12px rgba(0,0,0,.1); }}
         h1 {{ color:#1a365d;font-size:22px;margin-bottom:16px; }}
-        .notice {{ background:#fffbeb;border:1px solid #fcd34d;border-radius:6px;padding:12px 16px;
-                  color:#92400e;font-size:14px;margin-bottom:20px; }}
+        .notice {{ background:#fffbeb;border:1px solid #fcd34d;border-radius:6px;padding:12px 16px;color:#92400e;font-size:14px;margin-bottom:20px; }}
         label {{ display:block;font-weight:600;color:#1a365d;margin-bottom:6px;font-size:15px; }}
-        input[type=date] {{ width:100%;padding:12px;border:2px solid #e2e8f0;border-radius:6px;
-                           font-size:16px;font-family:inherit;margin-bottom:20px; }}
+        input[type=date] {{ width:100%;padding:12px;border:2px solid #e2e8f0;border-radius:6px;font-size:16px;font-family:inherit;margin-bottom:20px; }}
         input[type=date]:focus {{ outline:none;border-color:#2563eb; }}
-        button {{ width:100%;background:#DC2626;color:white;padding:14px;border:none;border-radius:6px;
-                 font-size:16px;font-weight:700;cursor:pointer;font-family:inherit; }}
+        button {{ width:100%;background:#DC2626;color:white;padding:14px;border:none;border-radius:6px;font-size:16px;font-weight:700;cursor:pointer;font-family:inherit; }}
         .note {{ font-size:12px;color:#999;margin-top:16px;text-align:center; }}
     </style>
 </head>
@@ -324,14 +304,19 @@ def push_date_form(token: str):
 
 @supplier_router.post("/supplier/{token}/submit-push-date", response_class=HTMLResponse)
 async def submit_push_date(token: str, request: Request):
-    """Warehouse submits a new date after pushing."""
-    form = await request.form()
-    new_date_str = form.get("new_date", "")
+    try:
+        form = await request.form()
+        new_date_str = form.get("new_date", "")
+    except Exception as e:
+        return HTMLResponse(_error_page(f"Could not read form data: {str(e)}"), status_code=400)
 
     if not new_date_str:
         return HTMLResponse(_error_page("Please enter a new date."), status_code=400)
 
-    result = warehouse_push_date(token, new_date_str)
+    try:
+        result = warehouse_push_date(token, new_date_str)
+    except Exception as e:
+        return HTMLResponse(_error_page(f"An unexpected error occurred: {str(e)}."), status_code=500)
 
     if not result.get("success"):
         return HTMLResponse(_error_page(result.get("error", "Something went wrong.")), status_code=400)
@@ -343,9 +328,8 @@ async def submit_push_date(token: str, request: Request):
     except Exception:
         date_display = new_date_str
 
-    cfc_alerted = result.get("cfc_alerted", False)
     extra = ""
-    if cfc_alerted:
+    if result.get("cfc_alerted"):
         extra = "<p style='font-size:13px;color:#D97706;margin-top:12px;'>The Cabinets For Contractors team has been notified of the date change.</p>"
 
     return HTMLResponse(_success_page(
@@ -362,7 +346,6 @@ async def submit_push_date(token: str, request: Request):
 
 @supplier_router.post("/supplier/{shipment_id}/send-poll")
 def admin_send_poll(shipment_id: str, _: bool = Depends(require_admin)):
-    """Admin manually sends or re-sends the initial poll to the warehouse."""
     result = send_initial_poll(shipment_id)
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("error"))
