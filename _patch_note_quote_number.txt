@@ -1,0 +1,16 @@
+                            if not wh_cur.fetchone():
+                                    ship_quote_number = (
+                                        (ship.get('quote') or {}).get('quote', {}).get('quote_number') or
+                                        (ship.get('quote') or {}).get('quote_number') or
+                                        ''
+                                    )
+                                    wh_cur.execute(
+                                        """INSERT INTO order_shipments
+                                           (order_id, shipment_id, warehouse, status, origin_zip,
+                                            weight, has_oversized, is_residential, quote_number)
+                                           VALUES (%s, %s, %s, 'needs_order', %s, %s, %s, %s, %s)""",
+                                        (str(order_id), ship_id, wh_name,
+                                         ship.get('origin_zip', ''), ship.get('weight'),
+                                         ship.get('is_oversized', False), validation['is_residential'],
+                                         ship_quote_number)
+                                    )
