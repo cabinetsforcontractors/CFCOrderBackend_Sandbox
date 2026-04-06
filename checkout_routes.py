@@ -13,6 +13,9 @@ now marks payment_link_sent=TRUE and payment_link_sent_at=NOW() on the orders ta
 Without this, order_status showed 'needs_payment_link' forever and the alerts engine
 fired 'needs_invoice' on every B2BWave order indefinitely.
 
+WS6 (2026-04-06): Shipment INSERT now saves quote_number from shipping result.
+  quote_number is passed to R+L BOL creation to lock in the quoted rate.
+
 Public endpoints:
     POST /webhook/b2bwave-order
     GET  /checkout/payment-complete
@@ -507,7 +510,7 @@ def b2bwave_order_webhook(payload: dict):
                 print(f"[WEBHOOK] Shipping calc failed for order {order_id}: {se}")
                 shipping_result = None
 
-            # Create shipment records
+            # Create shipment records — save quote_number to lock R+L rate at BOL time
             if shipping_result and shipping_result.get('shipments'):
                 try:
                     with get_db() as wh_conn:
@@ -521,14 +524,20 @@ def b2bwave_order_webhook(payload: dict):
                                 ship_id = f"{order_id}-{wh_name.replace(' & ', '-').replace(' ', '-')}"
                                 wh_cur.execute("SELECT id FROM order_shipments WHERE shipment_id = %s", (ship_id,))
                                 if not wh_cur.fetchone():
+                                    ship_quote_number = (
+                                        (ship.get('quote') or {}).get('quote', {}).get('quote_number') or
+                                        (ship.get('quote') or {}).get('quote_number') or
+                                        ''
+                                    )
                                     wh_cur.execute(
                                         """INSERT INTO order_shipments
                                            (order_id, shipment_id, warehouse, status, origin_zip,
-                                            weight, has_oversized, is_residential)
-                                           VALUES (%s, %s, %s, 'needs_order', %s, %s, %s, %s)""",
+                                            weight, has_oversized, is_residential, quote_number)
+                                           VALUES (%s, %s, %s, 'needs_order', %s, %s, %s, %s, %s)""",
                                         (str(order_id), ship_id, wh_name,
                                          ship.get('origin_zip', ''), ship.get('weight'),
-                                         ship.get('is_oversized', False), validation['is_residential'])
+                                         ship.get('is_oversized', False), validation['is_residential'],
+                                         ship_quote_number)
                                     )
                                     created += 1
                     print(f"[WEBHOOK] {created} shipment records created for order {order_id}")
