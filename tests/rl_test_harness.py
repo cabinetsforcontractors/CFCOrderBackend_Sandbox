@@ -39,7 +39,7 @@ DEFAULT_COUNT = 5  # POC = 5, then scale to 100
 # =============================================================================
 
 WAREHOUSE_INFO = {
-    "LI":               {"name": "Liberty Industries",   "city": "Interlachen",    "state": "FL", "zip": "32148"},
+    "LI":               {"name": "Cabinetry Distribution", "city": "Interlachen",    "state": "FL", "zip": "32148"},
     "DL":               {"name": "DL Cabinetry",         "city": "Jacksonville",   "state": "FL", "zip": "32256"},
     "ROC":              {"name": "ROC Cabinetry",        "city": "Norcross",       "state": "GA", "zip": "30071"},
     "GHI":              {"name": "GHI Cabinets",         "city": "Palmetto",       "state": "FL", "zip": "34221"},
