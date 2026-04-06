@@ -6,7 +6,7 @@ Flow:
   - send_initial_poll()           — fires when admin clicks "Sent to Warehouse"
   - warehouse_set_date()          — stores pickup date
   - process_bol_and_pickup()      — BOL + Pickup Request fired; returns data for background email tasks
-  - _delayed_bol_email()          — background task: tries PDF at 2/5/7 min, then reportlab fallback
+  - _delayed_bol_email()          — background task: tries PDF at 2/5/7 min, then bol_template fallback
   - _send_customer_pickup_scheduled_email() — background task: tells customer pickup is scheduled,
                                     tracking will follow when freight starts moving
   - check_tracking_updates()      — cron: polls R+L ShipmentTracing; sends customer tracking email
@@ -14,14 +14,11 @@ Flow:
   - warehouse_set_pickup_time()   — day-before flow
   - check_all_warehouse_polls()   — nightly cron
 
+BOL PDF fallback: bol_template.generate_bol_pdf() — matches real R+L BOL layout.
 Pickup Request: POST /PickupRequest/FromBOL — only needs PRO + date + ready + close time.
-R+L pulls shipper info from the BOL automatically.
-Time format: "hh:mm tt" e.g. "09:00 AM" — matches form output directly, no conversion needed.
-Poll email: minimal — order number and form link only, no customer data.
 Quote number: fetched from order_shipments.quote_number (saved at checkout) and passed
   in BOL ReferenceNumbers to lock in the quoted rate with R+L.
-Tracking email: sent only when R+L ShipmentTracing shows first scan event (freight moving),
-  NOT at BOL creation time. PRO is not shared with customer until confirmed in motion.
+Tracking email: sent only when R+L ShipmentTracing shows first scan event (freight moving).
 """
 
 import os
@@ -237,7 +234,6 @@ def process_bol_and_pickup(token: str, pickup_time_str: str, close_time_str: str
                         (order_id,)
                     )
         except Exception:
-            # close_time column may not exist yet — try without it
             try:
                 with get_db() as conn:
                     with conn.cursor() as cur:
@@ -265,7 +261,6 @@ def process_bol_and_pickup(token: str, pickup_time_str: str, close_time_str: str
         pickup_date = shipment.get("pickup_date")
         pickup_date_fmt = pickup_date.strftime("%m/%d/%Y") if hasattr(pickup_date, "strftime") else None
 
-        # Fire BOL — passes quote_number to lock in the rate
         bol_result = _fire_bol(shipment, pickup_date_fmt)
         if not bol_result.get("success"):
             return {"success": False, "error": f"BOL failed: {bol_result.get('error')}"}
@@ -273,7 +268,6 @@ def process_bol_and_pickup(token: str, pickup_time_str: str, close_time_str: str
         pro_number = bol_result["pro_number"]
         bol_pdf_url = bol_result.get("bol_pdf_url", "")
 
-        # Fire Pickup Request — log error but always continue (non-blocking)
         pickup_result = _fire_pickup_request(
             pro_number=pro_number,
             pickup_date=pickup_date_fmt or "",
@@ -296,7 +290,6 @@ def process_bol_and_pickup(token: str, pickup_time_str: str, close_time_str: str
         except Exception:
             pass
 
-        # Build customer info for pickup scheduled email
         customer_email = shipment.get("email") or ""
         customer_name = shipment.get("customer_name") or ""
 
@@ -313,7 +306,6 @@ def process_bol_and_pickup(token: str, pickup_time_str: str, close_time_str: str
             "warehouse_name": shipment["warehouse"],
             "order_id": order_id,
             "shipment": dict(shipment),
-            # Customer notification — pickup scheduled (no PRO yet)
             "customer_email": customer_email,
             "customer_name": customer_name,
         }
@@ -324,7 +316,7 @@ def process_bol_and_pickup(token: str, pickup_time_str: str, close_time_str: str
 
 # =============================================================================
 # DELAYED BOL EMAIL — background task
-# t+2min, t+5min, t+7min retry then reportlab fallback
+# t+2min, t+5min, t+7min retry then bol_template fallback
 # =============================================================================
 
 def _delayed_bol_email(
@@ -345,7 +337,7 @@ def _delayed_bol_email(
             break
 
     if not pdf_bytes:
-        print(f"[SUPPLIER_POLL] All PDF fetch attempts failed for PRO {pro_number} — using fallback")
+        print(f"[SUPPLIER_POLL] All PDF fetch attempts failed for PRO {pro_number} — using bol_template fallback")
         pdf_bytes = _generate_fallback_bol_pdf(
             pro_number=pro_number, order_id=order_id,
             shipper_name=warehouse_name,
@@ -354,8 +346,9 @@ def _delayed_bol_email(
             consignee_address=_get_consignee_address_str(shipment),
             pickup_date=pickup_date, pickup_time=pickup_time,
             weight=int(float(shipment.get("weight") or 200)),
+            shipment=shipment,
         )
-        pdf_source = "fallback_reportlab"
+        pdf_source = "fallback_bol_template"
 
     html = _bol_email_html(warehouse_name, order_id, pro_number, pickup_date, pickup_time, bol_pdf_url)
     _send_raw_email(
@@ -374,8 +367,6 @@ def _delayed_bol_email(
 
 # =============================================================================
 # CUSTOMER PICKUP SCHEDULED EMAIL — background task
-# Fires simultaneously with BOL email. No PRO shared — tracking sent separately
-# when R+L shows first scan.
 # =============================================================================
 
 def _send_customer_pickup_scheduled_email(
@@ -386,11 +377,6 @@ def _send_customer_pickup_scheduled_email(
     pickup_time: str,
     close_time: str = "",
 ):
-    """
-    Tells the customer their order has been scheduled for pickup.
-    Does NOT include the PRO number — tracking email fires separately
-    when check_tracking_updates() detects first R+L scan.
-    """
     if not to_email:
         print(f"[SUPPLIER_POLL] No customer email for pickup scheduled notification — order {order_id}")
         return
@@ -439,47 +425,25 @@ def _send_customer_pickup_scheduled_email(
         html_body=html,
     )
     _log_event(order_id, "customer_pickup_scheduled_email_sent", {
-        "to": to_email,
-        "pickup_date": pickup_date,
-        "pickup_time": pickup_time,
-        "close_time": close_time,
-        "success": success,
+        "to": to_email, "pickup_date": pickup_date,
+        "pickup_time": pickup_time, "close_time": close_time, "success": success,
     })
     print(f"[SUPPLIER_POLL] Customer pickup scheduled email {'sent' if success else 'FAILED'} — order {order_id} to {to_email}")
 
 
 # =============================================================================
 # TRACKING UPDATES — cron task
-# Polls R+L ShipmentTracing for all BOL'd orders with no tracking email sent.
-# Sends customer tracking email only when first scan detected.
 # =============================================================================
 
 def check_tracking_updates() -> dict:
-    """
-    Poll R+L ShipmentTracing for all orders where:
-      - bol_sent = TRUE (PRO number exists in orders.tracking)
-      - is_complete = FALSE
-      - No 'tracking_email_sent' event in order_events
-
-    When R+L shows any trace events (first scan = freight picked up and moving),
-    send the customer their tracking link and log the event.
-
-    Called by POST /tracking/check-all cron endpoint.
-    """
-    summary = {
-        "checked": 0,
-        "tracking_emails_sent": 0,
-        "not_yet_moving": 0,
-        "errors": [],
-    }
+    summary = {"checked": 0, "tracking_emails_sent": 0, "not_yet_moving": 0, "errors": []}
 
     try:
         with get_db() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute("""
                     SELECT o.order_id, o.tracking, o.pro_number,
-                           o.customer_name, o.company_name, o.email,
-                           o.order_total
+                           o.customer_name, o.company_name, o.email, o.order_total
                     FROM orders o
                     WHERE o.bol_sent = TRUE
                       AND (o.is_complete = FALSE OR o.is_complete IS NULL)
@@ -509,7 +473,6 @@ def check_tracking_updates() -> dict:
             try:
                 shipment_data = track_shipment(pro_number)
             except RLCarriersError as rl_err:
-                # PRO not found yet — normal for recently created BOLs
                 print(f"[TRACKING] PRO {pro_number} not yet in R+L system: {rl_err}")
                 summary["not_yet_moving"] += 1
                 continue
@@ -517,13 +480,9 @@ def check_tracking_updates() -> dict:
                 summary["errors"].append({"order_id": order_id, "error": str(track_err)})
                 continue
 
-            # Detect if shipment has started moving
-            # R+L TraceEvents = list of scan events; any entry = picked up and in transit
             trace_events = shipment_data.get("TraceEvents") or shipment_data.get("Events") or []
             status_code = shipment_data.get("StatusCode") or shipment_data.get("Status") or ""
 
-            # Status codes that mean freight is moving: PU=Picked Up, OFD=Out for Delivery,
-            # DEL=Delivered, any trace events at all
             is_moving = (
                 len(trace_events) > 0 or
                 status_code.upper() in ("PU", "OFD", "DEL", "IT", "AR")
@@ -531,38 +490,26 @@ def check_tracking_updates() -> dict:
 
             if not is_moving:
                 summary["not_yet_moving"] += 1
-                print(f"[TRACKING] PRO {pro_number} — order {order_id} — not yet moving (status: {status_code})")
                 continue
 
-            # Freight is moving — send tracking email
             customer_email = order.get("email") or ""
             customer_name = order.get("customer_name") or ""
             if not customer_email:
-                print(f"[TRACKING] No customer email for order {order_id} — skipping tracking email")
                 _log_event(order_id, "tracking_email_sent", {
-                    "pro_number": pro_number,
-                    "skipped": True,
-                    "reason": "no_customer_email",
-                    "status_code": status_code,
+                    "pro_number": pro_number, "skipped": True, "reason": "no_customer_email",
                 })
-                summary["tracking_emails_sent"] += 1  # count it as handled
+                summary["tracking_emails_sent"] += 1
                 continue
 
             _send_customer_tracking_email(
-                to_email=customer_email,
-                customer_name=customer_name,
-                order_id=order_id,
-                pro_number=pro_number,
-                status_code=status_code,
+                to_email=customer_email, customer_name=customer_name,
+                order_id=order_id, pro_number=pro_number, status_code=status_code,
             )
             _log_event(order_id, "tracking_email_sent", {
-                "pro_number": pro_number,
-                "status_code": status_code,
-                "trace_events_count": len(trace_events),
-                "to": customer_email,
+                "pro_number": pro_number, "status_code": status_code,
+                "trace_events_count": len(trace_events), "to": customer_email,
             })
             summary["tracking_emails_sent"] += 1
-            print(f"[TRACKING] Tracking email sent — order {order_id} PRO {pro_number} to {customer_email}")
 
         except Exception as e:
             summary["errors"].append({"order_id": order_id, "pro": pro_number, "error": str(e)})
@@ -571,19 +518,12 @@ def check_tracking_updates() -> dict:
 
 
 def _send_customer_tracking_email(
-    to_email: str,
-    customer_name: str,
-    order_id: str,
-    pro_number: str,
-    status_code: str = "",
+    to_email: str, customer_name: str, order_id: str,
+    pro_number: str, status_code: str = "",
 ):
-    """
-    Send customer their R+L tracking link once freight is confirmed moving.
-    """
     first_name = customer_name.split()[0] if customer_name else "there"
     tracking_url = f"https://www2.rlcarriers.com/freight/shipping/shipment-tracing?pro={pro_number}"
 
-    status_msg = ""
     if status_code.upper() == "DEL":
         status_msg = "<p style='color:#059669;font-weight:600;'>✅ Your shipment has been delivered.</p>"
     elif status_code.upper() == "OFD":
@@ -603,14 +543,9 @@ def _send_customer_tracking_email(
     <p style="color:#4a5568;">Your cabinets for Order <strong>#{order_id}</strong> are on their way!</p>
     {status_msg}
     <div style="background:#ecfdf5;border:1px solid #86efac;border-radius:8px;padding:20px;margin:20px 0;text-align:center;">
-        <div style="font-size:11px;font-weight:700;color:#166534;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px;">
-            R+L Carriers PRO Number
-        </div>
-        <div style="font-size:26px;font-weight:700;color:#166534;font-family:monospace;letter-spacing:2px;margin-bottom:16px;">
-            {pro_number}
-        </div>
-        <a href="{tracking_url}"
-           style="display:inline-block;background:#16a34a;color:white;padding:12px 28px;border-radius:6px;text-decoration:none;font-weight:600;font-size:15px;">
+        <div style="font-size:11px;font-weight:700;color:#166534;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px;">R+L Carriers PRO Number</div>
+        <div style="font-size:26px;font-weight:700;color:#166534;font-family:monospace;letter-spacing:2px;margin-bottom:16px;">{pro_number}</div>
+        <a href="{tracking_url}" style="display:inline-block;background:#16a34a;color:white;padding:12px 28px;border-radius:6px;text-decoration:none;font-weight:600;font-size:15px;">
             Track Your Shipment →
         </a>
     </div>
@@ -696,7 +631,6 @@ def warehouse_push_date(token: str, new_date_str: str) -> dict:
 
 
 def warehouse_set_pickup_time(token: str, pickup_time_str: str, close_time_str: str = "5:00 PM") -> dict:
-    """Day-before flow: used by set-time route via process_bol_and_pickup."""
     return process_bol_and_pickup(token, pickup_time_str, close_time_str)
 
 
@@ -712,16 +646,14 @@ def check_all_warehouse_polls() -> dict:
     try:
         with get_db() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute(
-                    """
+                cur.execute("""
                     SELECT s.*, o.order_date, o.customer_name, o.company_name, o.order_total
                     FROM order_shipments s
                     JOIN orders o ON s.order_id = o.order_id
                     WHERE o.sent_to_warehouse = TRUE AND o.bol_sent = FALSE
                       AND s.pickup_date IS NULL AND s.supplier_poll_1_sent_at IS NOT NULL
                       AND o.is_complete = FALSE
-                    """,
-                )
+                """)
                 pending = [dict(r) for r in cur.fetchall()]
     except Exception as e:
         summary["errors"].append({"phase": "escalation_query", "error": str(e)})
@@ -749,17 +681,14 @@ def check_all_warehouse_polls() -> dict:
     try:
         with get_db() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute(
-                    """
+                cur.execute("""
                     SELECT s.*, o.customer_name, o.company_name, o.order_total, o.zip_code,
                            o.street, o.city, o.state
                     FROM order_shipments s
                     JOIN orders o ON s.order_id = o.order_id
                     WHERE s.pickup_date = %s AND s.day_before_poll_sent_at IS NULL
                       AND s.bol_sent = FALSE AND o.is_complete = FALSE
-                    """,
-                    (tomorrow,),
-                )
+                """, (tomorrow,))
                 day_before = [dict(r) for r in cur.fetchall()]
     except Exception as e:
         summary["errors"].append({"phase": "day_before_query", "error": str(e)})
@@ -813,12 +742,10 @@ def _send_day_before_poll(shipment: dict):
     pickup_date = shipment.get("pickup_date")
     date_str = pickup_date.strftime("%A, %B %d") if hasattr(pickup_date, "strftime") else str(pickup_date)
     yes_url = f"{CHECKOUT_BASE_URL}/supplier/{token}/confirm-tomorrow"
-    no_url = f"{CHECKOUT_BASE_URL}/supplier/{token}/push-date"
+    no_url  = f"{CHECKOUT_BASE_URL}/supplier/{token}/push-date"
     subject = f"⚠️ Order #{shipment['order_id']} — Pickup Confirmation for {date_str}"
-    body = _render_day_before_email(
-        order_id=shipment["order_id"],
-        date_str=date_str, yes_url=yes_url, no_url=no_url,
-    )
+    body = _render_day_before_email(order_id=shipment["order_id"], date_str=date_str,
+                                    yes_url=yes_url, no_url=no_url)
     _send_raw_email(to_email=supplier_email, subject=subject, html_body=body)
     try:
         with get_db() as conn:
@@ -853,7 +780,6 @@ def _fire_bol(shipment: dict, pickup_date_str: Optional[str]) -> dict:
         weight = int(float(shipment.get("weight") or 200))
         is_residential = bool(shipment.get("is_residential", True))
 
-        # Fetch quote number to lock in the R+L quoted rate
         quote_number = (
             shipment.get("quote_number") or
             shipment.get("rl_quote_number") or
@@ -911,8 +837,6 @@ def _fire_bol(shipment: dict, pickup_date_str: Optional[str]) -> dict:
                         """,
                         (pro_number, bol_pdf_url, shipment["shipment_id"])
                     )
-                    # Write PRO to orders.pro_number only — orders.tracking stays empty
-                    # until check_tracking_updates() confirms first R+L scan
                     cur.execute(
                         """
                         UPDATE orders
@@ -944,12 +868,8 @@ def _fire_bol(shipment: dict, pickup_date_str: Optional[str]) -> dict:
 # =============================================================================
 
 def _fire_pickup_request(
-    pro_number: str,
-    pickup_date: str,
-    ready_time: str,
-    close_time: str,
-    order_id: str = "",
-    shipment: dict = None,
+    pro_number: str, pickup_date: str, ready_time: str, close_time: str,
+    order_id: str = "", shipment: dict = None,
 ) -> dict:
     try:
         payload = {
@@ -1010,7 +930,7 @@ def _fetch_bol_pdf_bytes(pro_number: str) -> Optional[bytes]:
 
 
 # =============================================================================
-# FALLBACK BOL PDF — Option B: reportlab
+# FALLBACK BOL PDF — Option B: bol_template.generate_bol_pdf (R+L layout match)
 # =============================================================================
 
 def _generate_fallback_bol_pdf(
@@ -1018,97 +938,46 @@ def _generate_fallback_bol_pdf(
     shipper_name: str, shipper_address: str,
     consignee_name: str, consignee_address: str,
     pickup_date: str, pickup_time: str, weight: int,
+    shipment: dict = None,
 ) -> Optional[bytes]:
+    """
+    Generate a BOL PDF matching the real R+L Straight Bill of Lading layout.
+    Uses bol_template.generate_bol_pdf with structured address components from
+    WAREHOUSE_ADDRESSES and the shipment dict.
+    """
     try:
-        from reportlab.lib.pagesizes import letter
-        from reportlab.lib.units import inch
-        from reportlab.lib import colors
-        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
-        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-        from reportlab.lib.enums import TA_CENTER
-        import io
+        from bol_template import generate_bol_pdf
+        from bol_routes import WAREHOUSE_ADDRESSES
 
-        buf = io.BytesIO()
-        doc = SimpleDocTemplate(buf, pagesize=letter,
-                                leftMargin=0.5*inch, rightMargin=0.5*inch,
-                                topMargin=0.5*inch, bottomMargin=0.5*inch)
-        styles = getSampleStyleSheet()
-        navy = colors.HexColor("#1a365d")
-        green = colors.HexColor("#059669")
+        # Get structured warehouse address (city/state/zip separate)
+        wh_info = WAREHOUSE_ADDRESSES.get(shipper_name, {})
+        sh = shipment or {}
 
-        title_s = ParagraphStyle("t", fontSize=18, fontName="Helvetica-Bold", textColor=navy, alignment=TA_CENTER)
-        hdr_s   = ParagraphStyle("h", fontSize=10, fontName="Helvetica-Bold", textColor=colors.white)
-        lbl_s   = ParagraphStyle("l", fontSize=8,  fontName="Helvetica-Bold", textColor=colors.grey)
-        val_s   = ParagraphStyle("v", fontSize=10, fontName="Helvetica")
-        pro_s   = ParagraphStyle("p", fontSize=22, fontName="Helvetica-Bold", textColor=green, alignment=TA_CENTER)
-        ftr_s   = ParagraphStyle("f", fontSize=8,  textColor=colors.grey, alignment=TA_CENTER)
-
-        elems = []
-        elems.append(Paragraph("BILL OF LADING", title_s))
-        elems.append(Paragraph("R+L Carriers — Cabinets For Contractors", styles["Normal"]))
-        elems.append(Spacer(1, 0.15*inch))
-
-        pro_tbl = Table([[Paragraph(f"PRO: {pro_number}", pro_s)]], colWidths=[7.5*inch])
-        pro_tbl.setStyle(TableStyle([
-            ("BOX",(0,0),(-1,-1),2,navy),("BACKGROUND",(0,0),(-1,-1),colors.HexColor("#f0fdf4")),
-            ("TOPPADDING",(0,0),(-1,-1),10),("BOTTOMPADDING",(0,0),(-1,-1),10),
-        ]))
-        elems.append(pro_tbl)
-        elems.append(Spacer(1, 0.15*inch))
-
-        info_data = [
-            [Paragraph("Pickup Date",lbl_s), Paragraph("Pickup Time",lbl_s), Paragraph("Order #",lbl_s)],
-            [Paragraph(pickup_date,val_s), Paragraph(pickup_time,val_s), Paragraph(order_id,val_s)],
-        ]
-        info_tbl = Table(info_data, colWidths=[2.5*inch,2.5*inch,2.5*inch])
-        info_tbl.setStyle(TableStyle([
-            ("BOX",(0,0),(-1,-1),1,navy),("INNERGRID",(0,0),(-1,-1),0.5,colors.grey),
-            ("BACKGROUND",(0,0),(-1,0),navy),("TOPPADDING",(0,0),(-1,-1),6),
-            ("BOTTOMPADDING",(0,0),(-1,-1),6),("LEFTPADDING",(0,0),(-1,-1),8),
-        ]))
-        elems.append(info_tbl)
-        elems.append(Spacer(1, 0.15*inch))
-
-        addr_data = [
-            [Paragraph("SHIPPER (FROM)",hdr_s), Paragraph("CONSIGNEE (TO)",hdr_s)],
-            [Paragraph(shipper_name,val_s), Paragraph(consignee_name,val_s)],
-            [Paragraph(shipper_address,val_s), Paragraph(consignee_address,val_s)],
-        ]
-        addr_tbl = Table(addr_data, colWidths=[3.75*inch,3.75*inch])
-        addr_tbl.setStyle(TableStyle([
-            ("BOX",(0,0),(-1,-1),1,navy),("INNERGRID",(0,0),(-1,-1),0.5,colors.lightgrey),
-            ("BACKGROUND",(0,0),(-1,0),navy),("VALIGN",(0,0),(-1,-1),"TOP"),
-            ("TOPPADDING",(0,0),(-1,-1),6),("BOTTOMPADDING",(0,0),(-1,-1),6),
-            ("LEFTPADDING",(0,0),(-1,-1),8),
-        ]))
-        elems.append(addr_tbl)
-        elems.append(Spacer(1, 0.15*inch))
-
-        comm_data = [
-            [Paragraph("PIECES",hdr_s),Paragraph("WEIGHT (LBS)",hdr_s),
-             Paragraph("CLASS",hdr_s),Paragraph("DESCRIPTION",hdr_s)],
-            [Paragraph("1",val_s),Paragraph(str(weight),val_s),
-             Paragraph("85",val_s),Paragraph("RTA Cabinetry",val_s)],
-        ]
-        comm_tbl = Table(comm_data, colWidths=[1.5*inch,2*inch,1.5*inch,2.5*inch])
-        comm_tbl.setStyle(TableStyle([
-            ("BOX",(0,0),(-1,-1),1,navy),("INNERGRID",(0,0),(-1,-1),0.5,colors.lightgrey),
-            ("BACKGROUND",(0,0),(-1,0),navy),("TOPPADDING",(0,0),(-1,-1),6),
-            ("BOTTOMPADDING",(0,0),(-1,-1),6),("LEFTPADDING",(0,0),(-1,-1),8),
-        ]))
-        elems.append(comm_tbl)
-        elems.append(Spacer(1, 0.2*inch))
-        elems.append(Paragraph(
-            f"Generated by Cabinets For Contractors • PRO {pro_number} • R+L Carriers will verify at pickup.",
-            ftr_s
-        ))
-
-        doc.build(elems)
-        pdf_bytes = buf.getvalue()
-        print(f"[SUPPLIER_POLL] Option B: generated fallback BOL PDF ({len(pdf_bytes)} bytes)")
-        return pdf_bytes
+        return generate_bol_pdf(
+            pro_number=pro_number,
+            order_id=order_id,
+            pickup_date=pickup_date,
+            pickup_time=pickup_time,
+            shipper_name=shipper_name,
+            shipper_address=wh_info.get("address", shipper_address),
+            shipper_city=wh_info.get("city", ""),
+            shipper_state=wh_info.get("state", ""),
+            shipper_zip=wh_info.get("zip", ""),
+            shipper_phone=wh_info.get("phone", ""),
+            consignee_name=consignee_name,
+            consignee_address=sh.get("street", consignee_address),
+            consignee_city=sh.get("city", ""),
+            consignee_state=sh.get("state", ""),
+            consignee_zip=(sh.get("zip_code", "") or "").split("-")[0][:5],
+            consignee_phone=sh.get("phone", ""),
+            weight_lbs=weight,
+            is_residential=bool(sh.get("is_residential", True)),
+            quote_number=sh.get("quote_number", ""),
+        )
     except Exception as e:
-        print(f"[SUPPLIER_POLL] Option B fallback PDF failed: {e}")
+        print(f"[SUPPLIER_POLL] BOL template failed: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 
@@ -1219,10 +1088,8 @@ def _bol_email_html(warehouse_name, order_id, pro_number, pickup_date, pickup_ti
 def _send_supplier_poll_email(
     to_email: str, order_id: str, form_url: str,
     poll_number: int = 1, is_critical: bool = False,
-    # kept for backwards compat but ignored:
     warehouse_name: str = "", customer_name: str = "", order_total: float = 0,
 ) -> dict:
-    """Minimal poll email — order number and form link only."""
     if is_critical:
         subject = f"🚨 URGENT — Order #{order_id} — Ship Date Required"
         urgency = "<p style='color:#DC2626;font-weight:700;'>⚠️ No ship date received. Please respond immediately.</p>"
@@ -1284,8 +1151,8 @@ def _send_cfc_bol_fired_alert(shipment: dict, pro_number: str, pickup_date: str,
                                pickup_confirmation=None, pickup_error=None):
     subject = f"✅ BOL Fired — Order #{shipment['order_id']} — PRO {pro_number}"
     pickup_line = f"<br><strong>Pickup ID:</strong> {pickup_confirmation}" if pickup_confirmation else ""
-    close_line = f"<br><strong>Close Time:</strong> {close_time}" if close_time else ""
-    error_line = f"<br><span style='color:#DC2626;'>⚠️ Pickup request failed: {pickup_error}</span>" if pickup_error else ""
+    close_line  = f"<br><strong>Close Time:</strong> {close_time}" if close_time else ""
+    error_line  = f"<br><span style='color:#DC2626;'>⚠️ Pickup request failed: {pickup_error}</span>" if pickup_error else ""
     html = f"""<p><strong>Order:</strong> #{shipment['order_id']}<br>
     <strong>Warehouse:</strong> {shipment['warehouse']}<br>
     <strong>PRO:</strong> <span style="font-family:monospace;color:#059669;">{pro_number}</span><br>
