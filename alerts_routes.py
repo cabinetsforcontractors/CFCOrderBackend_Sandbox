@@ -18,12 +18,12 @@ alerts_router = APIRouter(prefix="/alerts", tags=["alerts"])
 async def check_all_alerts():
     """
     CRON ENDPOINT: Check all active orders for alert conditions.
-    
+
     Run daily via Render cron job or external scheduler.
     Evaluates all 8 ORD-A1 rules against every active order.
     Creates new alerts when thresholds exceeded.
     Auto-resolves alerts when conditions no longer apply.
-    
+
     Returns summary of actions taken.
     """
     try:
@@ -94,3 +94,32 @@ async def resolve_alert_endpoint(alert_id: int):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error resolving alert: {str(e)}")
+
+
+# =============================================================================
+# TRACKING CHECK — cron endpoint
+# Polls R+L ShipmentTracing for all BOL'd orders.
+# Sends customer tracking email when first scan detected (freight moving).
+# =============================================================================
+
+@alerts_router.post("/tracking/check-all")
+async def check_tracking():
+    """
+    CRON ENDPOINT: Poll R+L ShipmentTracing for all BOL'd orders awaiting
+    first scan confirmation. Sends customer tracking email when R+L shows
+    freight is in motion (first trace event).
+
+    Run every 2-4 hours via Render cron or external scheduler.
+    Safe to run frequently — skips orders where tracking email already sent.
+
+    Returns summary: checked, tracking_emails_sent, not_yet_moving, errors.
+    """
+    try:
+        from supplier_polling_engine import check_tracking_updates
+        result = check_tracking_updates()
+        return {
+            "success": True,
+            **result,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Tracking check error: {str(e)}")
