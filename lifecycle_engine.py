@@ -59,6 +59,7 @@ CANCEL_WARNING_EMAIL_DAY = 14
 STATUS_ACTIVE = "active"
 STATUS_INACTIVE = "inactive"
 STATUS_CANCELED = "canceled"
+STATUS_ARCHIVED = "archived"
 
 # Cancel keyword patterns (fuzzy match)
 CANCEL_PATTERNS = [
