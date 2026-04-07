@@ -24,6 +24,7 @@ try:
         add_address_classification_to_checkouts as _add_address_classification,
         add_bol_columns_to_shipments as _add_bol_columns,
         add_ws6_supplier_workflow_fields as _add_ws6_fields,
+        add_ws6_pickup_fields as _add_ws6_pickup_fields,
     )
     DB_MIGRATIONS_LOADED = True
 except ImportError:
@@ -136,6 +137,22 @@ def add_ws6_supplier_fields(_: bool = Depends(require_admin)):
     Run once after deploy. Safe to re-run.
     """
     return _run(_add_ws6_fields)
+
+
+@migration_router.post("/add-ws6-pickup-fields")
+def add_ws6_pickup_fields(_: bool = Depends(require_admin)):
+    """
+    WS6 Warehouse Pickup — Add pickup workflow columns:
+      order_shipments.pickup_type               — 'freight' or 'warehouse_pickup'
+      order_shipments.pickup_ready_date         — when supplier says order is ready
+      order_shipments.pickup_ready_time         — time ready for pickup
+      order_shipments.customer_notified_ready_at — when customer was emailed
+      order_shipments.pickup_confirm_poll_sent_at — when CFC asked 'Has customer picked up?'
+      order_shipments.customer_pickup_confirmed  — TRUE when supplier confirms collected
+      orders.is_pickup                           — TRUE for warehouse pickup orders
+    Run once after deploy. Safe to re-run.
+    """
+    return _run(_add_ws6_pickup_fields)
 
 
 @migration_router.post("/init-db")
