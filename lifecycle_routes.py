@@ -19,6 +19,7 @@ from fastapi import APIRouter, HTTPException, Query
 from typing import Optional
 from lifecycle_engine import (
     check_all_orders_lifecycle,
+    check_pending_quote_reminders,
     process_order_lifecycle,
     extend_deadline,
     cancel_order,
@@ -46,7 +47,8 @@ async def check_all_lifecycle():
     """
     try:
         result = check_all_orders_lifecycle()
-        return {"success": True, **result}
+        quote_result = check_pending_quote_reminders()
+        return {"success": True, **result, "quote_reminders": quote_result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Lifecycle engine error: {str(e)}")
 
