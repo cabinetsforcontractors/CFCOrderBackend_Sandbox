@@ -458,3 +458,71 @@ def add_ws6_supplier_workflow_fields() -> dict:
         "message": "WS6 supplier workflow fields added",
         "results": results + pro_result
     }
+
+
+# =============================================================================
+# WS6 WAREHOUSE PICKUP FIELDS
+# =============================================================================
+
+def add_ws6_pickup_fields() -> dict:
+    """
+    Add warehouse pickup workflow columns.
+
+    order_shipments:
+      pickup_type               — 'freight' (default) or 'warehouse_pickup'
+      pickup_ready_date         — date supplier says order is ready for customer pickup
+      pickup_ready_time         — time ready (e.g. "9:00 AM")
+      customer_notified_ready_at — when customer was emailed that order is ready
+      pickup_confirm_poll_sent_at — when CFC asked supplier "Has customer picked up?"
+      customer_pickup_confirmed  — TRUE when supplier confirms customer collected
+
+    orders:
+      is_pickup                 — TRUE for warehouse pickup orders
+
+    Safe to run multiple times.
+    """
+    results = []
+
+    # order_shipments columns
+    shipment_cols = [
+        ("pickup_type", "VARCHAR(20) DEFAULT 'freight'"),
+        ("pickup_ready_date", "DATE"),
+        ("pickup_ready_time", "VARCHAR(20)"),
+        ("customer_notified_ready_at", "TIMESTAMP WITH TIME ZONE"),
+        ("pickup_confirm_poll_sent_at", "TIMESTAMP WITH TIME ZONE"),
+        ("customer_pickup_confirmed", "BOOLEAN DEFAULT FALSE"),
+    ]
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            for col_name, col_def in shipment_cols:
+                try:
+                    cur.execute(f"ALTER TABLE order_shipments ADD COLUMN {col_name} {col_def}")
+                    results.append(f"order_shipments.{col_name}: added")
+                except Exception as e:
+                    if "already exists" in str(e):
+                        results.append(f"order_shipments.{col_name}: already exists")
+                    else:
+                        results.append(f"order_shipments.{col_name}: ERROR — {str(e)}")
+                    conn.rollback()
+                    continue
+            conn.commit()
+
+    # orders.is_pickup
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            try:
+                cur.execute("ALTER TABLE orders ADD COLUMN is_pickup BOOLEAN DEFAULT FALSE")
+                results.append("orders.is_pickup: added")
+            except Exception as e:
+                if "already exists" in str(e):
+                    results.append("orders.is_pickup: already exists")
+                else:
+                    results.append(f"orders.is_pickup: ERROR — {str(e)}")
+                conn.rollback()
+            conn.commit()
+
+    return {
+        "status": "ok",
+        "message": "WS6 warehouse pickup fields added",
+        "results": results
+    }
