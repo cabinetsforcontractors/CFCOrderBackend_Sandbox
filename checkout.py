@@ -69,8 +69,8 @@ WAREHOUSES = {
     },
     'Love': {
         'name': 'Love-Milestone',
-        'address': '7130 Overland Rd', 'city': 'Orlando', 'state': 'FL', 'zip': '32824',
-        'phone': '407-857-1985',
+        'address': '10963 Florida Crown Dr STE 100', 'city': 'Orlando', 'state': 'FL', 'zip': '32824',
+        'phone': '407-601-7090',
         'bol_shipper_name': 'Cabinets For Contractors-L24',
     },
     'ARTISAN': {
@@ -121,6 +121,7 @@ SKU_WAREHOUSE_MAP = {
     'WWW': 'Go Bravura', 'NDG': 'Go Bravura', 'NCC': 'Go Bravura', 'NBW': 'Go Bravura',
     'BX': 'Go Bravura', 'URW': 'Go Bravura',
     'HSS': 'Love', 'LGS': 'Love', 'LGSS': 'Love', 'DG': 'Love', 'EOK': 'Love', 'EWT': 'Love',
+    'SWO': 'Love', 'EDG': 'Love', 'RND': 'Love', 'RMW': 'Love', 'BGR': 'Love',
     'BSN': 'Cabinet & Stone', 'SGCS': 'Cabinet & Stone', 'WOCS': 'Cabinet & Stone',
     'EWSCS': 'Cabinet & Stone', 'CAWN': 'Cabinet & Stone', 'ESCS': 'Cabinet & Stone',
     'CS-': 'Cabinet & Stone', 'BSW': 'Cabinet & Stone', 'MSCS': 'Cabinet & Stone CA',
@@ -187,15 +188,6 @@ def validate_address_full(dest_address: dict) -> dict:
     """
     Call Smarty via rl-quote-sandbox to validate address.
     Retries up to 3 times with 1-second delays.
-
-    Returns:
-        success: bool — Smarty returned a usable result
-        is_residential: bool — True=residential, False=commercial
-        is_uncertain: bool — True when Smarty found the area but rdi is empty
-        address: dict | None — Smarty-corrected address fields
-        rdi: str — Smarty's rdi value ("Residential", "Commercial", or "")
-        error: str | None
-        attempts: int
     """
     street = dest_address.get('address', '') or dest_address.get('street', '')
     city = dest_address.get('city', '')
