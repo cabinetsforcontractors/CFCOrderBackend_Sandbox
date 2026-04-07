@@ -1049,14 +1049,14 @@ def get_rl_quote_data(shipment_id: str):
                             shipment_weight = allocated_weight
                             weight_note = (
                                 f"Sales-allocated ({round(pct * 100, 1)}% of order)"
-                                f" ⚠️ Not production-ready — verify before use"
+                                f" \u26a0\ufe0f Not production-ready \u2014 verify before use"
                             )
                         else:
                             needs_manual = True
-                            weight_note = "Multi-warehouse — enter weight for this shipment"
+                            weight_note = "Multi-warehouse \u2014 enter weight for this shipment"
                     else:
                         needs_manual = True
-                        weight_note = "Multi-warehouse — no total weight on order"
+                        weight_note = "Multi-warehouse \u2014 no total weight on order"
                 else:
                     needs_manual = True
                     weight_note = "No weight data available"
@@ -1219,3 +1219,50 @@ def send_tracking_email(
         return {"status": "ok", "email_sent": email_sent}
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
+
+# =============================================================================
+# TRUSTED CUSTOMERS
+# =============================================================================
+
+@orders_router.get("/trusted-customers")
+def list_trusted_customers():
+    """List all trusted customers."""
+    with get_db() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT * FROM trusted_customers ORDER BY customer_name")
+            customers = cur.fetchall()
+            return {"status": "ok", "customers": customers}
+
+
+@orders_router.post("/trusted-customers")
+def add_trusted_customer(
+    customer_name: str,
+    company_name: Optional[str] = None,
+    notes: Optional[str] = None,
+    _: bool = Depends(require_admin),
+):
+    """Add a trusted customer. [admin]"""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO trusted_customers (customer_name, company_name, notes)
+                VALUES (%s, %s, %s)
+                RETURNING id
+                """,
+                (customer_name, company_name, notes),
+            )
+            new_id = cur.fetchone()[0]
+            return {"status": "ok", "id": new_id}
+
+
+@orders_router.delete("/trusted-customers/{customer_id}")
+def remove_trusted_customer(customer_id: int, _: bool = Depends(require_admin)):
+    """Remove a trusted customer. [admin]"""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM trusted_customers WHERE id = %s", (customer_id,)
+            )
+            return {"status": "ok"}
