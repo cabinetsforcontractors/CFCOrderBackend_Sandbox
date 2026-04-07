@@ -8,10 +8,14 @@ ADDRESS CLASSIFICATION WORKFLOW:
             goes through Step 1 (confirm/correct address) → Step 2 (classify) → Step 3 (pay).
   Case C — Smarty failed entirely:           same as B, edit box pre-opened in Step 1.
 
+WAREHOUSE PICKUP WORKFLOW:
+  Case pickup — shipping_option_id == 2 / "Warehouse Pick Up":
+    Skip Smarty, skip R+L quote. Invoice with $0 shipping.
+    Supplier poll asks "When will this be ready for customer pickup?" (not R+L pickup).
+    After ready date: second poll "Has customer picked up?" → Yes → complete / No → escalate.
+
 BLOCKER 1 FIX (2026-04-06): After successful invoice email send (Case A), the webhook
 now marks payment_link_sent=TRUE and payment_link_sent_at=NOW() on the orders table.
-Without this, order_status showed 'needs_payment_link' forever and the alerts engine
-fired 'needs_invoice' on every B2BWave order indefinitely.
 
 WS6 (2026-04-06): Shipment INSERT now saves quote_number from shipping result.
   quote_number is passed to R+L BOL creation to lock in the quoted rate.
@@ -54,8 +58,11 @@ try:
         create_square_payment_link,
         generate_checkout_token,
         verify_checkout_token,
+        detect_warehouse_pickup,
         ADDRESS_TYPE_MAP,
         WAREHOUSES,
+        TARIFF_RATE,
+        group_items_by_warehouse,
     )
     CHECKOUT_ENABLED = True
 except ImportError as e:
@@ -247,6 +254,54 @@ Checkout URL: {checkout_url}
         print(f"[WEBHOOK] Internal notification failed for order {order_id}: {e}")
 
 
+def _send_internal_pickup_notification(
+    order_id: str, order_data: dict, grand_total: float,
+    checkout_url: str, warehouse_groups: dict
+):
+    """Warehouse pickup order — internal CFC notification."""
+    try:
+        token = _get_gmail_token()
+        if not token:
+            return
+        customer = order_data.get('customer_name', 'Unknown')
+        company  = order_data.get('company_name', '')
+        line_items = order_data.get('line_items', [])
+        items_text = "\n".join(
+            f"  {i.get('sku', '')} — {i.get('name', '')} x{i.get('quantity', 1)}"
+            for i in line_items
+        )
+        warehouses_text = ", ".join(
+            WAREHOUSES.get(wh, {}).get('name', wh)
+            for wh in warehouse_groups if wh != 'UNKNOWN'
+        ) or "unknown"
+        body = f"""🏭 WAREHOUSE PICKUP ORDER — #{order_id}
+
+Customer: {customer}{f' ({company})' if company else ''}
+Email: {order_data.get('customer_email', '')}
+Date: {order_data.get('order_date', '')}
+
+Warehouse(s): {warehouses_text}
+Total Due: ${grand_total:,.2f} (shipping $0 — customer picking up)
+
+Items:
+{items_text}
+
+Invoice with $0 shipping sent to customer.
+When admin clicks "Send to Warehouse", supplier will be asked:
+  "When will this order be ready for customer pickup?"
+
+Checkout URL: {checkout_url}
+Admin: https://cfcordersfrontend-sandbox.vercel.app
+"""
+        _send_gmail_message(
+            token, WAREHOUSE_NOTIFICATION_EMAIL,
+            f"🏭 Pickup Order #{order_id} — {customer}{f' ({company})' if company else ''} — ${grand_total:,.2f}",
+            body
+        )
+    except Exception as e:
+        print(f"[WEBHOOK PICKUP] Internal notification failed for order {order_id}: {e}")
+
+
 def _send_commercial_confirmed_email(order_id: str, order_data: dict):
     """Customer clicked 'This is a commercial address' in invoice email."""
     try:
@@ -279,6 +334,149 @@ Admin: https://cfcordersfrontend-sandbox.vercel.app
         print(f"[CHECKOUT] Commercial confirmed email sent for order {order_id}")
     except Exception as e:
         print(f"[CHECKOUT] Failed to send commercial confirmed email for order {order_id}: {e}")
+
+
+# =============================================================================
+# WAREHOUSE PICKUP WEBHOOK HANDLER
+# =============================================================================
+
+def _handle_pickup_webhook(
+    order_id: str, order_data: dict, customer_email: str,
+    checkout_url: str, base: str, token: str,
+) -> dict:
+    """
+    Warehouse pickup order flow (shipping_option_id == 2):
+    - Skip Smarty address validation (customer coming to us)
+    - Skip R+L rate quote and BOL flow
+    - Invoice sent with $0 shipping
+    - Shipment record created with pickup_type='warehouse_pickup'
+    - Supplier poll (when admin sends to warehouse) asks:
+        "When will Order #XXXX be ready for customer pickup?"
+    - After ready date: second poll "Has customer picked up?" → complete or escalate
+    """
+    line_items = order_data.get('line_items', [])
+    total_items = sum(
+        float(i.get('price', 0)) * int(i.get('quantity', 1))
+        for i in line_items
+    )
+    tariff_amount = round(total_items * TARIFF_RATE, 2)
+    grand_total   = round(total_items + tariff_amount, 2)
+
+    # Build $0 shipping_result for the invoice template
+    shipping_result = {
+        'shipments': [],
+        'total_items': round(total_items, 2),
+        'tariff_rate': TARIFF_RATE,
+        'tariff_amount': tariff_amount,
+        'total_shipping': 0.0,
+        'grand_total': grand_total,
+        'destination': {},
+        'is_residential': False,
+        'is_pickup': True,
+    }
+
+    # Create shipment records per warehouse
+    warehouse_groups = group_items_by_warehouse(line_items)
+    created_count = 0
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                for wh_code, items in warehouse_groups.items():
+                    if not wh_code or wh_code == 'UNKNOWN':
+                        continue
+                    wh_info = WAREHOUSES.get(wh_code, {})
+                    wh_name = wh_info.get('name', wh_code)
+                    ship_id = f"{order_id}-{wh_name.replace(' & ', '-').replace(' ', '-')}"
+                    cur.execute("SELECT id FROM order_shipments WHERE shipment_id = %s", (ship_id,))
+                    if not cur.fetchone():
+                        weight = sum(30 * int(i.get('quantity', 1)) for i in items)
+                        try:
+                            cur.execute(
+                                """INSERT INTO order_shipments
+                                   (order_id, shipment_id, warehouse, status, origin_zip,
+                                    weight, has_oversized, is_residential, quote_number, pickup_type)
+                                   VALUES (%s, %s, %s, 'needs_order', %s, %s, FALSE, FALSE, '', 'warehouse_pickup')""",
+                                (order_id, ship_id, wh_name, wh_info.get('zip', ''), weight)
+                            )
+                        except Exception:
+                            # pickup_type column not yet added — insert without it
+                            conn.rollback()
+                            cur.execute(
+                                """INSERT INTO order_shipments
+                                   (order_id, shipment_id, warehouse, status, origin_zip,
+                                    weight, has_oversized, is_residential, quote_number)
+                                   VALUES (%s, %s, %s, 'needs_order', %s, %s, FALSE, FALSE, '')""",
+                                (order_id, ship_id, wh_name, wh_info.get('zip', ''), weight)
+                            )
+                        created_count += 1
+        print(f"[WEBHOOK PICKUP] {created_count} shipment records created for order {order_id}")
+    except Exception as e:
+        print(f"[WEBHOOK PICKUP] Shipment record error: {e}")
+
+    # Mark is_pickup on order (safe — order may not exist yet from sync)
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE orders SET is_pickup = TRUE, updated_at = NOW() WHERE order_id = %s",
+                    (order_id,)
+                )
+    except Exception as e:
+        print(f"[WEBHOOK PICKUP] is_pickup update skipped (column may not exist yet): {e}")
+
+    # Send invoice with $0 shipping
+    email_result = None
+    if customer_email:
+        try:
+            from email_sender import send_order_email
+            customer_id = order_data.get('customer_id')
+            if customer_id:
+                try:
+                    billing_address = fetch_b2bwave_customer_address(str(customer_id))
+                    if billing_address:
+                        order_data['billing_address'] = billing_address
+                except Exception:
+                    pass
+            order_data['payment_link'] = checkout_url
+            order_data['shipping_result'] = shipping_result
+            order_data['is_residential'] = False
+            order_data['confirm_commercial_url'] = f"{base}/checkout/{order_id}/confirm-commercial?token={token}"
+            email_result = send_order_email(
+                order_id=order_id, template_id='payment_link',
+                to_email=customer_email, order_data=order_data,
+                triggered_by='b2bwave_webhook_pickup'
+            )
+            print(f"[WEBHOOK PICKUP] Invoice email order {order_id}: success={email_result.get('success')}")
+            if email_result.get('success'):
+                try:
+                    with get_db() as conn:
+                        with conn.cursor() as cur:
+                            cur.execute(
+                                "UPDATE orders SET payment_link_sent = TRUE, "
+                                "payment_link_sent_at = NOW(), updated_at = NOW() "
+                                "WHERE order_id = %s",
+                                (order_id,)
+                            )
+                except Exception as me:
+                    print(f"[WEBHOOK PICKUP] payment_link_sent update failed: {me}")
+        except Exception as e:
+            print(f"[WEBHOOK PICKUP] Email failed: {e}")
+            email_result = {'success': False, 'error': str(e)}
+
+    _send_internal_pickup_notification(order_id, order_data, grand_total, checkout_url, warehouse_groups)
+
+    return {
+        "status": "ok",
+        "order_id": order_id,
+        "checkout_url": checkout_url,
+        "case": "pickup",
+        "is_warehouse_pickup": True,
+        "total_items": round(total_items, 2),
+        "tariff": tariff_amount,
+        "shipping": 0,
+        "grand_total": grand_total,
+        "email_sent": email_result.get('success') if email_result else False,
+    }
 
 
 # =============================================================================
@@ -359,6 +557,8 @@ def debug_warehouse_routing(order_id: str, _: bool = Depends(require_admin)):
         return {
             "status": "ok", "order_id": order_id,
             "customer": order_data.get("customer_name", ""),
+            "shipping_option": order_data.get("shipping_option_name", ""),
+            "is_pickup": detect_warehouse_pickup(order_data),
             "total_items": len(line_items),
             "item_routing": [
                 {"sku": i.get("sku", ""), "qty": i.get("quantity", 0),
@@ -382,11 +582,22 @@ def debug_test_checkout(order_id: str, _: bool = Depends(require_admin)):
         token = generate_checkout_token(order_id)
         base = CHECKOUT_BASE_URL or "https://cfcorderbackend-sandbox.onrender.com"
         shipping_address = order_data.get("shipping_address") or {}
+        is_pickup = detect_warehouse_pickup(order_data)
+        if is_pickup:
+            return {
+                "status": "ok", "order_id": order_id,
+                "customer": order_data.get("customer_name"),
+                "is_pickup": True,
+                "shipping_option": order_data.get("shipping_option_name"),
+                "token": token,
+                "checkout_url": f"{base}/checkout-ui/{order_id}?token={token}",
+            }
         shipping_result = calculate_order_shipping(order_data, shipping_address)
         return {
             "status": "ok", "order_id": order_id,
             "customer": order_data.get("customer_name"),
             "customer_email": order_data.get("customer_email"),
+            "is_pickup": False,
             "token": token,
             "checkout_url": f"{base}/checkout-ui/{order_id}?token={token}",
             "destination": shipping_address,
@@ -405,6 +616,7 @@ def b2bwave_order_webhook(payload: dict):
     """
     B2BWave webhook — fired when an order is placed.
 
+    Case pickup (shipping_option_id == 2): skip Smarty/R+L, $0 invoice, pickup poll flow.
     Case A (Smarty confirmed rdi):  calculate shipping → send invoice email → done.
     Case B (Smarty uncertain rdi):  send verify-details email → customer classifies in UI.
     Case C (Smarty failed):         same as B, edit box pre-opened.
@@ -440,12 +652,28 @@ def b2bwave_order_webhook(payload: dict):
         return {"status": "ok", "order_id": order_id, "checkout_url": checkout_url,
                 "message": "Order not found in B2BWave"}
 
+    # ------------------------------------------------------------------
+    # Warehouse Pickup — skip Smarty, skip R+L, $0 invoice
+    # ------------------------------------------------------------------
+    if detect_warehouse_pickup(order_data):
+        print(f"[WEBHOOK] Order {order_id} — Warehouse Pickup detected "
+              f"(option: {order_data.get('shipping_option_name', '')})")
+        return _handle_pickup_webhook(
+            order_id=str(order_id),
+            order_data=order_data,
+            customer_email=customer_email,
+            checkout_url=checkout_url,
+            base=base,
+            token=token,
+        )
+
+    # ------------------------------------------------------------------
+    # Freight orders — Smarty validation
+    # ------------------------------------------------------------------
     shipping_address = order_data.get("shipping_address") or {}
     validation = validate_address_full(shipping_address)
 
-    # ------------------------------------------------------------------
     # Case B / C — uncertain or failed: customer must verify details first
-    # ------------------------------------------------------------------
     if not validation['success'] or validation.get('is_uncertain'):
         case = 'B' if validation['success'] else 'C'
         address_initially_found = validation['success']
@@ -483,9 +711,7 @@ def b2bwave_order_webhook(payload: dict):
             "message": f"Case {case} — customer notified to verify delivery details",
         }
 
-    # ------------------------------------------------------------------
     # Case A — Smarty confirmed: proceed with shipping and invoice
-    # ------------------------------------------------------------------
     print(f"[WEBHOOK] Order {order_id} Case A — {'residential' if validation['is_residential'] else 'commercial'}")
 
     email_result = None
@@ -556,9 +782,7 @@ def b2bwave_order_webhook(payload: dict):
             )
             print(f"[WEBHOOK] Invoice email order {order_id}: success={email_result.get('success')}")
 
-            # BLOCKER 1 FIX: mark payment_link_sent=TRUE on orders table so the
-            # order_status view advances to 'awaiting_payment' and the alerts engine
-            # resolves the 'needs_invoice' alert automatically after webhook fires.
+            # BLOCKER 1 FIX: mark payment_link_sent=TRUE
             if email_result.get('success'):
                 try:
                     with get_db() as mark_conn:
@@ -611,11 +835,6 @@ def payment_complete(order: str, transactionId: Optional[str] = None):
 
 @checkout_router.get("/checkout/{order_id}")
 def get_checkout_data(order_id: str, token: str):
-    """
-    Returns checkout state. Three possible statuses:
-      classification_needed — customer must complete Step 1 / Step 2
-      ok                    — shipping calculated, ready to pay
-    """
     if not CHECKOUT_ENABLED:
         raise HTTPException(status_code=503, detail="Checkout not enabled")
     if not verify_checkout_token(order_id, token):
