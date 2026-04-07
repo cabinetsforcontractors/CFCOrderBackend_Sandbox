@@ -1113,7 +1113,7 @@ def create_checkout_payment(order_id: str, token: str):
 # =============================================================================
 
 @checkout_router.get("/checkout-ui/{order_id}")
-def checkout_ui(order_id: str, token: str):
+def checkout_ui(order_id: str, token: str, view: str = ""):
     if not verify_checkout_token(order_id, token):
         return HTMLResponse(content="<h1>Invalid or expired checkout link</h1>", status_code=403)
 
@@ -1228,6 +1228,7 @@ def checkout_ui(order_id: str, token: str):
 const ORDER_ID = "{order_id}";
 const TOKEN   = "{token}";
 const BASE    = window.location.origin;
+const VIEW    = "{view}";
 let grandTotal = 0;
 let confirmCommercialUrl = '';
 
@@ -1472,9 +1473,14 @@ function renderStep3(data) {{
             <div class="total-row"><span>Shipping</span><span>$${{shipping.total_shipping.toFixed(2)}}</span></div>
             <div class="total-row grand"><span>Total Due</span><span>$${{shipping.grand_total.toFixed(2)}}</span></div>
         </div>
+        ${{VIEW === "quote" ? `
+        <div style="background:#EFF6FF;border:1px solid #BFDBFE;border-radius:8px;padding:20px;text-align:center;margin-top:20px;">
+            <div style="color:#1E40AF;font-weight:600;font-size:20px;">Your Quote Total: $${{shipping.grand_total.toFixed(2)}}</div>
+            <div style="color:#1E40AF;margin-top:8px;">To confirm your order call (770) 990-4885 or reply to your invoice email.</div>
+        </div>` : `
         <button class="btn btn-primary btn-full" onclick="showPolicyModal()" id="payBtn" style="margin-top:20px;">
             Pay $${{shipping.grand_total.toFixed(2)}} with Card
-        </button>`;
+        </button>`}}`;
 }}
 
 function showPolicyModal() {{ document.getElementById('policyModal').classList.add('active'); }}
