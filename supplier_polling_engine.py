@@ -19,6 +19,9 @@ Pickup Request: POST /PickupRequest/FromBOL — only needs PRO + date + ready + 
 Quote number: fetched from order_shipments.quote_number (saved at checkout) and passed
   in BOL ReferenceNumbers to lock in the quoted rate with R+L.
 Tracking email: sent only when R+L ShipmentTracing shows first scan event (freight moving).
+PRO source: orders.pro_number (written at BOL time). orders.tracking is written when freight
+  confirmed moving. check_tracking_updates() uses COALESCE(o.tracking, o.pro_number) so it
+  works regardless of which column is populated.
 """
 
 import os
@@ -433,6 +436,10 @@ def _send_customer_pickup_scheduled_email(
 
 # =============================================================================
 # TRACKING UPDATES — cron task
+# Polls R+L ShipmentTracing for all BOL'd orders awaiting first scan.
+# Uses COALESCE(o.tracking, o.pro_number) so the query works whether the PRO
+# is in orders.tracking (written when freight moves) or orders.pro_number
+# (written at BOL creation time). Both columns are checked.
 # =============================================================================
 
 def check_tracking_updates() -> dict:
@@ -442,12 +449,16 @@ def check_tracking_updates() -> dict:
         with get_db() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute("""
-                    SELECT o.order_id, o.tracking, o.pro_number,
+                    SELECT o.order_id,
+                           o.tracking,
+                           o.pro_number,
+                           COALESCE(o.tracking, o.pro_number) AS effective_pro,
                            o.customer_name, o.company_name, o.email, o.order_total
                     FROM orders o
                     WHERE o.bol_sent = TRUE
                       AND (o.is_complete = FALSE OR o.is_complete IS NULL)
-                      AND o.tracking IS NOT NULL AND o.tracking != ''
+                      AND COALESCE(o.tracking, o.pro_number) IS NOT NULL
+                      AND COALESCE(o.tracking, o.pro_number) != ''
                       AND NOT EXISTS (
                           SELECT 1 FROM order_events e
                           WHERE e.order_id = o.order_id
@@ -462,7 +473,8 @@ def check_tracking_updates() -> dict:
 
     for order in orders:
         order_id = order["order_id"]
-        pro_number = order.get("tracking") or order.get("pro_number") or ""
+        # Use the pre-computed effective_pro from the query
+        pro_number = order.get("effective_pro") or order.get("tracking") or order.get("pro_number") or ""
         if not pro_number:
             continue
 
@@ -490,7 +502,19 @@ def check_tracking_updates() -> dict:
 
             if not is_moving:
                 summary["not_yet_moving"] += 1
+                print(f"[TRACKING] PRO {pro_number} — order {order_id} — not yet moving (status: {status_code})")
                 continue
+
+            # Freight is moving — write PRO to orders.tracking, then send tracking email
+            try:
+                with get_db() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "UPDATE orders SET tracking = %s, updated_at = NOW() WHERE order_id = %s AND (tracking IS NULL OR tracking = '')",
+                            (pro_number, order_id)
+                        )
+            except Exception as track_write_err:
+                print(f"[TRACKING] Failed to write tracking for order {order_id}: {track_write_err}")
 
             customer_email = order.get("email") or ""
             customer_name = order.get("customer_name") or ""
@@ -510,6 +534,7 @@ def check_tracking_updates() -> dict:
                 "trace_events_count": len(trace_events), "to": customer_email,
             })
             summary["tracking_emails_sent"] += 1
+            print(f"[TRACKING] Tracking email sent — order {order_id} PRO {pro_number} to {customer_email}")
 
         except Exception as e:
             summary["errors"].append({"order_id": order_id, "pro": pro_number, "error": str(e)})
@@ -940,16 +965,10 @@ def _generate_fallback_bol_pdf(
     pickup_date: str, pickup_time: str, weight: int,
     shipment: dict = None,
 ) -> Optional[bytes]:
-    """
-    Generate a BOL PDF matching the real R+L Straight Bill of Lading layout.
-    Uses bol_template.generate_bol_pdf with structured address components from
-    WAREHOUSE_ADDRESSES and the shipment dict.
-    """
     try:
         from bol_template import generate_bol_pdf
         from bol_routes import WAREHOUSE_ADDRESSES
 
-        # Get structured warehouse address (city/state/zip separate)
         wh_info = WAREHOUSE_ADDRESSES.get(shipper_name, {})
         sh = shipment or {}
 
