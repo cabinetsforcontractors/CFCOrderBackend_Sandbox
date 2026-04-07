@@ -141,10 +141,6 @@ def _send_gmail_message(token: str, to: str, subject: str, body: str):
 
 
 def _send_verify_address_email(order_id: str, order_data: dict, checkout_url: str, address_found: bool):
-    """
-    Cases B & C — customer needs to verify delivery details before shipping is calculated.
-    No invoice attached. Just a link to the checkout page.
-    """
     try:
         token = _get_gmail_token()
         if not token:
@@ -186,7 +182,6 @@ Cabinets For Contractors
 
 
 def _send_internal_address_alert(order_id: str, order_data: dict, address: dict, case: str, detail: str):
-    """Internal CFC alert for Cases B and C."""
     try:
         token = _get_gmail_token()
         if not token:
@@ -220,7 +215,6 @@ Admin: https://cfcordersfrontend-sandbox.vercel.app
 
 
 def _send_internal_order_notification(order_id: str, order_data: dict, shipping_result: dict, checkout_url: str):
-    """Case A — normal new order notification to CFC."""
     try:
         token = _get_gmail_token()
         if not token:
@@ -303,7 +297,6 @@ Admin: https://cfcordersfrontend-sandbox.vercel.app
 
 
 def _send_commercial_confirmed_email(order_id: str, order_data: dict):
-    """Customer clicked 'This is a commercial address' in invoice email."""
     try:
         token = _get_gmail_token()
         if not token:
@@ -340,6 +333,25 @@ Admin: https://cfcordersfrontend-sandbox.vercel.app
 # WAREHOUSE PICKUP WEBHOOK HANDLER
 # =============================================================================
 
+def _ensure_order_row(order_id: str, order_data: dict):
+    """
+    Guarantee the orders row exists before inserting order_shipments (FK constraint).
+    The B2BWave sync service may not have run yet when the webhook fires.
+    Safe to call multiple times — ON CONFLICT DO NOTHING.
+    """
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO orders (order_id, updated_at)
+                       VALUES (%s, NOW())
+                       ON CONFLICT (order_id) DO NOTHING""",
+                    (order_id,)
+                )
+    except Exception as e:
+        print(f"[WEBHOOK] _ensure_order_row failed (non-fatal — may be schema mismatch): {e}")
+
+
 def _handle_pickup_webhook(
     order_id: str, order_data: dict, customer_email: str,
     checkout_url: str, base: str, token: str,
@@ -374,6 +386,10 @@ def _handle_pickup_webhook(
         'is_residential': False,
         'is_pickup': True,
     }
+
+    # Ensure the orders row exists before creating shipments (FK constraint).
+    # Webhook fires immediately; sync service may not have run yet.
+    _ensure_order_row(order_id, order_data)
 
     # Create shipment records per warehouse
     warehouse_groups = group_items_by_warehouse(line_items)
@@ -413,7 +429,7 @@ def _handle_pickup_webhook(
     except Exception as e:
         print(f"[WEBHOOK PICKUP] Shipment record error: {e}")
 
-    # Mark is_pickup on order (safe — order may not exist yet from sync)
+    # Mark is_pickup on order
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
@@ -422,7 +438,7 @@ def _handle_pickup_webhook(
                     (order_id,)
                 )
     except Exception as e:
-        print(f"[WEBHOOK PICKUP] is_pickup update skipped (column may not exist yet): {e}")
+        print(f"[WEBHOOK PICKUP] is_pickup update skipped: {e}")
 
     # Send invoice with $0 shipping
     email_result = None
@@ -484,7 +500,6 @@ def _handle_pickup_webhook(
 # =============================================================================
 
 def _get_checkout_state(order_id: str) -> dict:
-    """Read all classification/pending state from pending_checkouts."""
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
@@ -581,7 +596,6 @@ def debug_test_checkout(order_id: str, _: bool = Depends(require_admin)):
             return {"status": "error", "error": "Order not found in B2BWave"}
         token = generate_checkout_token(order_id)
         base = CHECKOUT_BASE_URL or "https://cfcorderbackend-sandbox.onrender.com"
-        shipping_address = order_data.get("shipping_address") or {}
         is_pickup = detect_warehouse_pickup(order_data)
         if is_pickup:
             return {
@@ -592,6 +606,7 @@ def debug_test_checkout(order_id: str, _: bool = Depends(require_admin)):
                 "token": token,
                 "checkout_url": f"{base}/checkout-ui/{order_id}?token={token}",
             }
+        shipping_address = order_data.get("shipping_address") or {}
         shipping_result = calculate_order_shipping(order_data, shipping_address)
         return {
             "status": "ok", "order_id": order_id,
@@ -673,7 +688,6 @@ def b2bwave_order_webhook(payload: dict):
     shipping_address = order_data.get("shipping_address") or {}
     validation = validate_address_full(shipping_address)
 
-    # Case B / C — uncertain or failed: customer must verify details first
     if not validation['success'] or validation.get('is_uncertain'):
         case = 'B' if validation['success'] else 'C'
         address_initially_found = validation['success']
@@ -711,7 +725,6 @@ def b2bwave_order_webhook(payload: dict):
             "message": f"Case {case} — customer notified to verify delivery details",
         }
 
-    # Case A — Smarty confirmed: proceed with shipping and invoice
     print(f"[WEBHOOK] Order {order_id} Case A — {'residential' if validation['is_residential'] else 'commercial'}")
 
     email_result = None
@@ -736,7 +749,6 @@ def b2bwave_order_webhook(payload: dict):
                 print(f"[WEBHOOK] Shipping calc failed for order {order_id}: {se}")
                 shipping_result = None
 
-            # Create shipment records — save quote_number to lock R+L rate at BOL time
             if shipping_result and shipping_result.get('shipments'):
                 try:
                     with get_db() as wh_conn:
@@ -782,7 +794,6 @@ def b2bwave_order_webhook(payload: dict):
             )
             print(f"[WEBHOOK] Invoice email order {order_id}: success={email_result.get('success')}")
 
-            # BLOCKER 1 FIX: mark payment_link_sent=TRUE
             if email_result.get('success'):
                 try:
                     with get_db() as mark_conn:
@@ -927,7 +938,6 @@ def confirm_address(order_id: str, token: str, body: ConfirmAddressRequest):
             print(f"[CHECKOUT] Local DB address update failed for {order_id}: {e}")
         update_b2bwave_order_address(order_id, new_address)
         shipping_address = new_address
-        print(f"[CHECKOUT] Order {order_id} address corrected by customer: {body.street}, {body.zip}")
 
     validation = validate_address_full(shipping_address)
 
@@ -990,7 +1000,6 @@ def classify_address(order_id: str, token: str, body: ClassifyAddressRequest):
         print(f"[CHECKOUT] Classification save failed for {order_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to save classification")
 
-    print(f"[CHECKOUT] Order {order_id} classified as {body.address_type} → is_residential={is_residential}")
     return {
         "status": "ok",
         "address_type": body.address_type,
