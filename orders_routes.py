@@ -532,14 +532,19 @@ def update_checkpoint(order_id: str, update: CheckpointUpdate, _: bool = Depends
             if update.checkpoint == "sent_to_warehouse":
                 try:
                     from supplier_polling_engine import send_initial_poll
+                    from pickup_polling_engine import send_pickup_ready_poll
                     cur.execute(
-                        "SELECT shipment_id FROM order_shipments WHERE order_id = %s",
+                        "SELECT shipment_id, pickup_type FROM order_shipments WHERE order_id = %s",
                         (order_id,)
                     )
                     shipment_rows = cur.fetchall()
                     for row in shipment_rows:
                         sid = row[0] if isinstance(row, tuple) else row["shipment_id"]
-                        poll_result = send_initial_poll(sid)
+                        ptype = row[1] if isinstance(row, tuple) else row.get("pickup_type")
+                        if ptype == "warehouse_pickup":
+                            poll_result = send_pickup_ready_poll(sid)
+                        else:
+                            poll_result = send_initial_poll(sid)
                         polls_fired.append({
                             "shipment_id": sid,
                             "poll_sent": poll_result.get("success"),
