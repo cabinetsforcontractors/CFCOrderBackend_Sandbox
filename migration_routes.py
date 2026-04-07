@@ -98,60 +98,31 @@ def add_weight_column(_: bool = Depends(require_admin)):
 
 @migration_router.post("/add-is-residential")
 def add_is_residential(_: bool = Depends(require_admin)):
-    """Add is_residential column to order_shipments (WS6 — Smarty residential detection)."""
     return _run(_add_is_residential)
 
 
 @migration_router.post("/add-address-pending")
 def add_address_pending(_: bool = Depends(require_admin)):
-    """Add address_pending + address_validation_error to pending_checkouts."""
     return _run(_add_address_pending)
 
 
 @migration_router.post("/add-address-classification")
 def add_address_classification(_: bool = Depends(require_admin)):
-    """
-    Add address classification columns to pending_checkouts.
-    WS6 — drives the multi-step customer checkout flow.
-    """
     return _run(_add_address_classification)
 
 
 @migration_router.post("/add-bol-columns")
 def add_bol_columns(_: bool = Depends(require_admin)):
-    """
-    Add bol_url and bol_number columns to order_shipments.
-    Phase 8 — BOL generation via R+L API.
-    """
     return _run(_add_bol_columns)
 
 
 @migration_router.post("/add-ws6-supplier-fields")
 def add_ws6_supplier_fields(_: bool = Depends(require_admin)):
-    """
-    WS6 Phase 9 — Add supplier workflow columns to order_shipments and orders:
-      order_shipments.quote_number  — R+L rate quote number (saved at checkout, passed in BOL)
-      order_shipments.close_time   — pickup window close time from supplier form
-      order_shipments.pickup_scheduled_email_sent — customer pickup email flag
-      orders.pro_number             — R+L PRO (separate from orders.tracking)
-    Run once after deploy. Safe to re-run.
-    """
     return _run(_add_ws6_fields)
 
 
 @migration_router.post("/add-ws6-pickup-fields")
 def add_ws6_pickup_fields(_: bool = Depends(require_admin)):
-    """
-    WS6 Warehouse Pickup — Add pickup workflow columns:
-      order_shipments.pickup_type               — 'freight' or 'warehouse_pickup'
-      order_shipments.pickup_ready_date         — when supplier says order is ready
-      order_shipments.pickup_ready_time         — time ready for pickup
-      order_shipments.customer_notified_ready_at — when customer was emailed
-      order_shipments.pickup_confirm_poll_sent_at — when CFC asked 'Has customer picked up?'
-      order_shipments.customer_pickup_confirmed  — TRUE when supplier confirms collected
-      orders.is_pickup                           — TRUE for warehouse pickup orders
-    Run once after deploy. Safe to re-run.
-    """
     return _run(_add_ws6_pickup_fields)
 
 
@@ -207,11 +178,9 @@ def debug_shipment(order_id: str, _: bool = Depends(require_admin)):
     """Show all order_shipments rows for an order_id, plus whether the orders row exists."""
     with get_db() as conn:
         with conn.cursor() as cur:
-            # Check if order row exists
             cur.execute("SELECT order_id, customer_name, email FROM orders WHERE order_id = %s", (order_id,))
             order_row = cur.fetchone()
 
-            # Get all shipments for this order
             cur.execute("""
                 SELECT shipment_id, warehouse, status, pickup_type,
                        supplier_token, supplier_poll_1_sent_at,
@@ -222,23 +191,105 @@ def debug_shipment(order_id: str, _: bool = Depends(require_admin)):
             """, (order_id,))
             rows = cur.fetchall()
 
+            # Also check by shipment_id pattern
+            cur.execute(
+                "SELECT shipment_id, order_id, pickup_type FROM order_shipments WHERE shipment_id LIKE %s",
+                (f"{order_id}-%",)
+            )
+            pattern_rows = cur.fetchall()
+
             return {
                 "order_id": order_id,
                 "order_row_exists": order_row is not None,
                 "order_customer": order_row[1] if order_row else None,
-                "shipment_count": len(rows),
-                "shipments": [
+                "shipment_count_by_order_id": len(rows),
+                "shipment_count_by_pattern": len(pattern_rows),
+                "shipments_by_order_id": [
                     {
-                        "shipment_id": r[0],
-                        "warehouse": r[1],
-                        "status": r[2],
-                        "pickup_type": r[3],
-                        "supplier_token": "SET" if r[4] else "NULL",
-                        "poll_sent_at": str(r[5]) if r[5] else None,
-                        "pickup_ready_date": str(r[6]) if r[6] else None,
-                        "pickup_confirmed": r[7],
-                        "created_at": str(r[8]),
+                        "shipment_id": r[0], "warehouse": r[1], "status": r[2],
+                        "pickup_type": r[3], "has_token": bool(r[4]),
+                        "poll_sent": str(r[5]) if r[5] else None,
+                        "pickup_ready": str(r[6]) if r[6] else None,
+                        "confirmed": r[7], "created": str(r[8]),
                     }
                     for r in rows
                 ],
+                "shipments_by_pattern": [
+                    {"shipment_id": r[0], "order_id": r[1], "pickup_type": r[2]}
+                    for r in pattern_rows
+                ],
             }
+
+
+@migration_router.post("/debug/insert-pickup-shipment/{order_id}")
+def debug_insert_pickup_shipment(order_id: str, _: bool = Depends(require_admin)):
+    """
+    Debug: manually attempt a pickup shipment INSERT for order_id.
+    Returns the exact error if it fails — use this to diagnose constraint issues.
+    """
+    shipment_id = f"{order_id}-Cabinetry-Distribution"
+    results = {}
+
+    # Step 1: Check orders row
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT order_id FROM orders WHERE order_id = %s", (order_id,))
+                row = cur.fetchone()
+                results["orders_row_exists"] = row is not None
+    except Exception as e:
+        results["orders_check_error"] = str(e)
+
+    # Step 2: Check if shipment already exists
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id, order_id FROM order_shipments WHERE shipment_id = %s", (shipment_id,))
+                row = cur.fetchone()
+                results["shipment_already_exists"] = row is not None
+                results["existing_shipment_order_id"] = row[1] if row else None
+    except Exception as e:
+        results["shipment_check_error"] = str(e)
+
+    # Step 3: Attempt INSERT WITH pickup_type
+    if not results.get("shipment_already_exists"):
+        try:
+            with get_db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """INSERT INTO order_shipments
+                           (order_id, shipment_id, warehouse, status, origin_zip,
+                            weight, has_oversized, is_residential, quote_number, pickup_type)
+                           VALUES (%s, %s, 'Cabinetry Distribution', 'needs_order', '32148',
+                                   600, FALSE, FALSE, '', 'warehouse_pickup')
+                           RETURNING id""",
+                        (order_id, shipment_id)
+                    )
+                    row = cur.fetchone()
+                    results["insert_with_pickup_type"] = "SUCCESS"
+                    results["new_shipment_id_pk"] = row[0] if row else None
+        except Exception as e:
+            results["insert_with_pickup_type"] = f"FAILED: {str(e)}"
+
+            # Step 4: Try INSERT WITHOUT pickup_type
+            try:
+                with get_db() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """INSERT INTO order_shipments
+                               (order_id, shipment_id, warehouse, status, origin_zip,
+                                weight, has_oversized, is_residential, quote_number)
+                               VALUES (%s, %s, 'Cabinetry Distribution', 'needs_order', '32148',
+                                       600, FALSE, FALSE, '')
+                               RETURNING id""",
+                            (order_id, shipment_id)
+                        )
+                        row = cur.fetchone()
+                        results["insert_without_pickup_type"] = "SUCCESS"
+                        results["new_shipment_id_pk"] = row[0] if row else None
+            except Exception as e2:
+                results["insert_without_pickup_type"] = f"FAILED: {str(e2)}"
+    else:
+        results["insert_skipped"] = "Shipment already exists"
+
+    return results
