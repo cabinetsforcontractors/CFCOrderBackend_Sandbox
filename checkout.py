@@ -141,6 +141,20 @@ ADDRESS_TYPE_MAP = {
     'military': True,
 }
 
+# B2BWave shipping_option_id for warehouse pickup
+WAREHOUSE_PICKUP_OPTION_ID = '2'
+WAREHOUSE_PICKUP_OPTION_NAME = 'warehouse pick up'
+
+
+def detect_warehouse_pickup(order_data: dict) -> bool:
+    """
+    Returns True if this B2BWave order is a warehouse pickup order.
+    Keyed on shipping_option_id == 2 OR shipping_option_name contains 'Warehouse Pick Up'.
+    """
+    opt_id   = str(order_data.get('shipping_option_id') or '').strip()
+    opt_name = str(order_data.get('shipping_option_name') or '').strip().lower()
+    return opt_id == WAREHOUSE_PICKUP_OPTION_ID or WAREHOUSE_PICKUP_OPTION_NAME in opt_name
+
 
 def detect_item_dimensions(name: str):
     name_upper = name.upper()
@@ -535,6 +549,8 @@ def fetch_b2bwave_order(order_id: str) -> Optional[Dict]:
                     'subtotal': order_total,
                     'order_date': order_date,
                     'total_weight': total_weight,
+                    'shipping_option_id': str(raw_order.get('shipping_option_id') or ''),
+                    'shipping_option_name': raw_order.get('shipping_option_name', ''),
                     'shipping_address': {
                         'address': raw_order.get('address', ''),
                         'address2': raw_order.get('address2', ''),
