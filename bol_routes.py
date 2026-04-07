@@ -48,18 +48,18 @@ BOL_SHIPPER_NAMES = {
 }
 
 WAREHOUSE_ADDRESSES = {
-    "Cabinetry Distribution":  {"address": "561 Keuka Rd",        "city": "Interlachen",   "state": "FL", "zip": "32148", "phone": "6154106775"},
-    "DL Cabinetry":            {"address": "7825 Parramore Rd",   "city": "Jacksonville",  "state": "FL", "zip": "32256", "phone": "9048865000"},
-    "ROC Cabinetry":           {"address": "6015 Unity Dr",       "city": "Norcross",      "state": "GA", "zip": "30071", "phone": "7702639800"},
-    "GHI Cabinets":            {"address": "1402 10th Ave E",     "city": "Palmetto",      "state": "FL", "zip": "34221", "phone": "9419819994"},
-    "Go Bravura":              {"address": "6910 Fulton St",      "city": "Houston",       "state": "TX", "zip": "77066", "phone": "8323267003"},
-    "Love-Milestone":          {"address": "7130 Overland Rd",    "city": "Orlando",       "state": "FL", "zip": "32824", "phone": "4078571985"},
-    "Artisan (fallback)":      {"address": "6910 Fulton St",      "city": "Houston",       "state": "TX", "zip": "77066", "phone": "8323267003"},
-    "Cabinet & Stone":         {"address": "1760 Stebbins Dr",    "city": "Houston",       "state": "TX", "zip": "77043", "phone": "7134688062"},
-    "Cabinet & Stone CA":      {"address": "15500 Vermont Ave",   "city": "Paramount",     "state": "CA", "zip": "90723", "phone": "5627748522"},
-    "DuraStone":               {"address": "4506 Archie St",      "city": "Houston",       "state": "TX", "zip": "77037", "phone": "2814454700"},
-    "L&C Cabinetry":           {"address": "2157 Vista Circle",   "city": "Virginia Beach","state": "VA", "zip": "23454", "phone": "7574255544"},
-    "Dealer Cabinetry":        {"address": "200 Industrial Blvd", "city": "Bremen",        "state": "GA", "zip": "30110", "phone": "7705374422"},
+    "Cabinetry Distribution":  {"address": "561 Keuka Rd",              "city": "Interlachen",    "state": "FL", "zip": "32148", "phone": "6154106775"},
+    "DL Cabinetry":            {"address": "7825 Parramore Rd",         "city": "Jacksonville",   "state": "FL", "zip": "32256", "phone": "9048865000"},
+    "ROC Cabinetry":           {"address": "6015 Unity Dr",             "city": "Norcross",       "state": "GA", "zip": "30071", "phone": "7702639800"},
+    "GHI Cabinets":            {"address": "1402 10th Ave E",           "city": "Palmetto",       "state": "FL", "zip": "34221", "phone": "9419819994"},
+    "Go Bravura":              {"address": "6910 Fulton St",            "city": "Houston",        "state": "TX", "zip": "77066", "phone": "8323267003"},
+    "Love-Milestone":          {"address": "10963 Florida Crown Dr STE 100", "city": "Orlando",   "state": "FL", "zip": "32824", "phone": "4076017090"},
+    "Artisan (fallback)":      {"address": "6910 Fulton St",            "city": "Houston",        "state": "TX", "zip": "77066", "phone": "8323267003"},
+    "Cabinet & Stone":         {"address": "1760 Stebbins Dr",          "city": "Houston",        "state": "TX", "zip": "77043", "phone": "7134688062"},
+    "Cabinet & Stone CA":      {"address": "15500 Vermont Ave",         "city": "Paramount",      "state": "CA", "zip": "90723", "phone": "5627748522"},
+    "DuraStone":               {"address": "4506 Archie St",            "city": "Houston",        "state": "TX", "zip": "77037", "phone": "2814454700"},
+    "L&C Cabinetry":           {"address": "2157 Vista Circle",         "city": "Virginia Beach", "state": "VA", "zip": "23454", "phone": "7574255544"},
+    "Dealer Cabinetry":        {"address": "200 Industrial Blvd",       "city": "Bremen",         "state": "GA", "zip": "30110", "phone": "7705374422"},
 }
 
 bol_router = APIRouter(tags=["bol"])
@@ -206,8 +206,6 @@ def create_bol_for_shipment(
             )
 
             # BLOCKER 3 FIX: write PRO to orders.tracking AND orders.pro_number
-            # The alerts engine 'ready_ship_long' checks orders.tracking.
-            # Without this, the alert fires on every BOL'd order indefinitely.
             cur.execute(
                 """
                 UPDATE orders
