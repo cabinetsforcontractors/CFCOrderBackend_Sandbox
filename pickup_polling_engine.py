@@ -64,34 +64,59 @@ WAREHOUSE_ADDRESSES = {
 # =============================================================================
 
 def get_pickup_shipment_by_token(token: str) -> Optional[dict]:
+    """
+    Fetch shipment by supplier_token. Does NOT require orders table JOIN —
+    safe to call even if the order hasn't been synced to orders table yet.
+    """
     try:
         with get_db() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(
-                    """
-                    SELECT s.*,
-                           o.customer_name, o.company_name, o.email,
-                           o.order_total, o.order_date,
-                           o.payment_received, o.is_complete
-                    FROM order_shipments s
-                    JOIN orders o ON s.order_id = o.order_id
-                    WHERE s.supplier_token = %s
-                    """,
+                    "SELECT * FROM order_shipments WHERE supplier_token = %s",
                     (token,),
                 )
                 row = cur.fetchone()
-                return dict(row) if row else None
+                if not row:
+                    return None
+                result = dict(row)
+                # Try to enrich with orders data — non-fatal if order not yet synced
+                try:
+                    cur.execute(
+                        "SELECT customer_name, company_name, email, order_total, order_date, is_complete "
+                        "FROM orders WHERE order_id = %s",
+                        (result["order_id"],),
+                    )
+                    order_row = cur.fetchone()
+                    if order_row:
+                        result.update(dict(order_row))
+                except Exception:
+                    pass
+                return result
     except Exception as e:
         print(f"[PICKUP] get_pickup_shipment_by_token error: {e}")
         return None
 
 
 def _get_supplier_email(warehouse_name: str) -> Optional[str]:
+    """
+    Look up supplier email by warehouse name OR code.
+    SUPPLIER_INFO keys are codes (LI, DL, ROC...) but values have 'name' matching warehouse_name.
+    Falls back to fuzzy match.
+    """
+    # Direct code lookup
     info = SUPPLIER_INFO.get(warehouse_name)
     if info:
         return info.get("email")
+    # Match by name field
     for key, val in SUPPLIER_INFO.items():
-        if key.lower() in warehouse_name.lower() or warehouse_name.lower() in key.lower():
+        if val.get("name", "").lower() == warehouse_name.lower():
+            return val.get("email")
+    # Fuzzy match — key substring or name substring
+    warehouse_lower = warehouse_name.lower()
+    for key, val in SUPPLIER_INFO.items():
+        if key.lower() in warehouse_lower or warehouse_lower in key.lower():
+            return val.get("email")
+        if val.get("name", "").lower() in warehouse_lower or warehouse_lower in val.get("name", "").lower():
             return val.get("email")
     return None
 
@@ -153,22 +178,21 @@ def send_pickup_ready_poll(shipment_id: str) -> dict:
     """
     Fires when admin clicks 'Send to Warehouse' for a pickup order.
     Asks supplier: 'When will Order #XXXX be ready for customer pickup?'
+
+    Queries order_shipments directly without requiring orders table JOIN —
+    safe even if the order hasn't been synced yet.
     """
     try:
         with get_db() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                # Query shipment only — no orders JOIN (order may not be synced yet)
                 cur.execute(
-                    """
-                    SELECT s.*, o.customer_name, o.company_name, o.order_total, o.order_date
-                    FROM order_shipments s
-                    JOIN orders o ON s.order_id = o.order_id
-                    WHERE s.shipment_id = %s
-                    """,
+                    "SELECT * FROM order_shipments WHERE shipment_id = %s",
                     (shipment_id,),
                 )
                 row = cur.fetchone()
                 if not row:
-                    return {"success": False, "error": f"Shipment {shipment_id} not found"}
+                    return {"success": False, "error": f"Shipment '{shipment_id}' not found"}
                 shipment = dict(row)
 
                 token = shipment.get("supplier_token")
@@ -180,13 +204,11 @@ def send_pickup_ready_poll(shipment_id: str) -> dict:
                     )
 
                 cur.execute(
-                    """
-                    UPDATE order_shipments
-                    SET supplier_poll_1_sent_at = NOW(),
-                        supplier_poll_sent_count = 1,
-                        updated_at = NOW()
-                    WHERE shipment_id = %s
-                    """,
+                    """UPDATE order_shipments
+                       SET supplier_poll_1_sent_at = NOW(),
+                           supplier_poll_sent_count = COALESCE(supplier_poll_sent_count, 0) + 1,
+                           updated_at = NOW()
+                       WHERE shipment_id = %s""",
                     (shipment_id,)
                 )
     except Exception as e:
@@ -194,7 +216,7 @@ def send_pickup_ready_poll(shipment_id: str) -> dict:
 
     supplier_email = _get_supplier_email(shipment["warehouse"])
     if not supplier_email:
-        return {"success": False, "error": f"No email for warehouse {shipment['warehouse']}"}
+        return {"success": False, "error": f"No supplier email found for warehouse '{shipment['warehouse']}'"}
 
     form_url = f"{CHECKOUT_BASE_URL}/supplier/{token}/pickup-ready-form"
     order_id  = shipment["order_id"]
@@ -227,7 +249,7 @@ def send_pickup_ready_poll(shipment_id: str) -> dict:
         "email_success": success,
     })
 
-    return {"success": True, "sent_to": supplier_email, "form_url": form_url}
+    return {"success": True, "sent_to": supplier_email, "form_url": form_url, "order_id": order_id}
 
 
 # =============================================================================
@@ -264,10 +286,10 @@ def supplier_set_pickup_ready(token: str, ready_date_str: str, ready_time_str: s
                            WHERE shipment_id = %s""",
                         (ready_date, ready_time_str, shipment_id)
                     )
-                except Exception:
-                    # pickup_ready_date col may not exist yet — no-op DB update
+                except Exception as col_e:
+                    # pickup_ready_date col may not exist yet — run /add-ws6-pickup-fields migration
                     conn.rollback()
-                    print(f"[PICKUP] pickup_ready_date col not found — run migration /add-ws6-pickup-fields")
+                    print(f"[PICKUP] pickup_ready_date col missing — run migration: {col_e}")
     except Exception as e:
         return {"success": False, "error": f"DB error: {str(e)}"}
 
@@ -288,7 +310,6 @@ def supplier_set_pickup_ready(token: str, ready_date_str: str, ready_time_str: s
             wh_info=wh_info,
         )
 
-    # CFC internal alert
     try:
         date_display = ready_date.strftime("%A, %B %d, %Y")
     except Exception:
@@ -346,9 +367,9 @@ def _send_customer_order_ready_email(
         <div style="font-size:11px;font-weight:700;color:#1E40AF;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px;">Pickup Location</div>
         <div style="color:#1E40AF;font-size:15px;font-weight:600;">{warehouse_name}</div>
         {f'<div style="color:#1E40AF;font-size:14px;margin-top:4px;">{addr_line}</div>' if addr_line.strip(", ") else ''}
-        {f'<div style="color:#1E40AF;font-size:14px;margin-top:2px;">📞 {phone_line}</div>' if phone_line else ''}
+        {f'<div style="color:#1E40AF;font-size:14px;margin-top:2px;">&#128222; {phone_line}</div>' if phone_line else ''}
     </div>
-    <p style="color:#4a5568;font-size:14px;"><strong>Please bring:</strong> Your order number (<strong>#{order_id}</strong>) and a photo ID. A vehicle large enough for your cabinets.</p>
+    <p style="color:#4a5568;font-size:14px;"><strong>Please bring:</strong> Your order number (<strong>#{order_id}</strong>) and a photo ID.</p>
     <p style="color:#4a5568;">Questions? Reply to this email or call <strong>(770) 990-4885</strong>.</p>
     <p style="color:#4a5568;">Thanks,<br><strong>William Prince</strong><br>Cabinets For Contractors</p>
     <hr style="border:none;border-top:1px solid #e2e8f0;margin:20px 0;">
@@ -382,16 +403,13 @@ def check_pickup_confirmations() -> dict:
                 cur.execute("""
                     SELECT s.shipment_id, s.order_id, s.warehouse, s.supplier_token,
                            s.pickup_ready_date, s.pickup_ready_time,
-                           s.pickup_confirm_poll_sent_at, s.customer_pickup_confirmed,
-                           o.customer_name, o.company_name, o.order_total
+                           s.pickup_confirm_poll_sent_at, s.customer_pickup_confirmed
                     FROM order_shipments s
-                    JOIN orders o ON s.order_id = o.order_id
                     WHERE s.pickup_type = 'warehouse_pickup'
                       AND s.pickup_ready_date IS NOT NULL
                       AND s.pickup_ready_date <= CURRENT_DATE
-                      AND (s.pickup_confirm_poll_sent_at IS NULL)
+                      AND s.pickup_confirm_poll_sent_at IS NULL
                       AND (s.customer_pickup_confirmed = FALSE OR s.customer_pickup_confirmed IS NULL)
-                      AND (o.is_complete = FALSE OR o.is_complete IS NULL)
                     ORDER BY s.pickup_ready_date ASC
                 """)
                 shipments = [dict(r) for r in cur.fetchall()]
@@ -506,16 +524,15 @@ def supplier_confirm_pickup_yes(token: str) -> dict:
     except Exception as e:
         return {"success": False, "error": str(e)}
 
-    # CFC internal notification
     _send_raw_email(
         to_email=CFC_INTERNAL_EMAIL,
         subject=f"✅ Order #{order_id} — Customer Picked Up",
-        html_body=f"<p>Order <strong>#{order_id}</strong> from <strong>{shipment['warehouse']}</strong> has been picked up by the customer. Order marked complete.</p>",
+        html_body=f"<p>Order <strong>#{order_id}</strong> from <strong>{shipment.get('warehouse', '')}</strong> has been picked up by the customer. Order marked complete.</p>",
     )
 
     _log_event(order_id, "customer_pickup_confirmed_yes", {
         "shipment_id": shipment_id,
-        "warehouse": shipment["warehouse"],
+        "warehouse": shipment.get("warehouse", ""),
     })
 
     return {"success": True, "order_id": order_id, "status": "complete"}
@@ -531,12 +548,11 @@ def supplier_confirm_pickup_no(token: str) -> dict:
     shipment_id = shipment["shipment_id"]
     warehouse   = shipment.get("warehouse", "unknown warehouse")
 
-    # CFC escalation
     _send_raw_email(
         to_email=CFC_INTERNAL_EMAIL,
         subject=f"🚨 Order #{order_id} — Customer Has NOT Picked Up — CALL NEEDED",
         html_body=f"""<p style="color:#DC2626;font-weight:700;">Customer has not collected Order #{order_id} from {warehouse}.</p>
-<p><strong>Action required:</strong> Call the customer at the phone number on file to reschedule pickup.</p>
+<p><strong>Action required:</strong> Call the customer to reschedule pickup.</p>
 <p>Admin: <a href="https://cfcordersfrontend-sandbox.vercel.app">cfcordersfrontend-sandbox.vercel.app</a></p>""",
     )
 
