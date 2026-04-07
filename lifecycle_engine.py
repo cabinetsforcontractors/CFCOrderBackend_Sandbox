@@ -657,3 +657,70 @@ def get_lifecycle_summary() -> Dict:
             summary["total"] = sum(row["count"] for row in rows)
             
             return summary
+
+
+# =============================================================================
+# QUOTE REMINDER ENGINE
+# =============================================================================
+
+def check_pending_quote_reminders() -> dict:
+    """Check for pending quote reminders (quotes sent 3+ days ago with no payment activity)."""
+    summary = {"reminders_sent": 0, "errors": [], "details": []}
+    try:
+        with get_db() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT pc.order_id, pc.checkout_url, pc.payment_amount, pc.customer_email,
+                           o.customer_name, o.company_name, o.order_total, o.order_date
+                    FROM pending_checkouts pc
+                    JOIN orders o ON pc.order_id = o.order_id
+                    WHERE pc.payment_completed_at IS NULL
+                      AND pc.payment_initiated_at IS NULL
+                      AND pc.created_at < NOW() - interval '3 days'
+                      AND NOT EXISTS (
+                          SELECT 1 FROM order_events e
+                          WHERE e.order_id = pc.order_id
+                          AND e.event_type = 'quote_reminder_sent'
+                      )
+                """)
+                rows = cur.fetchall()
+
+            for row in rows:
+                order_id = row["order_id"]
+                email = row.get("customer_email") or ""
+                if not email:
+                    summary["details"].append({"order_id": order_id, "skipped": True, "reason": "no_email"})
+                    continue
+                try:
+                    first_name = (row.get("customer_name") or "Valued Customer").split()[0]
+                    amount = row.get("payment_amount") or row.get("order_total") or 0
+                    checkout_url = row.get("checkout_url") or ""
+                    subject = f"Your Cabinet Quote for Order #{order_id} is Ready"
+                    html_body = f"""<p>Hi {first_name},</p>
+<p>Your quote for Order <strong>#{order_id}</strong> is still available.</p>
+<p><a href="{checkout_url}" style="display:inline-block;padding:12px 24px;background:#2563eb;color:#fff;border-radius:8px;text-decoration:none;font-weight:bold;">View Your Quote</a></p>
+<p>Total: <strong>${amount:,.2f}</strong></p>
+<p>Call <strong>(770) 990-4885</strong> to confirm your order.</p>
+<p>Thank you,<br/>Cabinets for Contractors</p>"""
+
+                    from gmail_sender import send_email
+                    result = send_email(to=email, subject=subject, html_body=html_body)
+                    sent = result.get("success", False)
+
+                    if sent:
+                        with get_db() as conn2:
+                            with conn2.cursor() as cur2:
+                                cur2.execute("""
+                                    INSERT INTO order_events (order_id, event_type, event_data, created_at)
+                                    VALUES (%s, 'quote_reminder_sent', %s, NOW())
+                                """, (order_id, json.dumps({"email": email, "amount": float(amount)})))
+                                conn2.commit()
+                        summary["reminders_sent"] += 1
+                        summary["details"].append({"order_id": order_id, "sent": True, "email": email})
+                    else:
+                        summary["details"].append({"order_id": order_id, "sent": False, "reason": "send_failed"})
+                except Exception as e:
+                    summary["errors"].append({"order_id": order_id, "error": str(e)})
+    except Exception as e:
+        summary["errors"].append({"error": str(e)})
+    return summary
