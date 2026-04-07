@@ -19,6 +19,7 @@ now marks payment_link_sent=TRUE and payment_link_sent_at=NOW() on the orders ta
 
 WS6 (2026-04-06): Shipment INSERT now saves quote_number from shipping result.
   quote_number is passed to R+L BOL creation to lock in the quoted rate.
+  NOTE: pickup shipments do NOT include quote_number (no R+L quote for pickups).
 
 Public endpoints:
     POST /webhook/b2bwave-order
@@ -365,6 +366,8 @@ def _handle_pickup_webhook(
     - Supplier poll (when admin sends to warehouse) asks:
         "When will Order #XXXX be ready for customer pickup?"
     - After ready date: second poll "Has customer picked up?" → complete or escalate
+
+    NOTE: pickup shipments intentionally omit quote_number (no R+L quote involved).
     """
     line_items = order_data.get('line_items', [])
     total_items = sum(
@@ -391,7 +394,9 @@ def _handle_pickup_webhook(
     # Webhook fires immediately; sync service may not have run yet.
     _ensure_order_row(order_id, order_data)
 
-    # Create shipment records per warehouse
+    # Create shipment records per warehouse.
+    # pickup_type='warehouse_pickup' distinguishes from freight shipments.
+    # quote_number intentionally excluded — pickups have no R+L quote.
     warehouse_groups = group_items_by_warehouse(line_items)
     created_count = 0
     try:
@@ -407,21 +412,22 @@ def _handle_pickup_webhook(
                     if not cur.fetchone():
                         weight = sum(30 * int(i.get('quantity', 1)) for i in items)
                         try:
+                            # Primary: with pickup_type column (added by add_ws6_pickup_fields migration)
                             cur.execute(
                                 """INSERT INTO order_shipments
                                    (order_id, shipment_id, warehouse, status, origin_zip,
-                                    weight, has_oversized, is_residential, quote_number, pickup_type)
-                                   VALUES (%s, %s, %s, 'needs_order', %s, %s, FALSE, FALSE, '', 'warehouse_pickup')""",
+                                    weight, has_oversized, is_residential, pickup_type)
+                                   VALUES (%s, %s, %s, 'needs_order', %s, %s, FALSE, FALSE, 'warehouse_pickup')""",
                                 (order_id, ship_id, wh_name, wh_info.get('zip', ''), weight)
                             )
                         except Exception:
-                            # pickup_type column not yet added — insert without it
+                            # Fallback: pickup_type column not yet added
                             conn.rollback()
                             cur.execute(
                                 """INSERT INTO order_shipments
                                    (order_id, shipment_id, warehouse, status, origin_zip,
-                                    weight, has_oversized, is_residential, quote_number)
-                                   VALUES (%s, %s, %s, 'needs_order', %s, %s, FALSE, FALSE, '')""",
+                                    weight, has_oversized, is_residential)
+                                   VALUES (%s, %s, %s, 'needs_order', %s, %s, FALSE, FALSE)""",
                                 (order_id, ship_id, wh_name, wh_info.get('zip', ''), weight)
                             )
                         created_count += 1
