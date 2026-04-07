@@ -191,7 +191,6 @@ def debug_shipment(order_id: str, _: bool = Depends(require_admin)):
             """, (order_id,))
             rows = cur.fetchall()
 
-            # Also check by shipment_id pattern
             cur.execute(
                 "SELECT shipment_id, order_id, pickup_type FROM order_shipments WHERE shipment_id LIKE %s",
                 (f"{order_id}-%",)
@@ -226,6 +225,7 @@ def debug_insert_pickup_shipment(order_id: str, _: bool = Depends(require_admin)
     """
     Debug: manually attempt a pickup shipment INSERT for order_id.
     Returns the exact error if it fails — use this to diagnose constraint issues.
+    NOTE: quote_number intentionally excluded — pickups have no R+L quote.
     """
     shipment_id = f"{order_id}-Cabinetry-Distribution"
     results = {}
@@ -251,7 +251,7 @@ def debug_insert_pickup_shipment(order_id: str, _: bool = Depends(require_admin)
     except Exception as e:
         results["shipment_check_error"] = str(e)
 
-    # Step 3: Attempt INSERT WITH pickup_type
+    # Step 3: Attempt INSERT WITH pickup_type (no quote_number — pickups have no R+L quote)
     if not results.get("shipment_already_exists"):
         try:
             with get_db() as conn:
@@ -259,9 +259,9 @@ def debug_insert_pickup_shipment(order_id: str, _: bool = Depends(require_admin)
                     cur.execute(
                         """INSERT INTO order_shipments
                            (order_id, shipment_id, warehouse, status, origin_zip,
-                            weight, has_oversized, is_residential, quote_number, pickup_type)
+                            weight, has_oversized, is_residential, pickup_type)
                            VALUES (%s, %s, 'Cabinetry Distribution', 'needs_order', '32148',
-                                   600, FALSE, FALSE, '', 'warehouse_pickup')
+                                   600, FALSE, FALSE, 'warehouse_pickup')
                            RETURNING id""",
                         (order_id, shipment_id)
                     )
@@ -271,24 +271,24 @@ def debug_insert_pickup_shipment(order_id: str, _: bool = Depends(require_admin)
         except Exception as e:
             results["insert_with_pickup_type"] = f"FAILED: {str(e)}"
 
-            # Step 4: Try INSERT WITHOUT pickup_type
+            # Fallback: without pickup_type column
             try:
                 with get_db() as conn:
                     with conn.cursor() as cur:
                         cur.execute(
                             """INSERT INTO order_shipments
                                (order_id, shipment_id, warehouse, status, origin_zip,
-                                weight, has_oversized, is_residential, quote_number)
+                                weight, has_oversized, is_residential)
                                VALUES (%s, %s, 'Cabinetry Distribution', 'needs_order', '32148',
-                                       600, FALSE, FALSE, '')
+                                       600, FALSE, FALSE)
                                RETURNING id""",
                             (order_id, shipment_id)
                         )
                         row = cur.fetchone()
-                        results["insert_without_pickup_type"] = "SUCCESS"
+                        results["insert_fallback"] = "SUCCESS"
                         results["new_shipment_id_pk"] = row[0] if row else None
             except Exception as e2:
-                results["insert_without_pickup_type"] = f"FAILED: {str(e2)}"
+                results["insert_fallback"] = f"FAILED: {str(e2)}"
     else:
         results["insert_skipped"] = "Shipment already exists"
 
