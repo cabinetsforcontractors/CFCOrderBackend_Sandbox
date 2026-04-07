@@ -200,3 +200,45 @@ def debug_orders_columns(_: bool = Depends(require_admin)):
                 "pending_checkouts_columns": [c[0] for c in checkout_cols],
                 "order_shipments_columns": [c[0] for c in shipment_cols],
             }
+
+
+@migration_router.get("/debug/shipment/{order_id}")
+def debug_shipment(order_id: str, _: bool = Depends(require_admin)):
+    """Show all order_shipments rows for an order_id, plus whether the orders row exists."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            # Check if order row exists
+            cur.execute("SELECT order_id, customer_name, email FROM orders WHERE order_id = %s", (order_id,))
+            order_row = cur.fetchone()
+
+            # Get all shipments for this order
+            cur.execute("""
+                SELECT shipment_id, warehouse, status, pickup_type,
+                       supplier_token, supplier_poll_1_sent_at,
+                       pickup_ready_date, customer_pickup_confirmed,
+                       created_at
+                FROM order_shipments WHERE order_id = %s
+                ORDER BY created_at
+            """, (order_id,))
+            rows = cur.fetchall()
+
+            return {
+                "order_id": order_id,
+                "order_row_exists": order_row is not None,
+                "order_customer": order_row[1] if order_row else None,
+                "shipment_count": len(rows),
+                "shipments": [
+                    {
+                        "shipment_id": r[0],
+                        "warehouse": r[1],
+                        "status": r[2],
+                        "pickup_type": r[3],
+                        "supplier_token": "SET" if r[4] else "NULL",
+                        "poll_sent_at": str(r[5]) if r[5] else None,
+                        "pickup_ready_date": str(r[6]) if r[6] else None,
+                        "pickup_confirmed": r[7],
+                        "created_at": str(r[8]),
+                    }
+                    for r in rows
+                ],
+            }
