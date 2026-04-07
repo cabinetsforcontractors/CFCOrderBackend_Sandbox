@@ -123,3 +123,31 @@ async def check_tracking():
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Tracking check error: {str(e)}")
+
+
+# =============================================================================
+# PICKUP CONFIRMATION CHECK — cron endpoint
+# Fires daily after pickup_ready_date has passed.
+# Asks supplier: "Has the customer picked up Order #XXXX?"
+# =============================================================================
+
+@alerts_router.post("/pickup/check-confirmations")
+async def check_pickup_confirmations():
+    """
+    CRON ENDPOINT: After pickup_ready_date has passed, poll supplier asking
+    'Has the customer picked up this order?'
+
+    Run daily via Render cron or external scheduler.
+    Safe to run frequently — skips shipments where poll already sent.
+
+    Returns summary: checked, polls_sent, errors.
+    """
+    try:
+        from pickup_polling_engine import check_pickup_confirmations as _check
+        result = _check()
+        return {
+            "success": True,
+            **result,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Pickup confirmation check error: {str(e)}")
