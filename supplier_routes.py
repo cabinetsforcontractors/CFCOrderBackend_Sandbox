@@ -2,17 +2,20 @@
 supplier_routes.py
 WS6 Phase 9 — Supplier-facing public HTML endpoints
 
-Flow:
+FREIGHT FLOW (pickup_type = 'freight' or null):
   GET  /supplier/{token}/date-form        — date + ready time + close time form
-  POST /supplier/{token}/set-date         — BOL + Pickup Request fired; two emails scheduled:
-                                            1. _delayed_bol_email → supplier (BOL PDF, ~10min)
-                                            2. _send_customer_pickup_scheduled_email → customer
-                                               (pickup confirmed, tracking coming when moving)
+  POST /supplier/{token}/set-date         — BOL + Pickup Request fired; two emails scheduled
   GET  /supplier/{token}/confirm-tomorrow — day-before YES → time + close time form
-  POST /supplier/{token}/set-time         — BOL + Pickup Request fired; same two emails
+  POST /supplier/{token}/set-time         — BOL + Pickup Request fired
   GET  /supplier/{token}/push-date        — day-before NO → new date
   POST /supplier/{token}/submit-push-date — store new date
   POST /supplier/{shipment_id}/send-poll  — admin re-send [admin]
+
+WAREHOUSE PICKUP FLOW (pickup_type = 'warehouse_pickup'):
+  GET  /supplier/{token}/pickup-ready-form    — "When will order be ready for customer pickup?"
+  POST /supplier/{token}/set-pickup-ready     — save date/time; notify customer
+  GET  /supplier/{token}/pickup-confirm       — "Has customer picked up?" (response=yes|no in QS)
+  POST /supplier/{token}/pickup-confirm-submit — handle yes/no form submission
 """
 
 from datetime import date as date_today
@@ -31,10 +34,41 @@ from supplier_polling_engine import (
     _delayed_bol_email,
     _send_customer_pickup_scheduled_email,
 )
+from pickup_polling_engine import (
+    get_pickup_shipment_by_token,
+    send_pickup_ready_poll,
+    supplier_set_pickup_ready,
+    supplier_confirm_pickup_yes,
+    supplier_confirm_pickup_no,
+)
 
 supplier_router = APIRouter(tags=["supplier"])
 
 CFC_EMAIL = "orders@cabinetsforcontractors.net"
+
+
+# =============================================================================
+# HELPERS
+# =============================================================================
+
+def _shipment_is_pickup(shipment_id: str) -> bool:
+    """Check if a shipment is a warehouse pickup order."""
+    try:
+        from db_helpers import get_db
+        from psycopg2.extras import RealDictCursor
+        with get_db() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    "SELECT pickup_type FROM order_shipments WHERE shipment_id = %s",
+                    (shipment_id,)
+                )
+                row = cur.fetchone()
+                if not row:
+                    return False
+                return (row.get("pickup_type") or "freight") == "warehouse_pickup"
+    except Exception as e:
+        print(f"[SUPPLIER] pickup_type check error: {e}")
+        return False
 
 
 def _time_options(selected: str = "", start_hour: int = 7, end_hour: int = 17) -> str:
@@ -90,6 +124,7 @@ _FORM_STYLE = """
     input[type=date]:focus,select:focus{outline:none;border-color:#2563eb;}
     hr{border:none;border-top:1px solid #e2e8f0;margin:18px 0;}
     .bol-note{background:#EFF6FF;border:1px solid #BFDBFE;border-radius:6px;padding:10px 14px;font-size:13px;color:#1E40AF;margin-bottom:18px;}
+    .pickup-note{background:#ecfdf5;border:1px solid #6ee7b7;border-radius:6px;padding:10px 14px;font-size:13px;color:#065f46;margin-bottom:18px;}
     button{width:100%;background:#059669;color:white;padding:14px;border:none;border-radius:6px;font-size:16px;font-weight:700;cursor:pointer;font-family:inherit;display:flex;align-items:center;justify-content:center;gap:10px;}
     button:hover{background:#047857;}
     button:disabled{background:#6b7280;cursor:not-allowed;}
@@ -118,7 +153,7 @@ document.querySelectorAll('form').forEach(function(form) {
 
 
 # =============================================================================
-# COMBINED DATE + READY TIME + CLOSE TIME FORM
+# FREIGHT: COMBINED DATE + READY TIME + CLOSE TIME FORM
 # =============================================================================
 
 @supplier_router.get("/supplier/{token}/date-form", response_class=HTMLResponse)
@@ -215,7 +250,6 @@ async def set_date(token: str, request: Request, background_tasks: BackgroundTas
                     f"Please email us.",
         ))
 
-    # Background task 1: Email BOL PDF to supplier (~10 min delay for R+L to process)
     background_tasks.add_task(
         _delayed_bol_email,
         to_email=result["supplier_email"],
@@ -228,8 +262,6 @@ async def set_date(token: str, request: Request, background_tasks: BackgroundTas
         shipment=result["shipment"],
     )
 
-    # Background task 2: Email customer that pickup is scheduled
-    # No PRO shared — tracking email fires separately when R+L shows first scan
     if result.get("customer_email"):
         background_tasks.add_task(
             _send_customer_pickup_scheduled_email,
@@ -263,7 +295,7 @@ async def set_date(token: str, request: Request, background_tasks: BackgroundTas
 
 
 # =============================================================================
-# DAY-BEFORE — YES branch
+# FREIGHT: DAY-BEFORE — YES branch
 # =============================================================================
 
 @supplier_router.get("/supplier/{token}/confirm-tomorrow", response_class=HTMLResponse)
@@ -335,7 +367,6 @@ async def set_time(token: str, request: Request, background_tasks: BackgroundTas
             f"Could not generate BOL: {result.get('error', 'Unknown error')}. Please email us."
         ), status_code=500)
 
-    # Background task 1: Email BOL PDF to supplier
     background_tasks.add_task(
         _delayed_bol_email,
         to_email=result["supplier_email"],
@@ -348,7 +379,6 @@ async def set_time(token: str, request: Request, background_tasks: BackgroundTas
         shipment=result["shipment"],
     )
 
-    # Background task 2: Email customer that pickup is scheduled
     if result.get("customer_email"):
         background_tasks.add_task(
             _send_customer_pickup_scheduled_email,
@@ -380,7 +410,7 @@ async def set_time(token: str, request: Request, background_tasks: BackgroundTas
 
 
 # =============================================================================
-# DAY-BEFORE — NO branch
+# FREIGHT: DAY-BEFORE — NO branch
 # =============================================================================
 
 @supplier_router.get("/supplier/{token}/push-date", response_class=HTMLResponse)
@@ -453,12 +483,219 @@ async def submit_push_date(token: str, request: Request):
 
 
 # =============================================================================
-# ADMIN: re-send poll
+# WAREHOUSE PICKUP: SUPPLIER ENTERS READY DATE + TIME
+# =============================================================================
+
+@supplier_router.get("/supplier/{token}/pickup-ready-form", response_class=HTMLResponse)
+def pickup_ready_form(token: str):
+    """Supplier form: When will this order be ready for customer pickup?"""
+    shipment = get_pickup_shipment_by_token(token)
+    if not shipment:
+        return HTMLResponse(_error_page("This link is invalid or has expired."), status_code=404)
+
+    order_id = shipment["order_id"]
+    today_str = date_today.today().isoformat()
+
+    existing_date = shipment.get("pickup_ready_date")
+    existing_date_str = existing_date.strftime("%Y-%m-%d") if hasattr(existing_date, "strftime") else ""
+    existing_time = shipment.get("pickup_ready_time") or ""
+
+    existing_banner = ""
+    if existing_date_str:
+        existing_banner = f"<div style='background:#d1fae5;border:1px solid #6ee7b7;border-radius:6px;padding:10px;margin-bottom:16px;font-size:13px;color:#065f46;'>Already recorded ready date: <strong>{existing_date_str}</strong> — you may update below.</div>"
+
+    html = f"""<!DOCTYPE html>
+<html><head>
+    <title>Order #{order_id} — Customer Pickup</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <style>{_FORM_STYLE}</style>
+</head><body>
+<div class="card">
+    <h1>Order #{order_id}</h1>
+    <div class="subtitle">Cabinets For Contractors — Customer Pickup Order</div>
+    {existing_banner}
+    <div class="pickup-note">🏭 This order will be <strong>picked up by the customer</strong> — no R+L shipment needed. Please enter when the order will be ready for them to collect.</div>
+    <form method="POST" action="/supplier/{token}/set-pickup-ready">
+        <div class="field">
+            <label for="ready_date">Date Order Will Be Ready</label>
+            <input type="date" id="ready_date" name="ready_date" value="{existing_date_str}" required min="{today_str}">
+        </div>
+        <div class="field">
+            <label for="ready_time">Time Ready <span style="font-weight:400;color:#718096;">(when customer can collect)</span></label>
+            <select id="ready_time" name="ready_time" required>
+                {_time_options(existing_time)}
+            </select>
+        </div>
+        <button type="submit"><span class="btn-label">Confirm Ready Date &amp; Time →</span><span class="spinner"></span></button>
+    </form>
+    <div class="note">The customer will be notified by email once you submit.</div>
+    <div class="contact">Questions? <a href="mailto:{CFC_EMAIL}" style="color:#1a365d;">{CFC_EMAIL}</a></div>
+</div>
+{_SPINNER_JS}
+</body></html>"""
+    return HTMLResponse(html)
+
+
+@supplier_router.post("/supplier/{token}/set-pickup-ready", response_class=HTMLResponse)
+async def set_pickup_ready(token: str, request: Request):
+    """Supplier submits ready date + time; customer is notified."""
+    try:
+        form = await request.form()
+        ready_date_str = form.get("ready_date", "")
+        ready_time_str = form.get("ready_time", "")
+    except Exception as e:
+        return HTMLResponse(_error_page(f"Could not read form: {str(e)}"), status_code=400)
+
+    if not ready_date_str:
+        return HTMLResponse(_error_page("Please enter the date the order will be ready."), status_code=400)
+    if not ready_time_str:
+        return HTMLResponse(_error_page("Please select a ready time."), status_code=400)
+
+    result = supplier_set_pickup_ready(token, ready_date_str, ready_time_str)
+    if not result.get("success"):
+        return HTMLResponse(_error_page(result.get("error", "Something went wrong.")), status_code=400)
+
+    try:
+        from datetime import datetime
+        date_display = datetime.strptime(ready_date_str, "%Y-%m-%d").strftime("%A, %B %d, %Y")
+    except Exception:
+        date_display = ready_date_str
+
+    return HTMLResponse(_success_page(
+        title="Ready Date Confirmed",
+        message=f"Order will be ready for customer pickup on <strong>{date_display}</strong> at <strong>{ready_time_str}</strong>.<br><br>"
+                f"The customer has been notified by email.",
+        extra_html="""<div class="email-note">
+            📧 The customer received an email with the date, time, and your warehouse address.
+            A follow-up will be sent once the customer confirms they've collected the order.
+        </div>"""
+    ))
+
+
+# =============================================================================
+# WAREHOUSE PICKUP: SUPPLIER CONFIRMS WHETHER CUSTOMER PICKED UP
+# =============================================================================
+
+@supplier_router.get("/supplier/{token}/pickup-confirm", response_class=HTMLResponse)
+def pickup_confirm(token: str, response: str = ""):
+    """
+    GET with ?response=yes → immediately confirm pickup
+    GET with ?response=no  → immediately record not collected
+    GET with no response   → show a confirmation form
+    """
+    shipment = get_pickup_shipment_by_token(token)
+    if not shipment:
+        return HTMLResponse(_error_page("This link is invalid or has expired."), status_code=404)
+
+    order_id = shipment["order_id"]
+
+    if response == "yes":
+        result = supplier_confirm_pickup_yes(token)
+        if result.get("success"):
+            return HTMLResponse(_success_page(
+                title="Pickup Confirmed ✅",
+                message=f"Thank you! Order <strong>#{order_id}</strong> has been marked as collected by the customer.",
+            ))
+        return HTMLResponse(_error_page(result.get("error", "Something went wrong.")))
+
+    if response == "no":
+        result = supplier_confirm_pickup_no(token)
+        if result.get("success"):
+            return HTMLResponse(_success_page(
+                title="Noted — Not Yet Collected",
+                message=f"Thank you for letting us know. The Cabinets For Contractors team has been alerted and will follow up with the customer for Order <strong>#{order_id}</strong>.",
+            ))
+        return HTMLResponse(_error_page(result.get("error", "Something went wrong.")))
+
+    # Show a form if no quick-response param
+    ready_date = shipment.get("pickup_ready_date")
+    try:
+        ready_display = ready_date.strftime("%A, %B %d") if hasattr(ready_date, "strftime") else str(ready_date or "")
+    except Exception:
+        ready_display = str(ready_date or "")
+
+    html = f"""<!DOCTYPE html>
+<html><head>
+    <title>Order #{order_id} — Pickup Confirmation</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <style>
+        *{{box-sizing:border-box;margin:0;padding:0;}}
+        body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f5f5;padding:24px;}}
+        .card{{max-width:480px;margin:0 auto;background:white;border-radius:10px;padding:36px;box-shadow:0 2px 12px rgba(0,0,0,.1);}}
+        h1{{color:#1a365d;font-size:22px;margin-bottom:6px;}}
+        .subtitle{{color:#718096;font-size:14px;margin-bottom:24px;}}
+        p{{color:#4a5568;font-size:15px;line-height:1.7;margin-bottom:16px;}}
+        .btn-row{{display:flex;gap:12px;margin-top:20px;flex-wrap:wrap;}}
+        .btn{{display:inline-block;padding:14px 24px;border-radius:6px;font-size:16px;font-weight:700;text-decoration:none;text-align:center;flex:1;}}
+        .btn-yes{{background:#059669;color:white;}}
+        .btn-yes:hover{{background:#047857;}}
+        .btn-no{{background:#DC2626;color:white;}}
+        .btn-no:hover{{background:#b91c1c;}}
+        .contact{{font-size:12px;color:#999;margin-top:20px;}}
+    </style>
+</head><body>
+<div class="card">
+    <h1>Order #{order_id}</h1>
+    <div class="subtitle">Cabinets For Contractors — Pickup Confirmation</div>
+    <p>Order <strong>#{order_id}</strong> was scheduled for customer pickup{f' on <strong>{ready_display}</strong>' if ready_display else ''}.</p>
+    <p style="font-weight:600;color:#1a365d;">Has the customer picked up this order?</p>
+    <div class="btn-row">
+        <a href="/supplier/{token}/pickup-confirm?response=yes" class="btn btn-yes">✅ Yes — Picked Up</a>
+        <a href="/supplier/{token}/pickup-confirm?response=no" class="btn btn-no">❌ Not Yet</a>
+    </div>
+    <div class="contact">Questions? <a href="mailto:{CFC_EMAIL}" style="color:#1a365d;">{CFC_EMAIL}</a></div>
+</div>
+</body></html>"""
+    return HTMLResponse(html)
+
+
+@supplier_router.post("/supplier/{token}/pickup-confirm-submit", response_class=HTMLResponse)
+async def pickup_confirm_submit(token: str, request: Request):
+    """Handle yes/no form POST for pickup confirmation."""
+    try:
+        form = await request.form()
+        picked_up = form.get("picked_up", "")
+    except Exception as e:
+        return HTMLResponse(_error_page(f"Could not read form: {str(e)}"), status_code=400)
+
+    if picked_up == "yes":
+        result = supplier_confirm_pickup_yes(token)
+    elif picked_up == "no":
+        result = supplier_confirm_pickup_no(token)
+    else:
+        return HTMLResponse(_error_page("Please select Yes or No."), status_code=400)
+
+    if not result.get("success"):
+        return HTMLResponse(_error_page(result.get("error", "Something went wrong.")))
+
+    order_id = result.get("order_id", "")
+    if picked_up == "yes":
+        return HTMLResponse(_success_page(
+            title="Pickup Confirmed ✅",
+            message=f"Order <strong>#{order_id}</strong> marked as collected. Thank you!",
+        ))
+    return HTMLResponse(_success_page(
+        title="Noted — Not Yet Collected",
+        message=f"The CFC team has been alerted and will follow up with the customer for Order <strong>#{order_id}</strong>.",
+    ))
+
+
+# =============================================================================
+# ADMIN: re-send poll — routes by pickup_type
 # =============================================================================
 
 @supplier_router.post("/supplier/{shipment_id}/send-poll")
 def admin_send_poll(shipment_id: str, _: bool = Depends(require_admin)):
-    result = send_initial_poll(shipment_id)
+    """
+    Admin trigger: 'Send to Warehouse'.
+    Routes to pickup poll if pickup_type == 'warehouse_pickup',
+    otherwise fires the standard freight initial poll.
+    """
+    if _shipment_is_pickup(shipment_id):
+        result = send_pickup_ready_poll(shipment_id)
+    else:
+        result = send_initial_poll(shipment_id)
+
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("error"))
     return {"status": "ok", **result}
