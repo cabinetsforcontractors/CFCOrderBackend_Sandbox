@@ -2,21 +2,24 @@
 lifecycle_routes.py
 FastAPI router for Order Lifecycle endpoints.
 
+All endpoints require admin token (X-Admin-Token header).
+
 Mount in main.py with:
     from lifecycle_routes import lifecycle_router
     app.include_router(lifecycle_router)
 
 Endpoints:
-    POST /lifecycle/check-all         — Daily cron: evaluate all orders
-    POST /lifecycle/check/{order_id}  — Check single order
-    POST /lifecycle/extend/{order_id} — Extend deadline (customer response)
-    POST /lifecycle/cancel/{order_id} — Cancel order
-    GET  /lifecycle/summary           — Dashboard counts by status
-    GET  /lifecycle/orders            — List orders by lifecycle status
+    POST /lifecycle/check-all         — Daily cron: evaluate all orders      [admin]
+    POST /lifecycle/check/{order_id}  — Check single order                   [admin]
+    POST /lifecycle/extend/{order_id} — Extend deadline (customer response)  [admin]
+    POST /lifecycle/cancel/{order_id} — Cancel order                         [admin]
+    GET  /lifecycle/summary           — Dashboard counts by status            [admin]
+    GET  /lifecycle/orders            — List orders by lifecycle status       [admin]
 """
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from typing import Optional
+from auth import require_admin
 from lifecycle_engine import (
     check_all_orders_lifecycle,
     check_pending_quote_reminders,
@@ -33,16 +36,13 @@ lifecycle_router = APIRouter(prefix="/lifecycle", tags=["lifecycle"])
 
 
 @lifecycle_router.post("/check-all")
-async def check_all_lifecycle():
+async def check_all_lifecycle(_: bool = Depends(require_admin)):
     """
-    CRON ENDPOINT: Evaluate all active orders against lifecycle timeline.
-    
+    CRON ENDPOINT: Evaluate all active orders against lifecycle timeline. [admin]
+
     Run daily via Render cron job or external scheduler.
-    Checks each order's last_customer_email_at against the 7/30/45 day
-    thresholds and updates lifecycle_status accordingly.
-    
-    Also queues reminder emails (actual sending is Phase 4).
-    
+    Also runs check_pending_quote_reminders() for unpaid quotes after 3 days.
+
     Returns summary of all actions taken.
     """
     try:
@@ -54,8 +54,8 @@ async def check_all_lifecycle():
 
 
 @lifecycle_router.post("/check/{order_id}")
-async def check_order_lifecycle(order_id: str):
-    """Check lifecycle status for a single order."""
+async def check_order_lifecycle(order_id: str, _: bool = Depends(require_admin)):
+    """Check lifecycle status for a single order. [admin]"""
     try:
         result = process_order_lifecycle(order_id)
         if result.get("error"):
@@ -68,12 +68,12 @@ async def check_order_lifecycle(order_id: str):
 
 
 @lifecycle_router.post("/extend/{order_id}")
-async def extend_order_deadline(order_id: str, days: int = 7):
+async def extend_order_deadline(order_id: str, days: int = 7,
+                                _: bool = Depends(require_admin)):
     """
-    Extend lifecycle deadline for an order.
-    
+    Extend lifecycle deadline for an order. [admin]
+
     Called when a customer responds to an email about their order.
-    Per William's rules: customer response adds +7 days to all timers.
     Resets lifecycle_status back to 'active' and clears sent reminders.
     """
     try:
@@ -88,17 +88,12 @@ async def extend_order_deadline(order_id: str, days: int = 7):
 
 
 @lifecycle_router.post("/cancel/{order_id}")
-async def cancel_order_endpoint(order_id: str, reason: str = "manual"):
+async def cancel_order_endpoint(order_id: str, reason: str = "manual",
+                                _: bool = Depends(require_admin)):
     """
-    Cancel an order via lifecycle system.
-    
-    Reasons:
-      - 'customer_request': Customer said "cancel" in email
-      - 'lifecycle_auto_cancel': Day 45 auto-cancellation
-      - 'manual': Admin manually canceled
-    
-    Sets lifecycle_status to 'canceled'. Phase 4 will add B2BWave API cancel
-    and confirmation email sending.
+    Cancel an order via lifecycle system. [admin]
+
+    Reasons: customer_request | lifecycle_auto_cancel | manual
     """
     try:
         result = cancel_order(order_id, reason=reason)
@@ -112,13 +107,8 @@ async def cancel_order_endpoint(order_id: str, reason: str = "manual"):
 
 
 @lifecycle_router.get("/summary")
-async def lifecycle_summary():
-    """
-    Get dashboard summary counts by lifecycle status.
-    
-    Returns counts for: active, inactive, archived, canceled.
-    Used by the frontend tab badges.
-    """
+async def lifecycle_summary(_: bool = Depends(require_admin)):
+    """Get dashboard summary counts by lifecycle status. [admin]"""
     try:
         summary = get_lifecycle_summary()
         return {"success": True, **summary}
@@ -128,22 +118,18 @@ async def lifecycle_summary():
 
 @lifecycle_router.get("/orders")
 async def list_lifecycle_orders(
-    status: Optional[str] = Query(None, description="Filter by lifecycle status: active, inactive, archived, canceled"),
+    status: Optional[str] = Query(None, description="Filter: active, inactive, archived, canceled"),
     limit: int = Query(100, ge=1, le=500),
+    _: bool = Depends(require_admin),
 ):
-    """
-    List orders filtered by lifecycle status.
-    
-    Used by the Inactive and Archived tabs in the frontend.
-    Includes days_inactive, next_deadline, and reminder status.
-    """
+    """List orders filtered by lifecycle status. [admin]"""
     valid_statuses = [STATUS_ACTIVE, STATUS_INACTIVE, STATUS_ARCHIVED, STATUS_CANCELED]
     if status and status not in valid_statuses:
         raise HTTPException(
             status_code=400,
             detail=f"Invalid status. Must be one of: {valid_statuses}"
         )
-    
+
     try:
         with get_db() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -161,25 +147,24 @@ async def list_lifecycle_orders(
                     WHERE (o.is_complete = FALSE OR o.is_complete IS NULL)
                 """
                 params = []
-                
+
                 if status:
                     if status == STATUS_ACTIVE:
                         query += " AND (o.lifecycle_status IS NULL OR o.lifecycle_status = %s)"
                     else:
                         query += " AND o.lifecycle_status = %s"
                     params.append(status)
-                
+
                 query += " ORDER BY o.last_customer_email_at ASC NULLS FIRST LIMIT %s"
                 params.append(limit)
-                
+
                 cur.execute(query, params)
                 orders = cur.fetchall()
-                
-                # Convert decimals for JSON
+
                 for order in orders:
                     if order.get("order_total"):
                         order["order_total"] = float(order["order_total"])
-                
+
                 return {
                     "success": True,
                     "count": len(orders),
