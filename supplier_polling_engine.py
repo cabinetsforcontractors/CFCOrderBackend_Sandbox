@@ -356,7 +356,7 @@ def _delayed_bol_email(
     html = _bol_email_html(warehouse_name, order_id, pro_number, pickup_date, pickup_time, bol_pdf_url)
     _send_raw_email(
         to_email=to_email,
-        subject=f"📄 BOL — Order #{order_id} — PRO {pro_number}",
+        subject=f"\U0001f4c4 BOL — Order #{order_id} — PRO {pro_number}",
         html_body=html,
         pdf_bytes=pdf_bytes,
         pdf_filename=f"BOL-{pro_number}.pdf",
@@ -415,7 +415,7 @@ def _send_customer_pickup_scheduled_email(
     </div>
     <p style="color:#4a5568;">We'll send you tracking information as soon as R+L picks up your shipment and it starts moving.</p>
     <p style="color:#4a5568;font-size:14px;"><strong>Delivery tip:</strong> LTL freight requires someone present to receive. The carrier will call ahead to schedule delivery. Please inspect all boxes and note any damage on the delivery receipt before signing.</p>
-    <p style="color:#4a5568;">Questions? Reply to this email or call <strong>(770) 990-4885</strong>.</p>
+    <p style="color:#4a5568;">Questions? Reply to <a href="mailto:cabinetsforcontractors@gmail.com">cabinetsforcontractors@gmail.com</a> or call <strong>(770) 990-4885</strong>.</p>
     <p style="color:#4a5568;">Thanks,<br><strong>William Prince</strong><br>Cabinets For Contractors</p>
     <hr style="border:none;border-top:1px solid #e2e8f0;margin:20px 0;">
     <p style="font-size:12px;color:#999;text-align:center;">Cabinets For Contractors &bull; (770) 990-4885 &bull; orders@cabinetsforcontractors.net</p>
@@ -550,9 +550,9 @@ def _send_customer_tracking_email(
     tracking_url = f"https://www2.rlcarriers.com/freight/shipping/shipment-tracing?pro={pro_number}"
 
     if status_code.upper() == "DEL":
-        status_msg = "<p style='color:#059669;font-weight:600;'>✅ Your shipment has been delivered.</p>"
+        status_msg = "<p style='color:#059669;font-weight:600;'>\u2705 Your shipment has been delivered.</p>"
     elif status_code.upper() == "OFD":
-        status_msg = "<p style='color:#D97706;font-weight:600;'>🚚 Your shipment is out for delivery today.</p>"
+        status_msg = "<p style='color:#D97706;font-weight:600;'>\U0001f69a Your shipment is out for delivery today.</p>"
     else:
         status_msg = "<p style='color:#4a5568;'>Your shipment has been picked up and is in transit.</p>"
 
@@ -571,11 +571,11 @@ def _send_customer_tracking_email(
         <div style="font-size:11px;font-weight:700;color:#166534;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px;">R+L Carriers PRO Number</div>
         <div style="font-size:26px;font-weight:700;color:#166534;font-family:monospace;letter-spacing:2px;margin-bottom:16px;">{pro_number}</div>
         <a href="{tracking_url}" style="display:inline-block;background:#16a34a;color:white;padding:12px 28px;border-radius:6px;text-decoration:none;font-weight:600;font-size:15px;">
-            Track Your Shipment →
+            Track Your Shipment \u2192
         </a>
     </div>
     <p style="color:#4a5568;font-size:14px;"><strong>Delivery reminder:</strong> LTL freight requires someone present to receive. R+L Carriers will call ahead to schedule your delivery window. Please inspect all boxes and note any damage on the delivery receipt <strong>before signing</strong>.</p>
-    <p style="color:#4a5568;">Questions? Reply to this email or call <strong>(770) 990-4885</strong>.</p>
+    <p style="color:#4a5568;">Questions? Reply to <a href="mailto:cabinetsforcontractors@gmail.com">cabinetsforcontractors@gmail.com</a> or call <strong>(770) 990-4885</strong>.</p>
     <p style="color:#4a5568;">Thanks,<br><strong>William Prince</strong><br>Cabinets For Contractors</p>
     <hr style="border:none;border-top:1px solid #e2e8f0;margin:20px 0;">
     <p style="font-size:12px;color:#999;text-align:center;">Cabinets For Contractors &bull; (770) 990-4885 &bull; orders@cabinetsforcontractors.net</p>
@@ -768,7 +768,7 @@ def _send_day_before_poll(shipment: dict):
     date_str = pickup_date.strftime("%A, %B %d") if hasattr(pickup_date, "strftime") else str(pickup_date)
     yes_url = f"{CHECKOUT_BASE_URL}/supplier/{token}/confirm-tomorrow"
     no_url  = f"{CHECKOUT_BASE_URL}/supplier/{token}/push-date"
-    subject = f"⚠️ Order #{shipment['order_id']} — Pickup Confirmation for {date_str}"
+    subject = f"\u26a0\ufe0f Order #{shipment['order_id']} — Pickup Confirmation for {date_str}"
     body = _render_day_before_email(order_id=shipment["order_id"], date_str=date_str,
                                     yes_url=yes_url, no_url=no_url)
     _send_raw_email(to_email=supplier_email, subject=subject, html_body=body)
@@ -1110,13 +1110,13 @@ def _send_supplier_poll_email(
     warehouse_name: str = "", customer_name: str = "", order_total: float = 0,
 ) -> dict:
     if is_critical:
-        subject = f"🚨 URGENT — Order #{order_id} — Ship Date Required"
-        urgency = "<p style='color:#DC2626;font-weight:700;'>⚠️ No ship date received. Please respond immediately.</p>"
+        subject = f"\U0001f6a8 URGENT — Order #{order_id} — Ship Date Required"
+        urgency = "<p style='color:#DC2626;font-weight:700;'>\u26a0\ufe0f No ship date received. Please respond immediately.</p>"
     elif poll_number == 2:
-        subject = f"📦 Reminder — Order #{order_id} — Ship Date Needed"
+        subject = f"\U0001f4e6 Reminder — Order #{order_id} — Ship Date Needed"
         urgency = "<p style='color:#D97706;font-weight:600;'>We are still waiting for a ship date on this order.</p>"
     else:
-        subject = f"📦 Order #{order_id} — Ship Date Needed"
+        subject = f"\U0001f4e6 Order #{order_id} — Ship Date Needed"
         urgency = "<p>Please enter the pickup date and time for this order.</p>"
 
     html = f"""<!DOCTYPE html><html><head><meta charset="UTF-8"></head>
@@ -1125,7 +1125,7 @@ def _send_supplier_poll_email(
     <h2 style="color:#1a365d;margin-top:0;">Cabinets For Contractors — Order #{order_id}</h2>
     {urgency}
     <a href="{form_url}" style="display:inline-block;background:#1a365d;color:white;padding:14px 28px;border-radius:6px;text-decoration:none;font-weight:700;font-size:16px;margin:16px 0;">
-        Enter Ship Date &amp; Time →
+        Enter Ship Date &amp; Time \u2192
     </a>
     <p style="font-size:12px;color:#999;margin-top:24px;">Questions? Email <a href="mailto:orders@cabinetsforcontractors.net" style="color:#1a365d;">orders@cabinetsforcontractors.net</a></p>
 </div></body></html>"""
@@ -1143,10 +1143,10 @@ def _render_day_before_email(order_id, date_str, yes_url, no_url,
     <p style="font-weight:600;color:#1a365d;margin:16px 0;">Still on track for tomorrow?</p>
     <div style="display:flex;gap:12px;margin:20px 0;flex-wrap:wrap;">
         <a href="{yes_url}" style="display:inline-block;background:#059669;color:white;padding:14px 28px;border-radius:6px;text-decoration:none;font-weight:700;">
-            ✅ Yes — Enter Pickup Time →
+            \u2705 Yes — Enter Pickup Time \u2192
         </a>
         <a href="{no_url}" style="display:inline-block;background:#DC2626;color:white;padding:14px 28px;border-radius:6px;text-decoration:none;font-weight:700;">
-            ❌ No — Enter New Date →
+            \u274c No — Enter New Date \u2192
         </a>
     </div>
     <p style="font-size:12px;color:#999;">Questions? Email <a href="mailto:orders@cabinetsforcontractors.net" style="color:#1a365d;">orders@cabinetsforcontractors.net</a></p>
@@ -1154,13 +1154,13 @@ def _render_day_before_email(order_id, date_str, yes_url, no_url,
 
 
 def _send_cfc_no_response_alert(shipment: dict, hours: int):
-    subject = f"🚨 CALL NEEDED — No Ship Date — Order #{shipment['order_id']} — {shipment['warehouse']}"
+    subject = f"\U0001f6a8 CALL NEEDED — No Ship Date — Order #{shipment['order_id']} — {shipment['warehouse']}"
     html = f"<p style='color:#DC2626;font-weight:700;'>No ship date after {hours}hrs — call now.</p><p>Order #{shipment['order_id']}</p>"
     _send_raw_email(CFC_INTERNAL_EMAIL, subject, html)
 
 
 def _send_cfc_push_alert(shipment: dict, new_date_str: str, weekday_name: str):
-    subject = f"⚠️ CALL NEEDED — {shipment['warehouse']} Pushed #{shipment['order_id']} to {weekday_name}"
+    subject = f"\u26a0\ufe0f CALL NEEDED — {shipment['warehouse']} Pushed #{shipment['order_id']} to {weekday_name}"
     html = f"<p><strong>Warehouse:</strong> {shipment['warehouse']}<br><strong>New Date:</strong> {new_date_str}</p>"
     _send_raw_email(CFC_INTERNAL_EMAIL, subject, html)
 
@@ -1168,10 +1168,10 @@ def _send_cfc_push_alert(shipment: dict, new_date_str: str, weekday_name: str):
 def _send_cfc_bol_fired_alert(shipment: dict, pro_number: str, pickup_date: str,
                                pickup_time: str, close_time: str = "",
                                pickup_confirmation=None, pickup_error=None):
-    subject = f"✅ BOL Fired — Order #{shipment['order_id']} — PRO {pro_number}"
+    subject = f"\u2705 BOL Fired — Order #{shipment['order_id']} — PRO {pro_number}"
     pickup_line = f"<br><strong>Pickup ID:</strong> {pickup_confirmation}" if pickup_confirmation else ""
     close_line  = f"<br><strong>Close Time:</strong> {close_time}" if close_time else ""
-    error_line  = f"<br><span style='color:#DC2626;'>⚠️ Pickup request failed: {pickup_error}</span>" if pickup_error else ""
+    error_line  = f"<br><span style='color:#DC2626;'>\u26a0\ufe0f Pickup request failed: {pickup_error}</span>" if pickup_error else ""
     html = f"""<p><strong>Order:</strong> #{shipment['order_id']}<br>
     <strong>Warehouse:</strong> {shipment['warehouse']}<br>
     <strong>PRO:</strong> <span style="font-family:monospace;color:#059669;">{pro_number}</span><br>
