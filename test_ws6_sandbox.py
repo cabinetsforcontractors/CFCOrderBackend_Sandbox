@@ -12,6 +12,12 @@ Sandbox orders may be modified (lifecycle engine is live and stateful).
 R+L BOL/pickup endpoints are SKIPPED — real trucks showed up last time.
 
 Results: PASS / FAIL / WARN / SKIP per test + summary at end.
+
+v2 fixes:
+  - Checkpoint auth tests: use POST not PATCH (method was wrong)
+  - Checkpoint tests: use POST not PATCH (method was wrong)
+  - Quote view detection: look for id="payBtn" not agreeAndPay()
+    (agreeAndPay is always in the JS source; payBtn is only rendered when VIEW != quote)
 """
 
 import requests
@@ -36,7 +42,7 @@ KNOWN_FREIGHT_ORDER = "5529"     # Freight order with BOL
 FAKE_ORDER_ID = "TEST_FAKE_999"  # Should not exist
 FAKE_SHIPMENT_ID = "FAKE-Cabinetry-Distribution-9999"
 
-# Known pickup shipment from yesterday's testing
+# Known pickup shipment
 PICKUP_SHIPMENT_ID = "4919-Cabinetry-Distribution"
 
 # Test customer email (all test emails land here)
@@ -51,7 +57,6 @@ start_time = datetime.now()
 
 
 def test(name, category="General"):
-    """Decorator/context helper — just returns a runner function."""
     def run(func):
         result = {"name": name, "category": category, "status": None, "detail": ""}
         try:
@@ -69,13 +74,11 @@ def test(name, category="General"):
 
 
 def r(method, path, **kwargs):
-    """Make a request with a short timeout."""
     fn = getattr(requests, method.lower())
     return fn(f"{BASE}{path}", timeout=30, **kwargs)
 
 
 def check(resp, expected_status=200, key=None, expected_value=None):
-    """Assert status code and optionally a JSON key."""
     if resp.status_code != expected_status:
         return "FAIL", f"Expected {expected_status}, got {resp.status_code}: {resp.text[:120]}"
     if key is not None:
@@ -126,6 +129,7 @@ def _():
 
 print("\n🔐 2. AUTH ENFORCEMENT")
 
+# FIX: checkpoint endpoint is POST not PATCH
 ADMIN_ONLY_ENDPOINTS = [
     ("POST", "/alerts/check-all"),
     ("POST", "/alerts/tracking/check-all"),
@@ -136,7 +140,7 @@ ADMIN_ONLY_ENDPOINTS = [
     ("GET",  "/debug/shipment/4919"),
     ("POST", "/debug/insert-pickup-shipment/4919"),
     ("PATCH", f"/orders/{KNOWN_ORDER_ID}"),
-    ("POST", f"/orders/{KNOWN_ORDER_ID}/checkpoint"),
+    ("POST", f"/orders/{KNOWN_ORDER_ID}/checkpoint"),   # POST, not PATCH
     ("POST", f"/supplier/{PICKUP_SHIPMENT_ID}/send-poll"),
 ]
 
@@ -189,24 +193,23 @@ def _():
     resp = r("GET", "/orders/status/summary", headers=ADMIN_HEADERS)
     return check(resp, 200, "status", "ok")
 
-@test(f"PATCH /orders/{KNOWN_ORDER_ID}/set-status?status=complete — valid status", "Orders")
+@test(f"PATCH /orders/{KNOWN_ORDER_ID}/set-status?status=complete — valid", "Orders")
 def _():
     resp = r("PATCH", f"/orders/{KNOWN_ORDER_ID}/set-status?status=complete", headers=ADMIN_HEADERS)
     return check(resp, 200, "status", "ok")
 
-@test(f"PATCH /orders/{KNOWN_ORDER_ID}/set-status?status=INVALID — invalid status", "Orders")
+@test(f"PATCH /orders/{KNOWN_ORDER_ID}/set-status?status=INVALID — invalid", "Orders")
 def _():
     resp = r("PATCH", f"/orders/{KNOWN_ORDER_ID}/set-status?status=INVALID_STATUS", headers=ADMIN_HEADERS)
     return check(resp, 400)
 
-@test(f"PATCH /orders/{FAKE_ORDER_ID}/set-status?status=complete — fake order", "Orders")
+@test(f"PATCH /orders/{FAKE_ORDER_ID}/set-status — fake order → 404", "Orders")
 def _():
     resp = r("PATCH", f"/orders/{FAKE_ORDER_ID}/set-status?status=complete", headers=ADMIN_HEADERS)
     if resp.status_code in (404, 400):
         return "PASS", f"Correctly returned {resp.status_code}"
     return "WARN", f"Expected 404, got {resp.status_code}"
 
-# Test all valid statuses
 VALID_STATUSES = ["needs_payment_link", "awaiting_payment", "needs_warehouse_order",
                   "awaiting_warehouse", "needs_bol", "awaiting_shipment", "complete"]
 
@@ -216,19 +219,19 @@ for status in VALID_STATUSES:
         resp = r("PATCH", f"/orders/{KNOWN_ORDER_ID}/set-status?status={s}", headers=ADMIN_HEADERS)
         return check(resp, 200, "status", "ok")
 
-@test(f"PATCH /orders/{KNOWN_ORDER_ID}/checkpoint — payment_received", "Orders")
+# FIX: checkpoint endpoint is POST not PATCH
+@test(f"POST /orders/{KNOWN_ORDER_ID}/checkpoint — payment_received", "Orders")
 def _():
     payload = {"checkpoint": "payment_received"}
     resp = r("POST", f"/orders/{KNOWN_ORDER_ID}/checkpoint", headers=ADMIN_HEADERS, json=payload)
     return check(resp, 200, "status", "ok")
 
-@test(f"PATCH /orders/{KNOWN_ORDER_ID}/checkpoint — invalid checkpoint", "Orders")
+@test(f"POST /orders/{KNOWN_ORDER_ID}/checkpoint — invalid checkpoint → 400", "Orders")
 def _():
     payload = {"checkpoint": "INVALID_CHECKPOINT"}
     resp = r("POST", f"/orders/{KNOWN_ORDER_ID}/checkpoint", headers=ADMIN_HEADERS, json=payload)
     return check(resp, 400)
 
-# All valid checkpoints
 VALID_CHECKPOINTS = ["payment_link_sent", "payment_received", "sent_to_warehouse",
                      "warehouse_confirmed", "bol_sent", "is_complete"]
 
@@ -272,11 +275,11 @@ def _():
     resp = r("GET", "/shipments", headers=ADMIN_HEADERS)
     return check(resp, 200, "status", "ok")
 
-@test(f"GET /shipments/{PICKUP_SHIPMENT_ID}/rl-quote-data — pickup shipment data", "Shipments")
+@test(f"GET /shipments/{PICKUP_SHIPMENT_ID}/rl-quote-data — pickup data", "Shipments")
 def _():
     resp = r("GET", f"/shipments/{PICKUP_SHIPMENT_ID}/rl-quote-data", headers=ADMIN_HEADERS)
     if resp.status_code == 200:
-        return "PASS", f"status=200"
+        return "PASS", "status=200"
     return "WARN", f"status={resp.status_code}: {resp.text[:100]}"
 
 @test(f"PATCH /shipments/{PICKUP_SHIPMENT_ID} — update status", "Shipments")
@@ -294,7 +297,6 @@ def _():
     resp = r("PATCH", f"/shipments/{FAKE_SHIPMENT_ID}?status=needs_order", headers=ADMIN_HEADERS)
     return check(resp, 404)
 
-# All valid shipment statuses
 VALID_SHIP_STATUSES = ["needs_order", "at_warehouse", "needs_bol", "ready_ship", "shipped", "delivered"]
 for s in VALID_SHIP_STATUSES:
     @test(f"Shipment status → {s}", "Shipments")
@@ -302,7 +304,6 @@ for s in VALID_SHIP_STATUSES:
         resp = r("PATCH", f"/shipments/{PICKUP_SHIPMENT_ID}?status={st}", headers=ADMIN_HEADERS)
         return check(resp, 200, "status", "ok")
 
-# Reset to needs_order after status tests
 @test("Reset shipment status → needs_order", "Shipments")
 def _():
     resp = r("PATCH", f"/shipments/{PICKUP_SHIPMENT_ID}?status=needs_order", headers=ADMIN_HEADERS)
@@ -374,9 +375,8 @@ def _():
     resp = r("GET", f"/checkout-ui/{KNOWN_ORDER_ID}?token=BADTOKEN", headers=NO_AUTH_HEADERS)
     return check(resp, 403)
 
-@test(f"GET /checkout-ui/{KNOWN_ORDER_ID}?view=quote — no Pay button in HTML", "Checkout")
+@test(f"GET /checkout-ui/{KNOWN_ORDER_ID}?view=quote — no Pay button", "Checkout")
 def _():
-    # First get a valid token from webhook
     wh = r("POST", "/webhook/b2bwave-order", headers=NO_AUTH_HEADERS,
             json={"id": KNOWN_ORDER_ID, "customer_email": TEST_EMAIL})
     token = wh.json().get("checkout_url", "").split("token=")[-1] if wh.status_code == 200 else None
@@ -385,11 +385,13 @@ def _():
     resp = r("GET", f"/checkout-ui/{KNOWN_ORDER_ID}?token={token}&view=quote", headers=NO_AUTH_HEADERS)
     if resp.status_code != 200:
         return "FAIL", f"status={resp.status_code}"
-    if "agreeAndPay" in resp.text or "Pay $" in resp.text:
-        return "FAIL", "Pay button found in quote view — should be hidden"
+    # FIX: check for id="payBtn" which is only rendered when VIEW != quote.
+    # agreeAndPay() is always present in the JS source — wrong detection.
+    if 'id="payBtn"' in resp.text or 'id=\\"payBtn\\"' in resp.text:
+        return "FAIL", "payBtn element found in quote view — Pay button should be hidden"
     if "Quote Total" in resp.text or "(770) 990-4885" in resp.text:
-        return "PASS", "Quote view rendered without Pay button"
-    return "WARN", "Could not confirm quote view — check HTML manually"
+        return "PASS", "Quote view rendered — payBtn absent, quote box present"
+    return "WARN", "Could not confirm quote view content — check manually"
 
 @test("GET /checkout/{id} — invalid token → 403", "Checkout")
 def _():
@@ -442,7 +444,6 @@ print("\n⏰ 8. CRON ENDPOINTS")
 @test("POST /alerts/pickup/check-confirmations — cron runs", "Crons")
 def _():
     resp = r("POST", "/alerts/pickup/check-confirmations", headers=ADMIN_HEADERS)
-    d = resp.json()
     return check(resp, 200, "success", True)
 
 @test("POST /alerts/tracking/check-all — cron runs", "Crons")
@@ -556,13 +557,12 @@ def _():
     r2 = r("POST", f"/orders/{KNOWN_ORDER_ID}/send-tracking", headers=ADMIN_HEADERS, params=params)
     if r1.status_code == 200 and r2.status_code == 200:
         d2 = r2.json()
-        # If second call returns email_sent=False, the event guard is working
         if d2.get("email_sent") is False:
             return "PASS", "Second call: email_sent=False — event guard working"
         return "WARN", f"Second call email_sent={d2.get('email_sent')} — may have sent dupe"
     return "FAIL", f"r1={r1.status_code}, r2={r2.status_code}"
 
-@test(f"POST /orders/{FAKE_ORDER_ID}/send-tracking — fake order", "Tracking")
+@test(f"POST /orders/{FAKE_ORDER_ID}/send-tracking — fake order handled", "Tracking")
 def _():
     params = {"tracking_number": "TEST-PRO-FAKE", "shipment_id": FAKE_SHIPMENT_ID}
     resp = r("POST", f"/orders/{FAKE_ORDER_ID}/send-tracking", headers=ADMIN_HEADERS, params=params)
@@ -601,9 +601,9 @@ def _():
     missing = expected_keys - set(d.keys())
     if missing:
         return "FAIL", f"Missing response keys: {missing}"
-    return "PASS", f"All table column lists present"
+    return "PASS", "All table column lists present"
 
-@test(f"POST /debug/insert-pickup-shipment/{KNOWN_ORDER_ID} — insert or already exists", "Debug")
+@test(f"POST /debug/insert-pickup-shipment/{KNOWN_ORDER_ID} — idempotent", "Debug")
 def _():
     resp = r("POST", f"/debug/insert-pickup-shipment/{KNOWN_ORDER_ID}", headers=ADMIN_HEADERS)
     d = resp.json()
@@ -635,7 +635,7 @@ for ep in MIGRATION_ENDPOINTS:
     def _(e=ep):
         resp = r("POST", e, headers=ADMIN_HEADERS)
         if resp.status_code == 200:
-            return "PASS", f"200 — idempotent"
+            return "PASS", "200 — idempotent"
         return "WARN", f"status={resp.status_code}: {resp.text[:80]}"
 
 
@@ -725,7 +725,7 @@ def _():
 # =============================================================================
 
 print("\n⏭️  16. R+L BOL / PICKUP REQUEST — SKIPPED")
-print("  ⏭️  [Skip] BOL creation — real trucks showed up when tested. Skipping entirely.")
+print("  ⏭️  [Skip] BOL creation — real trucks showed up when tested. Skip until production.")
 print("  ⏭️  [Skip] Pickup request — same reason. Test manually in prod when ready.")
 
 results.append({"name": "R+L BOL creation", "category": "Skip", "status": "SKIP",
