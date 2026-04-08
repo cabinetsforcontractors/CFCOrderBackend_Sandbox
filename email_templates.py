@@ -12,6 +12,8 @@ Templates:
   7. inactive_notice_day7   — Lifecycle: moved to inactive (day 7)
   8. cancel_warning_day14   — Lifecycle: will be canceled in 7 days (day 14)
   9. cancel_confirmation    — Lifecycle: order canceled (day 21 or manual)
+ 10. quote_email            — Quote with line items, no payment link -- B2BWave portal CTA
+ 11. abandoned_cart_nudge   — Nudge for abandoned B2BWave carts
 """
 
 from typing import Dict, List, Optional
@@ -81,6 +83,20 @@ TEMPLATE_REGISTRY = {
         "description": "Lifecycle: confirms order was canceled",
         "category": "lifecycle",
         "is_lifecycle": True,
+    },
+    "quote_email": {
+        "name": "Quote Email",
+        "subject": "Your Cabinet Quote for Order #{order_id} -- Cabinets For Contractors",
+        "description": "Quote with line items, no payment link -- B2BWave portal CTA",
+        "category": "quote",
+        "is_lifecycle": False,
+    },
+    "abandoned_cart_nudge": {
+        "name": "Abandoned Cart Nudge",
+        "subject": "You left something behind -- Order #{order_id}",
+        "description": "Nudge for abandoned B2BWave carts",
+        "category": "quote",
+        "is_lifecycle": False,
     },
 }
 
@@ -546,6 +562,155 @@ def _render_cancel_confirmation(order: Dict) -> str:
     return _wrap_email(_header("Order Canceled", f"Order #{order_id}"), body)
 
 
+def _render_quote_email(order: Dict) -> str:
+    """Quote email with line items, totals, no Pay button -- CTA to B2BWave portal or call."""
+    customer = order.get("customer_name", "Valued Customer")
+    first_name = customer.split()[0] if customer else "there"
+    order_id = str(order.get("order_id", order.get("id", "")))
+    line_items = order.get("line_items", [])
+    b2bwave_url = order.get("b2bwave_portal_url", "#")
+    quote_url = order.get("payment_link", "#")
+
+    sr = order.get("shipping_result", {})
+    total_items = sr.get("total_items", order.get("order_total", 0))
+    tariff_rate = sr.get("tariff_rate", 0.08)
+    tariff_amount = sr.get("tariff_amount", round(float(total_items) * tariff_rate, 2))
+    total_shipping = sr.get("total_shipping", 0)
+    grand_total = sr.get("grand_total", round(float(total_items) + tariff_amount + total_shipping, 2))
+
+    if line_items:
+        rows = ""
+        for item in line_items:
+            sku = item.get("sku", "")
+            name = item.get("name", "")
+            qty = item.get("quantity", 1)
+            price = float(item.get("price", 0))
+            line_total = float(item.get("line_total", price * qty))
+            rows += f"""
+            <tr>
+                <td class="sku">{sku}</td>
+                <td>{name}</td>
+                <td class="num">{qty}</td>
+                <td class="num">${price:,.2f}</td>
+                <td class="num">${line_total:,.2f}</td>
+            </tr>"""
+
+        items_html = f"""
+        <table class="invoice-table">
+            <thead>
+                <tr>
+                    <th style="width:110px;">SKU</th>
+                    <th>Description</th>
+                    <th class="num" style="width:40px;">Qty</th>
+                    <th class="num" style="width:90px;">Unit Price</th>
+                    <th class="num" style="width:90px;">Total</th>
+                </tr>
+            </thead>
+            <tbody>{rows}</tbody>
+        </table>"""
+    else:
+        items_html = '<p style="color:#718096;font-size:13px;">No line items available.</p>'
+
+    tariff_pct = int(tariff_rate * 100)
+
+    body = f"""
+    <p>Hi {first_name},</p>
+    <p>Here is your cabinet quote for Order <strong>#{order_id}</strong>.</p>
+
+    <div style="background:#EFF6FF;border:1px solid #BFDBFE;border-radius:8px;padding:14px 18px;margin:16px 0;text-align:center;">
+        <p style="margin:0;color:#1E40AF;font-weight:600;font-size:14px;">This quote is valid for 30 days.</p>
+    </div>
+
+    {items_html}
+
+    <table class="totals-table">
+        <tr><td class="label">Subtotal</td><td class="amount">${float(total_items):,.2f}</td></tr>
+        <tr><td class="label">Tariff ({tariff_pct}%)</td><td class="amount">${tariff_amount:,.2f}</td></tr>
+        <tr><td class="label">Shipping</td><td class="amount">${total_shipping:,.2f}</td></tr>
+        <tr class="grand"><td class="label">Quote Total</td><td class="amount">${grand_total:,.2f}</td></tr>
+    </table>
+
+    <p style="margin-top:20px;font-weight:600;color:#1a365d;">Ready to place your order? You have two options:</p>
+
+    <div class="cta-wrap" style="display:flex;gap:12px;justify-content:center;flex-wrap:wrap;">
+        <a href="{quote_url}" class="cta-button">View Quote Details &rarr;</a>
+        <a href="tel:7709904885" style="display:inline-block;background:#f1f5f9;color:#334155;text-decoration:none;padding:14px 28px;border-radius:6px;font-weight:700;font-size:16px;border:2px solid #e2e8f0;">
+            Call to Order: (770) 990-4885
+        </a>
+    </div>
+
+    <p style="margin-top:16px;font-size:13px;color:#718096;">
+        When you're ready, simply view this quote online or call us and we'll take care of it.
+    </p>
+
+    <p style="margin-top:20px;font-size:13px;">Questions? Reply to <a href="mailto:cabinetsforcontractors@gmail.com">cabinetsforcontractors@gmail.com</a> or call <strong>(770) 990-4885</strong>.</p>
+    <p style="font-size:13px;">Thanks,<br><strong>William Prince</strong><br>Cabinets For Contractors</p>
+    """
+    return _wrap_email(_header("Your Cabinet Quote", f"Order #{order_id}"), body)
+
+
+def _render_abandoned_cart_nudge(order: Dict) -> str:
+    """Nudge email for abandoned B2BWave carts."""
+    customer = order.get("customer_name", "Valued Customer")
+    first_name = customer.split()[0] if customer else "there"
+    order_id = str(order.get("order_id", order.get("id", "")))
+    line_items = order.get("line_items", [])
+    b2bwave_url = order.get("b2bwave_portal_url", "#")
+
+    total = order.get("order_total", 0)
+    total_fmt = f"${float(total):,.2f}" if total else ""
+
+    if line_items:
+        rows = ""
+        for item in line_items:
+            sku = item.get("sku", "")
+            name = item.get("name", "")
+            qty = item.get("quantity", 1)
+            price = float(item.get("price", 0))
+            line_total = float(item.get("line_total", price * qty))
+            rows += f"""
+            <tr>
+                <td class="sku">{sku}</td>
+                <td>{name}</td>
+                <td class="num">{qty}</td>
+                <td class="num">${price:,.2f}</td>
+                <td class="num">${line_total:,.2f}</td>
+            </tr>"""
+
+        items_html = f"""
+        <table class="invoice-table">
+            <thead>
+                <tr>
+                    <th style="width:110px;">SKU</th>
+                    <th>Description</th>
+                    <th class="num" style="width:40px;">Qty</th>
+                    <th class="num" style="width:90px;">Unit Price</th>
+                    <th class="num" style="width:90px;">Total</th>
+                </tr>
+            </thead>
+            <tbody>{rows}</tbody>
+        </table>"""
+    else:
+        items_html = ""
+
+    body = f"""
+    <p>Hi {first_name},</p>
+    <p>We noticed you started an order and didn't finish. Your items are still saved.</p>
+
+    {items_html}
+    {f'<p style="font-size:16px;font-weight:700;color:#1a365d;margin-top:16px;">Subtotal: {total_fmt}</p>' if total_fmt else ''}
+
+    <div class="cta-wrap">
+        <a href="{b2bwave_url}" class="cta-button">Complete Your Order &rarr;</a>
+    </div>
+
+    <p style="font-size:13px;color:#718096;">Shipping will be calculated once your order is submitted.</p>
+    <p style="margin-top:16px;font-size:13px;">Questions? Call <strong>(770) 990-4885</strong> or reply to <a href="mailto:cabinetsforcontractors@gmail.com">cabinetsforcontractors@gmail.com</a>.</p>
+    <p style="font-size:13px;">Thanks,<br><strong>William Prince</strong><br>Cabinets For Contractors</p>
+    """
+    return _wrap_email(_header("You Left Something Behind", f"Order #{order_id}"), body)
+
+
 # =============================================================================
 # MAIN RENDER FUNCTION
 # =============================================================================
@@ -560,6 +725,8 @@ _RENDERERS = {
     "inactive_notice_day7": _render_inactive_notice_day7,
     "cancel_warning_day14": _render_cancel_warning_day14,
     "cancel_confirmation": _render_cancel_confirmation,
+    "quote_email": _render_quote_email,
+    "abandoned_cart_nudge": _render_abandoned_cart_nudge,
 }
 
 
