@@ -526,3 +526,38 @@ def add_ws6_pickup_fields() -> dict:
         "message": "WS6 warehouse pickup fields added",
         "results": results
     }
+
+
+# =============================================================================
+# QUOTE + ABANDONED CART TRACKING
+# =============================================================================
+
+def add_quote_tracking_columns():
+    """
+    Add quote and abandoned cart tracking to pending_checkouts.
+    Safe to re-run (IF NOT EXISTS).
+    """
+    columns = [
+        ("is_quote",                 "BOOLEAN DEFAULT FALSE"),
+        ("quote_sent_at",            "TIMESTAMPTZ"),
+        ("quote_b2bwave_updated_at", "TIMESTAMPTZ"),
+        ("quote_email_count",        "INTEGER DEFAULT 0"),
+        ("abandoned_nudge_1_sent_at","TIMESTAMPTZ"),
+        ("abandoned_nudge_2_sent_at","TIMESTAMPTZ"),
+        ("submitted_by_class",       "VARCHAR(50)"),
+        ("b2bwave_status_id",        "INTEGER"),
+    ]
+    results = []
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            for col, definition in columns:
+                try:
+                    cur.execute(
+                        f"ALTER TABLE pending_checkouts ADD COLUMN IF NOT EXISTS {col} {definition}"
+                    )
+                    results.append(f"{col}: added")
+                except Exception as e:
+                    conn.rollback()
+                    results.append(f"{col}: skipped ({e})")
+            conn.commit()
+    return {"status": "ok", "message": "Quote tracking columns added to pending_checkouts", "results": results}
