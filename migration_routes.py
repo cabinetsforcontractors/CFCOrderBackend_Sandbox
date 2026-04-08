@@ -25,6 +25,7 @@ try:
         add_bol_columns_to_shipments as _add_bol_columns,
         add_ws6_supplier_workflow_fields as _add_ws6_fields,
         add_ws6_pickup_fields as _add_ws6_pickup_fields,
+        add_quote_tracking_columns as _add_quote_tracking,
     )
     DB_MIGRATIONS_LOADED = True
 except ImportError:
@@ -124,6 +125,11 @@ def add_ws6_supplier_fields(_: bool = Depends(require_admin)):
 @migration_router.post("/add-ws6-pickup-fields")
 def add_ws6_pickup_fields(_: bool = Depends(require_admin)):
     return _run(_add_ws6_pickup_fields)
+
+
+@migration_router.post("/add-quote-tracking-columns")
+def add_quote_tracking_columns_endpoint(_: bool = Depends(require_admin)):
+    return _run(_add_quote_tracking)
 
 
 @migration_router.post("/init-db")
