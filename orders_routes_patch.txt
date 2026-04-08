@@ -1,6 +1,0 @@
-PENDING: Add is_residential to get_rl_quote_data return in orders_routes.py
-
-In get_rl_quote_data (line ~1080), add before "rl_quote_url":
-    "is_residential": bool(shipment.get("is_residential", True)),
-
-Run this migration before using the liftgate toggle: add_is_residential_to_shipments()
