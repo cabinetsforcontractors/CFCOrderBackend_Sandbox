@@ -674,6 +674,32 @@ def b2bwave_order_webhook(payload: dict):
                 "message": "Order not found in B2BWave"}
 
     # ------------------------------------------------------------------
+    # Quote conversion gate -- skip Square link for converted quotes
+    # ------------------------------------------------------------------
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT is_quote, payment_completed_at FROM pending_checkouts WHERE order_id = %s",
+                    (str(order_id),)
+                )
+                existing_checkout = cur.fetchone()
+                if existing_checkout and existing_checkout[0]:  # is_quote=True
+                    cur.execute(
+                        "INSERT INTO order_events (order_id, event_type, event_data, source) "
+                        "VALUES (%s, 'quote_converted_to_order', %s, 'webhook')",
+                        (str(order_id), json.dumps({"was_quote": True}))
+                    )
+                    return {
+                        "status": "ok",
+                        "order_id": order_id,
+                        "case": "converted_quote",
+                        "message": "Quote converted to order -- no Square link generated",
+                    }
+    except Exception as e:
+        print(f"[WEBHOOK] Quote conversion check failed (non-fatal): {e}")
+
+    # ------------------------------------------------------------------
     # Warehouse Pickup — skip Smarty, skip R+L, $0 invoice
     # ------------------------------------------------------------------
     if detect_warehouse_pickup(order_data):
@@ -1443,8 +1469,7 @@ function renderStep3(data) {{
     }});
 
     const isRes = data.is_residential !== false;
-    const isPickup = !!(shipping.is_pickup);
-    const resNotice = isPickup ? '' : (isRes ? `
+    const resNotice = isRes ? `
         <div class="residential-notice">
             <p><strong>&#x1F4CD; Delivery Address Classification</strong></p>
             <p>Your delivery address has been classified as a <strong>residential address</strong>. Residential deliveries include liftgate service at delivery.</p>
@@ -1458,7 +1483,7 @@ function renderStep3(data) {{
         </div>` : `
         <div style="background:#f0fdf4;border:1px solid #86efac;border-radius:8px;padding:12px 16px;margin:16px 0;font-size:14px;color:#166534;">
             &#x1F3E2; Your delivery address has been classified as <strong>commercial</strong>. No liftgate surcharge applies.
-        </div>`);
+        </div>`;
 
     const tariffPct = Math.round((shipping.tariff_rate || 0.08) * 100);
     document.getElementById('content').innerHTML = `
