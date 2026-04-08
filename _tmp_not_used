@@ -1,0 +1,4 @@
+    <p style="margin-top:20px;font-size:13px;">Questions? Reply to <a href="mailto:cabinetsforcontractors@gmail.com">cabinetsforcontractors@gmail.com</a> or call <strong>(770) 990-4885</strong>.</p>
+    <p style="font-size:13px;">Thanks,<br><strong>William Prince</strong><br>Cabinets For Contractors</p>
+    """
+    return _wrap_email(_header("Invoice", show_invoice_label=True), body)
