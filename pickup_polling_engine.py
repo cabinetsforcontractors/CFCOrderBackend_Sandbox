@@ -370,7 +370,7 @@ def _send_customer_order_ready_email(
         {f'<div style="color:#1E40AF;font-size:14px;margin-top:2px;">&#128222; {phone_line}</div>' if phone_line else ''}
     </div>
     <p style="color:#4a5568;font-size:14px;"><strong>Please bring:</strong> Your order number (<strong>#{order_id}</strong>) and a photo ID.</p>
-    <p style="color:#4a5568;">Questions? Reply to this email or call <strong>(770) 990-4885</strong>.</p>
+    <p style="color:#4a5568;">Questions? Reply to <a href="mailto:cabinetsforcontractors@gmail.com">cabinetsforcontractors@gmail.com</a> or call <strong>(770) 990-4885</strong>.</p>
     <p style="color:#4a5568;">Thanks,<br><strong>William Prince</strong><br>Cabinets For Contractors</p>
     <hr style="border:none;border-top:1px solid #e2e8f0;margin:20px 0;">
     <p style="font-size:12px;color:#999;text-align:center;">Cabinets For Contractors &bull; (770) 990-4885 &bull; orders@cabinetsforcontractors.net</p>
