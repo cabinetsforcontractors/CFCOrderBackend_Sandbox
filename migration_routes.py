@@ -293,3 +293,59 @@ def debug_insert_pickup_shipment(order_id: str, _: bool = Depends(require_admin)
         results["insert_skipped"] = "Shipment already exists"
 
     return results
+
+
+@migration_router.post("/debug/b2bwave-status-check")
+def debug_b2bwave_status_check(_: bool = Depends(require_admin)):
+    """TEMP: Check B2BWave order statuses and status list. Remove after investigation."""
+    import os, base64, urllib.request, json as _json
+
+    B2BWAVE_URL = os.environ.get("B2BWAVE_URL", "").strip().rstrip("/")
+    B2BWAVE_USERNAME = os.environ.get("B2BWAVE_USERNAME", "").strip()
+    B2BWAVE_API_KEY = os.environ.get("B2BWAVE_API_KEY", "").strip()
+
+    if not all([B2BWAVE_URL, B2BWAVE_USERNAME, B2BWAVE_API_KEY]):
+        return {"error": "B2BWave env vars not set"}
+
+    creds = base64.b64encode(f"{B2BWAVE_USERNAME}:{B2BWAVE_API_KEY}".encode()).decode()
+    headers = {"Authorization": f"Basic {creds}", "Content-Type": "application/json"}
+    results = {}
+
+    for label, path in [
+        ("order_statuses", "/api/order_statuses.json"),
+        ("recent_orders_sample", "/api/orders.json?submitted_at_gteq=2026-03-01"),
+    ]:
+        url = B2BWAVE_URL + path
+        req = urllib.request.Request(url, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = _json.loads(resp.read().decode())
+                if label == "recent_orders_sample" and isinstance(data, list):
+                    # Extract just status info from each order
+                    status_info = []
+                    seen_statuses = {}
+                    for item in data:
+                        order = item.get("order", item)
+                        sid = order.get("status_order_id")
+                        sname = order.get("status_order_name", "")
+                        if sid not in seen_statuses:
+                            seen_statuses[sid] = sname
+                        status_info.append({
+                            "order_id": order.get("id"),
+                            "status_order_id": sid,
+                            "status_order_name": sname,
+                            "submitted_at": order.get("submitted_at", "")[:10],
+                            "gross_total": order.get("gross_total"),
+                            "shipping_option_name": order.get("shipping_option_name", ""),
+                        })
+                    results[label] = {
+                        "distinct_statuses": seen_statuses,
+                        "order_count": len(data),
+                        "sample": status_info[:20],
+                    }
+                else:
+                    results[label] = data
+        except Exception as e:
+            results[label] = {"error": str(e)}
+
+    return results
