@@ -1443,7 +1443,8 @@ function renderStep3(data) {{
     }});
 
     const isRes = data.is_residential !== false;
-    const resNotice = isRes ? `
+    const isPickup = !!(shipping.is_pickup);
+    const resNotice = isPickup ? '' : (isRes ? `
         <div class="residential-notice">
             <p><strong>&#x1F4CD; Delivery Address Classification</strong></p>
             <p>Your delivery address has been classified as a <strong>residential address</strong>. Residential deliveries include liftgate service at delivery.</p>
@@ -1457,7 +1458,7 @@ function renderStep3(data) {{
         </div>` : `
         <div style="background:#f0fdf4;border:1px solid #86efac;border-radius:8px;padding:12px 16px;margin:16px 0;font-size:14px;color:#166534;">
             &#x1F3E2; Your delivery address has been classified as <strong>commercial</strong>. No liftgate surcharge applies.
-        </div>`;
+        </div>`);
 
     const tariffPct = Math.round((shipping.tariff_rate || 0.08) * 100);
     document.getElementById('content').innerHTML = `
