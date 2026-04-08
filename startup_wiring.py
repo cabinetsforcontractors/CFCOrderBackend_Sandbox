@@ -49,6 +49,15 @@ def wire_all(app: FastAPI) -> dict:
         results["ai_configure"] = False
         print(f"[STARTUP] ai_configure_wiring not found: {e}")
     
+    # Quote Engine (/quotes/*)
+    try:
+        from quote_routes import quote_router
+        app.include_router(quote_router)
+        results["quotes"] = True
+    except ImportError as e:
+        results["quotes"] = False
+        print(f"[STARTUP] quote_routes not found: {e}")
+    
     loaded = sum(1 for v in results.values() if v)
     print(f"[STARTUP] startup_wiring: {loaded}/{len(results)} modules loaded")
     
