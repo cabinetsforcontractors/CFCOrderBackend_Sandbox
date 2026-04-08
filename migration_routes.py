@@ -293,3 +293,51 @@ def debug_insert_pickup_shipment(order_id: str, _: bool = Depends(require_admin)
         results["insert_skipped"] = "Shipment already exists"
 
     return results
+
+
+@migration_router.get("/debug/b2bwave-quote-probe")
+def b2bwave_quote_probe(_: bool = Depends(require_admin)):
+    """TEMP: Probe B2BWave for quotes/drafts/unsubmitted orders. Remove after investigation."""
+    import base64, urllib.request, json as _json, os
+    B2BWAVE_URL = os.environ.get("B2BWAVE_URL", "").strip().rstrip("/")
+    B2BWAVE_USERNAME = os.environ.get("B2BWAVE_USERNAME", "").strip()
+    B2BWAVE_API_KEY = os.environ.get("B2BWAVE_API_KEY", "").strip()
+    creds = base64.b64encode(f"{B2BWAVE_USERNAME}:{B2BWAVE_API_KEY}".encode()).decode()
+    headers = {"Authorization": f"Basic {creds}"}
+    results = {}
+
+    paths_to_try = [
+        "/api/order_statuses.json",
+        "/api/orders.json?submitted_at_null=1",
+        "/api/orders.json?status_order_id_eq=1",
+        "/api/orders.json?status_order_id_eq=3",
+        "/api/orders.json?status_order_id_eq=4",
+        "/api/orders.json?status_order_id_eq=5",
+        "/api/orders.json?status_order_id_eq=6",
+        "/api/quotes.json",
+        "/api/draft_orders.json",
+        "/api/orders.json?include_unsubmitted=1",
+        "/api/orders.json?include_drafts=1",
+        "/api/orders.json?include_abandoned=1",
+        "/api/orders.json?saved=1",
+        "/api/orders.json?submitted_at_gteq=2020-01-01&status_order_id_eq=1",
+    ]
+
+    for path in paths_to_try:
+        url = B2BWAVE_URL + path
+        req = urllib.request.Request(url, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                raw = resp.read().decode()
+                try:
+                    data = _json.loads(raw)
+                    summary = _json.dumps(data, indent=2)[:1000]
+                except Exception:
+                    summary = raw[:500]
+                results[path] = {"status": resp.status, "response": summary}
+        except urllib.error.HTTPError as e:
+            results[path] = {"status": e.code, "error": str(e)}
+        except Exception as e:
+            results[path] = {"status": "error", "error": str(e)}
+
+    return results
