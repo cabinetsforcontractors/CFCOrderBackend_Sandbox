@@ -288,6 +288,27 @@ def run_square_sync(conn, hours_back: int = 24) -> dict:
                             "square_payment_id": parsed["payment_id"]
                         })
 
+                        # Update B2BWave order status to 4 ("Being Prepared")
+                        try:
+                            import base64 as _b64
+                            import urllib.request as _urllib_req
+                            import json as _json
+                            from config import B2BWAVE_URL as _B2B_URL, B2BWAVE_USERNAME as _B2B_USER, B2BWAVE_API_KEY as _B2B_KEY
+                            if _B2B_URL and _B2B_KEY:
+                                _creds = _b64.b64encode(f"{_B2B_USER}:{_B2B_KEY}".encode()).decode()
+                                _payload = _json.dumps({"status_order_id": 4}).encode()
+                                _req = _urllib_req.Request(
+                                    f"{_B2B_URL}/api/orders/{order_id}/change_status",
+                                    data=_payload, method="PATCH"
+                                )
+                                _req.add_header("Authorization", f"Basic {_creds}")
+                                _req.add_header("Content-Type", "application/json")
+                                with _urllib_req.urlopen(_req, timeout=15) as _resp:
+                                    _resp.read()
+                                print(f"[SQUARE_SYNC] B2BWave order {order_id} marked paid (status 4)")
+                        except Exception as b2b_err:
+                            print(f"[SQUARE_SYNC] Failed to update B2BWave status for order {order_id}: {b2b_err}")
+
                         # Triggers 2 + 4: email confirmation + auto-BOL
                         try:
                             from payment_triggers import run_payment_triggers
