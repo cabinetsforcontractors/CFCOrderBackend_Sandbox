@@ -2,12 +2,16 @@
 alerts_routes.py
 FastAPI router for AlertsEngine endpoints.
 
+All POST endpoints (cron triggers, resolve) require admin token.
+GET endpoints (summary, list) are also admin-protected.
+
 Mount in main.py with:
     from alerts_routes import alerts_router
     app.include_router(alerts_router)
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
+from auth import require_admin
 from alerts_engine import check_all_orders, check_order_alerts, get_alert_summary
 from db_helpers import get_order_alerts, resolve_alert
 
@@ -15,9 +19,9 @@ alerts_router = APIRouter(prefix="/alerts", tags=["alerts"])
 
 
 @alerts_router.post("/check-all")
-async def check_all_alerts():
+async def check_all_alerts(_: bool = Depends(require_admin)):
     """
-    CRON ENDPOINT: Check all active orders for alert conditions.
+    CRON ENDPOINT: Check all active orders for alert conditions. [admin]
 
     Run daily via Render cron job or external scheduler.
     Evaluates all 8 ORD-A1 rules against every active order.
@@ -37,8 +41,8 @@ async def check_all_alerts():
 
 
 @alerts_router.post("/check/{order_id}")
-async def check_order(order_id: str):
-    """Check alert rules for a single order."""
+async def check_order(order_id: str, _: bool = Depends(require_admin)):
+    """Check alert rules for a single order. [admin]"""
     try:
         alerts = check_order_alerts(order_id)
         return {
@@ -52,8 +56,8 @@ async def check_order(order_id: str):
 
 
 @alerts_router.get("/summary")
-async def alert_summary():
-    """Get summary of all unresolved alerts grouped by type."""
+async def alert_summary(_: bool = Depends(require_admin)):
+    """Get summary of all unresolved alerts grouped by type. [admin]"""
     try:
         summary = get_alert_summary()
         return {
@@ -65,8 +69,9 @@ async def alert_summary():
 
 
 @alerts_router.get("/")
-async def list_alerts(order_id: str = None, include_resolved: bool = False):
-    """List alerts, optionally filtered by order."""
+async def list_alerts(order_id: str = None, include_resolved: bool = False,
+                      _: bool = Depends(require_admin)):
+    """List alerts, optionally filtered by order. [admin]"""
     try:
         alerts = get_order_alerts(order_id=order_id, include_resolved=include_resolved)
         return {
@@ -79,8 +84,8 @@ async def list_alerts(order_id: str = None, include_resolved: bool = False):
 
 
 @alerts_router.post("/{alert_id}/resolve")
-async def resolve_alert_endpoint(alert_id: int):
-    """Manually resolve an alert."""
+async def resolve_alert_endpoint(alert_id: int, _: bool = Depends(require_admin)):
+    """Manually resolve an alert. [admin]"""
     try:
         resolved = resolve_alert(alert_id)
         if not resolved:
@@ -98,19 +103,15 @@ async def resolve_alert_endpoint(alert_id: int):
 
 # =============================================================================
 # TRACKING CHECK — cron endpoint
-# Polls R+L ShipmentTracing for all BOL'd orders.
-# Sends customer tracking email when first scan detected (freight moving).
 # =============================================================================
 
 @alerts_router.post("/tracking/check-all")
-async def check_tracking():
+async def check_tracking(_: bool = Depends(require_admin)):
     """
-    CRON ENDPOINT: Poll R+L ShipmentTracing for all BOL'd orders awaiting
-    first scan confirmation. Sends customer tracking email when R+L shows
-    freight is in motion (first trace event).
+    CRON ENDPOINT: Poll R+L ShipmentTracing for all BOL'd orders. [admin]
 
-    Run every 2-4 hours via Render cron or external scheduler.
-    Safe to run frequently — skips orders where tracking email already sent.
+    Sends customer tracking email when first scan detected (freight moving).
+    Run every 2-4 hours. Safe to run frequently — skips already-sent orders.
 
     Returns summary: checked, tracking_emails_sent, not_yet_moving, errors.
     """
@@ -127,17 +128,14 @@ async def check_tracking():
 
 # =============================================================================
 # PICKUP CONFIRMATION CHECK — cron endpoint
-# Fires daily after pickup_ready_date has passed.
-# Asks supplier: "Has the customer picked up Order #XXXX?"
 # =============================================================================
 
 @alerts_router.post("/pickup/check-confirmations")
-async def check_pickup_confirmations():
+async def check_pickup_confirmations(_: bool = Depends(require_admin)):
     """
-    CRON ENDPOINT: After pickup_ready_date has passed, poll supplier asking
-    'Has the customer picked up this order?'
+    CRON ENDPOINT: Ask supplier 'Has the customer picked up?' [admin]
 
-    Run daily via Render cron or external scheduler.
+    Fires daily after pickup_ready_date has passed.
     Safe to run frequently — skips shipments where poll already sent.
 
     Returns summary: checked, polls_sent, errors.
