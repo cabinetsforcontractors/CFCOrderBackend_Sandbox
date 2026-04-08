@@ -595,12 +595,24 @@ def create_square_payment_link(amount_cents: int, order_id: str, customer_email:
         return None
 
 
-def generate_checkout_token(order_id: str) -> str:
+def generate_checkout_token(order_id: str, long_lived: bool = False) -> str:
+    """
+    Generate checkout token.
+    long_lived=False: daily token (for regular payment links -- expires midnight)
+    long_lived=True:  monthly token (for quote links -- valid ~30 days)
+    """
     secret = os.environ.get("CHECKOUT_SECRET", "default-secret-change-me")
-    message = f"{order_id}-{datetime.now().strftime('%Y%m%d')}"
+    if long_lived:
+        message = f"{order_id}-{datetime.now().strftime('%Y%m')}"
+    else:
+        message = f"{order_id}-{datetime.now().strftime('%Y%m%d')}"
     return hmac.new(secret.encode(), message.encode(), hashlib.sha256).hexdigest()[:16]
 
 
 def verify_checkout_token(order_id: str, token: str) -> bool:
-    expected = generate_checkout_token(order_id)
-    return hmac.compare_digest(token, expected)
+    """Accept both daily and monthly tokens."""
+    if hmac.compare_digest(token, generate_checkout_token(order_id, long_lived=False)):
+        return True
+    if hmac.compare_digest(token, generate_checkout_token(order_id, long_lived=True)):
+        return True
+    return False
