@@ -207,8 +207,8 @@ def _wrap_email(header: str, body_content: str) -> str:
 
 
 def _order_summary_block(order: Dict) -> str:
-    order_id = order.get("order_id", "—")
-    customer = order.get("customer_name", "—")
+    order_id = order.get("order_id", "\u2014")
+    customer = order.get("customer_name", "\u2014")
     company = order.get("company_name", "")
     total = order.get("order_total", 0)
     order_date = order.get("order_date", "")
@@ -216,7 +216,7 @@ def _order_summary_block(order: Dict) -> str:
     if isinstance(order_date, datetime):
         order_date = order_date.strftime("%B %d, %Y")
 
-    total_fmt = f"${float(total):,.2f}" if total else "—"
+    total_fmt = f"${float(total):,.2f}" if total else "\u2014"
     company_line = f'<tr><td style="color:#718096;padding:5px 0;font-size:13px;">Company</td><td style="font-weight:600;font-size:13px;">{company}</td></tr>' if company else ""
 
     return f"""
@@ -226,7 +226,7 @@ def _order_summary_block(order: Dict) -> str:
             <tr><td style="color:#718096;padding:5px 0;font-size:13px;">Order #</td><td style="font-weight:600;font-size:13px;">{order_id}</td></tr>
             <tr><td style="color:#718096;padding:5px 0;font-size:13px;">Customer</td><td style="font-weight:600;font-size:13px;">{customer}</td></tr>
             {company_line}
-            <tr><td style="color:#718096;padding:5px 0;font-size:13px;">Date</td><td style="font-weight:600;font-size:13px;">{order_date or "—"}</td></tr>
+            <tr><td style="color:#718096;padding:5px 0;font-size:13px;">Date</td><td style="font-weight:600;font-size:13px;">{order_date or "\u2014"}</td></tr>
             <tr><td style="color:#718096;padding:5px 0;font-size:13px;">Total</td><td style="font-weight:700;font-size:16px;color:#1a365d;">{total_fmt}</td></tr>
         </table>
     </div>
@@ -355,7 +355,7 @@ def _render_payment_link(order: Dict) -> str:
             <div class="meta-label">Invoice #</div>
             <div class="meta-value"><strong>CFC-{order_id}</strong></div>
             <div class="meta-label" style="margin-top:8px;">Date</div>
-            <div class="meta-value">{order_date or "—"}</div>
+            <div class="meta-value">{order_date or "\u2014"}</div>
             <div class="meta-label" style="margin-top:8px;">Due</div>
             <div class="meta-value">Upon Receipt</div>
         </div>
@@ -389,7 +389,7 @@ def _render_payment_link(order: Dict) -> str:
         </ul>
     </div>
 
-    <p style="margin-top:20px;font-size:13px;">Questions? Reply to this email or call <strong>(770) 990-4885</strong>.</p>
+    <p style="margin-top:20px;font-size:13px;">Questions? Reply to <a href="mailto:cabinetsforcontractors@gmail.com">cabinetsforcontractors@gmail.com</a> or call <strong>(770) 990-4885</strong>.</p>
     <p style="font-size:13px;">Thanks,<br><strong>William Prince</strong><br>Cabinets For Contractors</p>
     """
     return _wrap_email(_header("Invoice", show_invoice_label=True), body)
@@ -400,7 +400,7 @@ def _render_payment_confirmation(order: Dict) -> str:
     first_name = customer.split()[0] if customer else "there"
     order_id = str(order.get("order_id", order.get("id", "")))
     amount = order.get("payment_amount") or order.get("order_total", 0)
-    amount_fmt = f"${float(amount):,.2f}" if amount else "—"
+    amount_fmt = f"${float(amount):,.2f}" if amount else "\u2014"
 
     body = f"""
     <p>Hi {first_name},</p>
@@ -463,7 +463,7 @@ def _render_trusted_payment_reminder(order: Dict) -> str:
     order_id = str(order.get("order_id", order.get("id", "")))
     payment_link = order.get("payment_link", "#")
     total = order.get("order_total", 0)
-    total_fmt = f"${float(total):,.2f}" if total else "—"
+    total_fmt = f"${float(total):,.2f}" if total else "\u2014"
 
     body = f"""
     <p>Hi {first_name},</p>
