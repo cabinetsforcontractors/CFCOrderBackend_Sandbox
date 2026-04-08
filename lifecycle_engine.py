@@ -39,13 +39,14 @@ from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Tuple
 from db_helpers import get_db
 from psycopg2.extras import RealDictCursor
+from business_days import business_days_since, add_business_days
 
 
 # =============================================================================
 # CONSTANTS
 # =============================================================================
 
-# Lifecycle timeline (calendar days since last customer email activity)
+# Lifecycle timeline (business days since last customer email activity)
 INACTIVE_DAY = 7
 CANCEL_WARNING_DAY = 14
 CANCEL_DAY = 21
@@ -177,15 +178,15 @@ def calculate_lifecycle_status(
     if now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
     
-    days_inactive = (now - last_customer_email_at).days
+    days_inactive = business_days_since(last_customer_email_at)
     
     if days_inactive >= CANCEL_DAY:
         return STATUS_CANCELED, days_inactive, None
     elif days_inactive >= INACTIVE_DAY:
-        cancel_at = last_customer_email_at + timedelta(days=CANCEL_DAY)
+        cancel_at = datetime.combine(add_business_days(last_customer_email_at.date(), CANCEL_DAY), datetime.min.time(), tzinfo=timezone.utc)
         return STATUS_INACTIVE, days_inactive, cancel_at
     else:
-        inactive_at = last_customer_email_at + timedelta(days=INACTIVE_DAY)
+        inactive_at = datetime.combine(add_business_days(last_customer_email_at.date(), INACTIVE_DAY), datetime.min.time(), tzinfo=timezone.utc)
         return STATUS_ACTIVE, days_inactive, inactive_at
 
 
@@ -214,7 +215,7 @@ def get_pending_reminders(
     if now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
     
-    days_inactive = (now - last_customer_email_at).days
+    days_inactive = business_days_since(last_customer_email_at)
     pending = []
     
     # Day 7: "Your order has been moved to inactive"
