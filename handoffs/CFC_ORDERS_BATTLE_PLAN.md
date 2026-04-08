@@ -99,11 +99,11 @@ Clock starts from last customer email activity.
 ## KEY REFERENCE
 
 ### Repos
-- Sandbox backend: github.com/4wprince/CFCOrderBackend_Sandbox
-- Sandbox frontend: github.com/4wprince/CFCOrdersFrontend_Sandbox
-- Prod backend: github.com/4wprince/CFCOrderBackend
-- Prod frontend: github.com/4wprince/CFCOrdersFrontend
-- RL sandbox: github.com/4wprince/rl-quote-sandbox (MCP alias: `rl-quote`)
+- Sandbox backend: github.com/cabinetsforcontractors/CFCOrderBackend_Sandbox
+- Sandbox frontend: github.com/cabinetsforcontractors/CFCOrdersFrontend_Sandbox
+- Prod backend: github.com/cabinetsforcontractors/CFCOrderBackend
+- Prod frontend: github.com/cabinetsforcontractors/CFCOrdersFrontend
+- RL sandbox: github.com/cabinetsforcontractors/rl-quote-sandbox (MCP alias: `rl-quote`)
 
 ### Deploy URLs
 - Sandbox backend: cfcorderbackend-sandbox.onrender.com

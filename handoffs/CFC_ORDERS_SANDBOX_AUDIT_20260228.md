@@ -1,7 +1,7 @@
 # CFC Orders Sandbox Backend — Audit Report
 
 **Date:** February 28, 2026
-**Repo:** github.com/4wprince/CFCOrderBackend_Sandbox (main branch)
+**Repo:** github.com/cabinetsforcontractors/CFCOrderBackend_Sandbox (main branch)
 **Files audited:** 22 Python files + requirements.txt
 **Syntax errors:** 0 (all 22 .py files pass AST parse)
 **Total endpoints:** 85 → 84 after dedup fix

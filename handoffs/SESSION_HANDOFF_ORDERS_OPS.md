@@ -46,11 +46,16 @@ Sandbox-to-production promotion pipeline, repo cleanup, database migrations, Ren
 ## Repos
 | Repo | URL | Version | Status |
 |------|-----|---------|--------|
-| Sandbox Backend | github.com/4wprince/CFCOrderBackend_Sandbox | v6.0.0 | Working, needs cleanup |
-| Sandbox Frontend | github.com/4wprince/CFCOrdersFrontend_Sandbox | v7.2.2 | Working — dark theme, alerts, lifecycle live |
-| Prod Backend | github.com/4wprince/CFCOrderBackend | ~v5.7 | 2 months behind |
-| Prod Frontend | github.com/4wprince/CFCOrdersFrontend | ~v5.10 | 2 weeks behind |
-| RL Sandbox | github.com/4wprince/rl-quote-sandbox | v0.1.0 | PRIVATE |
+| Sandbox Backend | github.com/cabinetsforcontractors/CFCOrderBackend_Sandbox | v6.0.0 | Working, needs cleanup |
+| Sandbox Frontend | github.com/cabinetsforcontractors/CFCOrdersFrontend_Sandbox | v7.2.2 | Working — dark theme, alerts, lifecycle live |
+| Prod Backend | github.com/cabinetsforcontractors/CFCOrderBackend | ~v5.7 | 2 months behind |
+| Prod Frontend | github.com/cabinetsforcontractors/CFCOrdersFrontend | ~v5.10 | 2 weeks behind |
+| RL Sandbox | github.com/cabinetsforcontractors/rl-quote-sandbox | v0.1.0 | PRIVATE |
+| Sandbox Backend | github.com/cabinetsforcontractors/CFCOrderBackend_Sandbox | v6.0.0 | Working, needs cleanup |
+| Sandbox Frontend | github.com/cabinetsforcontractors/CFCOrdersFrontend_Sandbox | v5.10.1 | Working, .gitignore broken |
+| Prod Backend | github.com/cabinetsforcontractors/CFCOrderBackend | ~v5.7 | 2 months behind |
+| Prod Frontend | github.com/cabinetsforcontractors/CFCOrdersFrontend | ~v5.10 | 2 weeks behind |
+| RL Sandbox | github.com/cabinetsforcontractors/rl-quote-sandbox | v0.1.0 | PRIVATE |
 
 ## Deploy URLs
 - Sandbox backend: cfcorderbackend-sandbox.onrender.com
