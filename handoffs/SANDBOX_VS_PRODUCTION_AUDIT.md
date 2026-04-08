@@ -11,8 +11,8 @@
 | **Frontend URL** | https://cfcordersfrontend-sandbox.vercel.app | https://cfc-orders-frontend.vercel.app |
 | **Backend URL** | https://cfcorderbackend-sandbox.onrender.com | https://cfc-backend-b83s.onrender.com |
 | **Backend Version** | v6.0.0 | v5.9.1 |
-| **Frontend repo** | 4wprince/CFCOrdersFrontend_Sandbox (MCP: cfc-orders-frontend) | 4wprince/CFCOrdersFrontend (NOT in MCP) |
-| **Backend repo** | 4wprince/CFCOrderBackend_Sandbox (MCP: cfc-orders) | Unknown (NOT in MCP) |
+| **Frontend repo** | cabinetsforcontractors/CFCOrdersFrontend_Sandbox (MCP: cfc-orders-frontend) | cabinetsforcontractors/CFCOrdersFrontend (NOT in MCP) |
+| **Backend repo** | cabinetsforcontractors/CFCOrderBackend_Sandbox (MCP: cfc-orders) | Unknown (NOT in MCP) |
 | **Local paths** | C:\dev\CFCOrderBackend_Sandbox + C:\dev\CFCOrdersFrontend_Sandbox | ⚠️ NO LOCAL CLONE EXISTS |
 | **Config switching** | config.js: `IS_SANDBOX = true`, API_URL → sandbox backend | config.js: `IS_SANDBOX = false`, API_URL → production backend |
 
@@ -498,8 +498,8 @@ Chat 2 should build the step-by-step promotion checklist covering:
 **The biggest question is: Should production Render just point to the sandbox repo?**
 
 Since there's no local production clone and the production repo isn't in MCP, the cleanest path might be:
-- Production Render → point git source to `4wprince/CFCOrderBackend_Sandbox`
-- Production Vercel → point git source to `4wprince/CFCOrdersFrontend_Sandbox`
+- Production Render → point git source to `cabinetsforcontractors/CFCOrderBackend_Sandbox`
+- Production Vercel → point git source to `cabinetsforcontractors/CFCOrdersFrontend_Sandbox`
 - Update config.js to detect environment via env var instead of hardcoded IS_SANDBOX
 
 This eliminates the two-repo problem entirely. Chat 2 should discuss this with William.
