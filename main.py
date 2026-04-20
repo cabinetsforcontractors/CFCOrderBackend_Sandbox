@@ -32,6 +32,7 @@ from slowapi.middleware import SlowAPIMiddleware
 from rate_limit import limiter
 
 from config import AUTO_SYNC_INTERVAL_MINUTES
+from config import B2BWAVE_URL
 from db_helpers import get_db  # noqa: F401
 
 # =============================================================================
@@ -214,6 +215,7 @@ def run_warehouse_polls(_: bool = Depends(require_admin)):
 
 @app.on_event("startup")
 def start_auto_sync():
+    print(f"[ENV] b2bwave_url={B2BWAVE_URL or '(not set)'}")
     if SYNC_SERVICE_LOADED:
         start_auto_sync_thread(run_gmail_sync, run_square_sync)
     else:
@@ -230,6 +232,7 @@ def root():
         "status": "ok",
         "service": "CFC Order Workflow",
         "version": "6.5.0",
+        "b2bwave_target": B2BWAVE_URL or "(not set)",
         "auto_sync": get_sync_status(),
         "gmail_sync": {"enabled": gmail_configured()},
         "square_sync": {"enabled": square_configured()},
