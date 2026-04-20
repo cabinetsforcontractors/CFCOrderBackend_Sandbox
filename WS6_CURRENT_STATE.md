@@ -1,5 +1,7 @@
 # WS6_CURRENT_STATE.md
 
+**Last updated:** 2026-04-20
+
 ## FRAMING
 
 This document reflects the **live, evidence-validated operational state** of WS6 (CFC Orders). It is aligned **line-by-line with WS6_CFC_ORDERS_SOT.md** and captures **runtime-confirmed behavior**, not assumptions.
@@ -16,7 +18,24 @@ This document reflects the **live, evidence-validated operational state** of WS6
 * Auth → CONFIRMED (require_admin + ADMIN_API_KEY behavior observed)
 * Schema → CONFIRMED (all required columns verified via /debug/orders-columns)
 * Service → CONFIRMED (webhook + sync separation validated)
-* Integrations → CONFIRMED (B2BWave + Square observed live)
+* Integrations → CONFIRMED (B2BWave + Square observed live; current `b2bwave_target=https://cabinetsforcontactors.b2bwave.com` — domain spelling discrepancy vs frontend literal tracked under E-001 in WS6_ENVIRONMENT_RISK.md)
+
+---
+
+## OPTION A GUARDRAILS (ACTIVE)
+
+Live-verified via `GET /` on 2026-04-20:
+
+* `email_allowlist_active = true`
+* `b2bwave_mutations_enabled = false`
+* `recommended_posture = "safe_option_a"` (via `GET /debug/env-readiness`)
+
+### Option B Readiness
+
+* Shared prerequisites P1–P4 complete.
+* G1–G3 guardrails complete and active.
+* `GET /debug/env-readiness` endpoint LIVE.
+* `POST /debug/sanitise-sandbox-db` endpoint DRAFTED ONLY — diff approved in session, NOT YET PUSHED / NOT LIVE.
 
 ---
 
@@ -144,6 +163,7 @@ Conclusion:
 ## GOLDEN REFERENCE (RUNTIME CONTROL)
 
 Order: 5554
+Functional baseline (positive control) — order 5554 still returns a fully populated freight order with 2 shipments as of 2026-04-20; confirms Option A guardrails have not broken order ingestion or display paths.
 
 Observed:
 
@@ -159,13 +179,16 @@ Conclusion:
 
 ---
 
-## NON-ISSUES (SOT HYPOTHESES DISPROVEN)
+## NON-ISSUES (SOT HYPOTHESES DISPROVEN — no longer open)
 
 * Schema missing columns → FALSE
 * Endpoint not mounted → FALSE
 * Auth broken → FALSE
 * Migration failure → FALSE
 * Webhook failure → FALSE
+
+Superseded: prior "schema hypothesis open" and "webhook ambiguity" entries are retired as of 2026-04-20.
+All have been disproven by runtime evidence and none are treated as active blockers.
 
 ---
 
@@ -202,6 +225,21 @@ Impact:
 
 * Requires order-level tracing
 * Not a correctness issue
+
+---
+
+## ADMIN ENDPOINTS (NEW / UPDATED 2026-04-20)
+
+* `GET /` — now returns `b2bwave_target`, `email_allowlist_active`, `b2bwave_mutations_enabled` keys in addition to prior fields.
+* `GET /debug/env-readiness` — LIVE. Returns `{b2bwave_target, matches_production_literal, matches_sandbox_pattern, email_allowlist_active, b2bwave_mutations_enabled, recommended_posture}`. Admin-gated.
+* `POST /debug/sanitise-sandbox-db` — DRAFTED ONLY, NOT LIVE. Requires admin + `X-Allow-Destructive: yes` header.
+
+### New stdout log markers (Render logs)
+
+* `[ENV] b2bwave_url=... email_allowlist=... b2bwave_mutations=...` — startup banner, one line per boot.
+* `[EMAIL-GUARD] blocked|redirected ...` — fires when EMAIL_ALLOWLIST suppresses or redirects a send.
+* `[B2BWAVE-GUARD] mutation blocked ...` — fires when B2BWAVE_MUTATIONS_ENABLED=false suppresses a write.
+* `[B2BWAVE-WARN] LIVE mutation committed ...` — fires when a real B2BWave mutation reaches the tenant (audit trail for production-side effects).
 
 ---
 
