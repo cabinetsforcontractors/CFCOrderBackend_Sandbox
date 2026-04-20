@@ -4,9 +4,11 @@ FastAPI router for DB migrations and debug schema endpoints.
 All endpoints require admin token (X-Admin-Token header).
 """
 
+import os
 from fastapi import APIRouter, Depends
 from auth import require_admin
 from db_helpers import get_db
+from config import B2BWAVE_URL
 
 try:
     from db_migrations import (
@@ -179,6 +181,31 @@ def debug_orders_columns(_: bool = Depends(require_admin)):
             }
 
 
+
+@migration_router.get("/debug/env-readiness")
+def debug_env_readiness(_: bool = Depends(require_admin)):
+    """Option B readiness probe. Reports tenant target + guardrail state."""
+    url = B2BWAVE_URL or ""
+    matches_production_literal = ("cabinetsforcontractors" in url) or ("cabinetsforcontactors" in url)
+    matches_sandbox_pattern = "sandbox" in url
+    email_allowlist_active = bool(os.environ.get("EMAIL_ALLOWLIST", "").strip())
+    b2bwave_mutations_enabled = os.environ.get("B2BWAVE_MUTATIONS_ENABLED", "true").lower() != "false"
+
+    if matches_production_literal and not b2bwave_mutations_enabled and email_allowlist_active:
+        recommended_posture = "safe_option_a"
+    elif matches_sandbox_pattern:
+        recommended_posture = "ready_for_guardrail_relaxation"
+    else:
+        recommended_posture = "unknown"
+
+    return {
+        "b2bwave_target": url or "(not set)",
+        "matches_production_literal": matches_production_literal,
+        "matches_sandbox_pattern": matches_sandbox_pattern,
+        "email_allowlist_active": email_allowlist_active,
+        "b2bwave_mutations_enabled": b2bwave_mutations_enabled,
+        "recommended_posture": recommended_posture,
+    }
 @migration_router.get("/debug/shipment/{order_id}")
 def debug_shipment(order_id: str, _: bool = Depends(require_admin)):
     """Show all order_shipments rows for an order_id, plus whether the orders row exists."""
@@ -299,3 +326,4 @@ def debug_insert_pickup_shipment(order_id: str, _: bool = Depends(require_admin)
         results["insert_skipped"] = "Shipment already exists"
 
     return results
+
