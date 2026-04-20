@@ -15,7 +15,7 @@ import hashlib
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any
 
-B2BWAVE_URL = os.environ.get("B2BWAVE_URL", "").strip().rstrip('/')
+from config import B2BWAVE_URL
 B2BWAVE_USERNAME = os.environ.get("B2BWAVE_USERNAME", "").strip()
 B2BWAVE_API_KEY = os.environ.get("B2BWAVE_API_KEY", "").strip()
 
