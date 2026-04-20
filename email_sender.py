@@ -81,6 +81,22 @@ def send_order_email(
     if not to_email or "@" not in to_email:
         return {"success": False, "error": f"Invalid email address: {to_email}"}
 
+    # Sandbox safety: EMAIL_ALLOWLIST gate
+    # If EMAIL_ALLOWLIST is non-empty, non-listed recipients are redirected
+    # to INTERNAL_SAFETY_EMAIL (if set) or blocked outright.
+    # Default (env unset) = full backward compatibility, no change.
+    _email_allowlist = os.environ.get("EMAIL_ALLOWLIST", "").strip()
+    if _email_allowlist:
+        allowed = {e.strip().lower() for e in _email_allowlist.split(",") if e.strip()}
+        if to_email.lower() not in allowed:
+            redirect = os.environ.get("INTERNAL_SAFETY_EMAIL", "").strip()
+            if redirect:
+                print(f"[EMAIL-GUARD] redirected to={to_email} -> {redirect} order={order_id}")
+                to_email = redirect
+            else:
+                print(f"[EMAIL-GUARD] blocked to={to_email} order={order_id} reason=not_in_allowlist")
+                return {"success": False, "error": "recipient not in EMAIL_ALLOWLIST", "dry_run": True, "original_to": to_email}
+
     if order_data is None:
         order_data = get_order_by_id(order_id)
         if not order_data:
