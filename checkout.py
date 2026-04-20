@@ -313,6 +313,9 @@ def fetch_b2bwave_customer_address(customer_id: str) -> Optional[Dict]:
 
 
 def update_b2bwave_order_address(order_id: str, address: Dict) -> bool:
+    if os.environ.get("B2BWAVE_MUTATIONS_ENABLED", "true").lower() == "false":
+        print(f"[B2BWAVE-GUARD] mutation blocked: update_order_address order={order_id}")
+        return False
     if not B2BWAVE_URL or not B2BWAVE_API_KEY:
         return False
     try:
@@ -333,6 +336,7 @@ def update_b2bwave_order_address(order_id: str, address: Dict) -> bool:
         req.add_header('Content-Type', 'application/json')
         with urllib.request.urlopen(req, timeout=15) as resp:
             resp.read()
+            print(f"[B2BWAVE-WARN] LIVE mutation committed: update_order_address order={order_id} host={B2BWAVE_URL}")
             print(f"[B2BWAVE] Order {order_id} address updated")
             return True
     except Exception as e:
