@@ -109,6 +109,9 @@ def cancel_order_on_b2bwave(order_id: str) -> Dict:
 
     Returns dict with success status and details.
     """
+    if os.environ.get("B2BWAVE_MUTATIONS_ENABLED", "true").lower() == "false":
+        print(f"[B2BWAVE-GUARD] mutation blocked: cancel_order order={order_id}")
+        return {"success": False, "error": "B2BWave mutations disabled (B2BWAVE_MUTATIONS_ENABLED=false)"}
     if not B2BWAVE_URL or not B2BWAVE_USERNAME or not B2BWAVE_API_KEY:
         return {"success": False, "error": "B2BWave API not configured"}
 
@@ -129,6 +132,7 @@ def cancel_order_on_b2bwave(order_id: str) -> Dict:
         )
 
         if response.status_code in (200, 204):
+            print(f"[B2BWAVE-WARN] LIVE mutation committed: cancel_order order={order_id} host={B2BWAVE_URL} status={response.status_code}")
             return {"success": True, "b2bwave_status": response.status_code}
         else:
             return {
