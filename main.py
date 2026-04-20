@@ -215,7 +215,13 @@ def run_warehouse_polls(_: bool = Depends(require_admin)):
 
 @app.on_event("startup")
 def start_auto_sync():
-    print(f"[ENV] b2bwave_url={B2BWAVE_URL or '(not set)'}")
+    _email_allowlist_on = bool(os.environ.get("EMAIL_ALLOWLIST", "").strip())
+    _b2b_mutations_on = os.environ.get("B2BWAVE_MUTATIONS_ENABLED", "true").lower() != "false"
+    print(
+        f"[ENV] b2bwave_url={B2BWAVE_URL or '(not set)'} "
+        f"email_allowlist={'ON' if _email_allowlist_on else 'OFF'} "
+        f"b2bwave_mutations={'ENABLED' if _b2b_mutations_on else 'DISABLED'}"
+    )
     if SYNC_SERVICE_LOADED:
         start_auto_sync_thread(run_gmail_sync, run_square_sync)
     else:
@@ -233,6 +239,8 @@ def root():
         "service": "CFC Order Workflow",
         "version": "6.5.0",
         "b2bwave_target": B2BWAVE_URL or "(not set)",
+        "email_allowlist_active": bool(os.environ.get("EMAIL_ALLOWLIST", "").strip()),
+        "b2bwave_mutations_enabled": os.environ.get("B2BWAVE_MUTATIONS_ENABLED", "true").lower() != "false",
         "auto_sync": get_sync_status(),
         "gmail_sync": {"enabled": gmail_configured()},
         "square_sync": {"enabled": square_configured()},
