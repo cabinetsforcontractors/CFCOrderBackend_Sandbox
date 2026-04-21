@@ -32,7 +32,7 @@ The CFC backend marketed as "sandbox" is pointed at what is operationally a prod
 
 ### RESOLUTION PATH
 - Option A (controlled production-integrated testing) — active today, guardrails enforce the boundary at code layer.
-- Option B (true sandbox separation) — preparation in progress; cutover requires a B2BWave sandbox tenant (external) plus running `POST /debug/sanitise-sandbox-db` (drafted-only).
+- Option B (true sandbox separation) — preparation in progress; cutover requires a B2BWave sandbox tenant (external) plus running `POST /debug/sanitise-sandbox-db` (LIVE-DEPLOYED as of 2026-04-21, un-invoked, admin + `X-Allow-Destructive: yes` gated). Overall E-001 status unchanged — blast radius remains MITIGATED by Option A guardrails until cutover executes.
 
 ---
 
