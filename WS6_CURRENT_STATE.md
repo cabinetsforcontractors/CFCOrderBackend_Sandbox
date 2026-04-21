@@ -35,7 +35,7 @@ Live-verified via `GET /` on 2026-04-20:
 * Shared prerequisites P1–P4 complete.
 * G1–G3 guardrails complete and active.
 * `GET /debug/env-readiness` endpoint LIVE.
-* `POST /debug/sanitise-sandbox-db` endpoint DRAFTED ONLY — diff approved in session, NOT YET PUSHED / NOT LIVE.
+* `POST /debug/sanitise-sandbox-db` endpoint LIVE-DEPLOYED, admin-gated, UN-INVOKED (do not invoke until cutover day; requires `X-Allow-Destructive: yes`).
 
 ---
 
@@ -232,7 +232,7 @@ Impact:
 
 * `GET /` — now returns `b2bwave_target`, `email_allowlist_active`, `b2bwave_mutations_enabled` keys in addition to prior fields.
 * `GET /debug/env-readiness` — LIVE. Returns `{b2bwave_target, matches_production_literal, matches_sandbox_pattern, email_allowlist_active, b2bwave_mutations_enabled, recommended_posture}`. Admin-gated.
-* `POST /debug/sanitise-sandbox-db` — DRAFTED ONLY, NOT LIVE. Requires admin + `X-Allow-Destructive: yes` header.
+* `POST /debug/sanitise-sandbox-db` — LIVE-DEPLOYED, UN-INVOKED. Admin-gated + `X-Allow-Destructive: yes` required. Truncates 7 customer-data tables (no CASCADE, no dynamic SQL); `warehouse_mapping` and `trusted_customers` intentionally untouched.
 
 ### New stdout log markers (Render logs)
 
