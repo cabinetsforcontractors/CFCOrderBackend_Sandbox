@@ -16,6 +16,17 @@ The runbook is a single-operator-session procedure — all steps are reversible 
 - `GET /debug/env-readiness` — LIVE, admin-gated.
 - `POST /debug/sanitise-sandbox-db` — LIVE-DEPLOYED, admin-gated, UN-INVOKED. Requires header `X-Allow-Destructive: yes`.
 
+**Guardrail coverage as of 2026-04-21:**
+- G1 — `EMAIL_ALLOWLIST` guard on `email_sender.send_order_email` (Path A).
+- G2a / G2b — `B2BWAVE_MUTATIONS_ENABLED=false` kills `update_b2bwave_order_address` and `cancel_order_on_b2bwave`.
+- G3 — startup banner + root-response posture keys.
+- G4 — `EMAIL_ALLOWLIST` guard on `checkout_routes._send_gmail_message` (Path C; closes the verify-address / commercial-confirm / admin-sends / quote_engine leak).
+- Path B (`gmail_sender.send_email`) — dead by design: `gmail_sender` module is absent from the repo.
+
+**Smoke tests available in repo:**
+- `test_ws6_sandbox.py` — pre-existing full sandbox smoke.
+- `test_ws6_email_guard.py` — guardrail-assertion-only test; verifies `recommended_posture=safe_option_a` without sending email.
+
 ---
 
 ## 2. PRECONDITIONS
@@ -49,7 +60,10 @@ The runbook is a single-operator-session procedure — all steps are reversible 
 - If either endpoint returns 404 when called with the admin token, stop and confirm the backend is running the expected commit (`migration_routes.py` sha `cc2526a7` or later).
 
 ### 2.6 — Current guardrail state
-- `GET /` must report `email_allowlist_active: true` AND `b2bwave_mutations_enabled: false`. If either is not in that state, do not proceed — fix Option A posture first.
+- `GET /` must report `email_allowlist_active: true` AND `b2bwave_mutations_enabled: false`.
+- `GET /debug/env-readiness` must report `recommended_posture: "safe_option_a"`.
+- Running `python test_ws6_email_guard.py` (with `CFC_ADMIN_TOKEN=CFC2026` in env) must pass all four checks.
+- If any of these fail, do not proceed — fix Option A posture first.
 
 ---
 
@@ -61,9 +75,9 @@ Verify before any changes that the starting point matches the expected baseline.
 - **Frontend service**: `https://cfcordersfrontend-sandbox.vercel.app` — running, admin UI loads.
 - **Backend points at production-class B2BWave**: `b2bwave_target` in `GET /` shows `https://cabinetsforcontactors.b2bwave.com` (per WS6_ENVIRONMENT_RISK.md E-001 and E-002).
 - **Guardrails active (Option A)**:
-  - `email_allowlist_active: true` — no customer emails leak from sandbox (covers both `email_sender.send_order_email` path and `checkout_routes._send_gmail_message` path per G1 + G4).
+  - `email_allowlist_active: true` — ALL three code-level email paths are either guarded (Path A via G1, Path C via G4) or dead (Path B — `gmail_sender` module absent).
   - `b2bwave_mutations_enabled: false` — `update_b2bwave_order_address` and `cancel_order_on_b2bwave` are killed.
-- **Functional baseline (positive control)**: order `5554` returns fully populated freight order with 2 shipments (confirms Option A guardrails have not broken order ingestion or display paths).
+- **Functional baseline (positive control)**: order `5554` returns fully populated freight order with 2 shipments (confirms Option A guardrails, including G4, have not broken order ingestion or display paths).
 - **Sandbox DB**: populated with real customer PII sourced from the production-class B2BWave tenant (see WS6_ENVIRONMENT_RISK.md E-001 §RISK).
 - **Admin auth**: `X-Admin-Token: CFC2026` per sandbox Render `ADMIN_API_KEY`.
 
@@ -190,7 +204,7 @@ Headers:
 **Reason:** with the sandbox tenant confirmed, the production-safety guardrails (`EMAIL_ALLOWLIST`, `B2BWAVE_MUTATIONS_ENABLED=false`) are no longer strictly required to prevent production impact. An operator may choose to relax them for full Option B testing fidelity.
 
 **Action (Render dashboard → backend env):**
-- Optionally unset `EMAIL_ALLOWLIST` (or keep it on — synthetic-customer-only testing is fine either way).
+- Optionally unset `EMAIL_ALLOWLIST` (or keep it on — synthetic-customer-only testing is fine either way). Note: this simultaneously relaxes Path A (G1) AND Path C (G4) since both read the same env var.
 - Optionally set `B2BWAVE_MUTATIONS_ENABLED=true` to allow address updates and auto-cancel to reach the sandbox tenant.
 - Redeploy.
 
@@ -285,6 +299,7 @@ Rollback complexity depends on how far into §4 the cutover progressed when it f
 - Redeploy.
 - Vercel (if §4.5 ran): unset `VITE_B2BWAVE_ORDER_URL`; redeploy.
 - Confirm `GET /` returns the Option A baseline posture (production-class `b2bwave_target`, guardrails ON).
+- Re-run `python test_ws6_email_guard.py` (with `CFC_ADMIN_TOKEN=CFC2026`) — must pass all four checks before work resumes.
 - Confirm `GET /orders?limit=5` returns the pre-sanitise data (post-restore).
 - Stop. Do not retry cutover without first understanding and fixing the root cause.
 
