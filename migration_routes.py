@@ -5,7 +5,8 @@ All endpoints require admin token (X-Admin-Token header).
 """
 
 import os
-from fastapi import APIRouter, Depends
+from typing import Optional
+from fastapi import APIRouter, Depends, Header
 from auth import require_admin
 from db_helpers import get_db
 from config import B2BWAVE_URL
@@ -181,7 +182,6 @@ def debug_orders_columns(_: bool = Depends(require_admin)):
             }
 
 
-
 @migration_router.get("/debug/env-readiness")
 def debug_env_readiness(_: bool = Depends(require_admin)):
     """Option B readiness probe. Reports tenant target + guardrail state."""
@@ -206,6 +206,8 @@ def debug_env_readiness(_: bool = Depends(require_admin)):
         "b2bwave_mutations_enabled": b2bwave_mutations_enabled,
         "recommended_posture": recommended_posture,
     }
+
+
 @migration_router.get("/debug/shipment/{order_id}")
 def debug_shipment(order_id: str, _: bool = Depends(require_admin)):
     """Show all order_shipments rows for an order_id, plus whether the orders row exists."""
@@ -251,6 +253,43 @@ def debug_shipment(order_id: str, _: bool = Depends(require_admin)):
                     for r in pattern_rows
                 ],
             }
+
+
+@migration_router.post("/debug/sanitise-sandbox-db")
+def debug_sanitise_sandbox_db(
+    _: bool = Depends(require_admin),
+    x_allow_destructive: Optional[str] = Header(None, alias="X-Allow-Destructive"),
+):
+    """
+    Option B cutover: truncate customer-data tables. warehouse_mapping and
+    trusted_customers are intentionally left untouched — see WS6_CURRENT_STATE.md.
+    DESTRUCTIVE. Requires header `X-Allow-Destructive: yes`.
+    """
+    if (x_allow_destructive or "").strip().lower() != "yes":
+        return {"status": "error", "message": "X-Allow-Destructive: yes header required"}
+
+    tables_to_truncate = [
+        "order_shipments",
+        "order_email_snippets",
+        "order_events",
+        "order_alerts",
+        "order_line_items",
+        "orders",
+        "pending_checkouts",
+    ]
+    truncated, seeded = [], []
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            # Single multi-table TRUNCATE statement: FK constraints from child tables
+            # (order_*) to orders are satisfied because all referenced/referencing
+            # tables are listed together. No CASCADE used. Any failure raises to
+            # FastAPI as a 500 with the full Postgres error — loud, not silent.
+            cur.execute("TRUNCATE TABLE " + ", ".join(tables_to_truncate))
+            truncated.extend(tables_to_truncate)
+            conn.commit()
+
+    return {"status": "ok", "truncated": truncated, "seeded": seeded}
 
 
 @migration_router.post("/debug/insert-pickup-shipment/{order_id}")
@@ -326,4 +365,3 @@ def debug_insert_pickup_shipment(order_id: str, _: bool = Depends(require_admin)
         results["insert_skipped"] = "Shipment already exists"
 
     return results
-
