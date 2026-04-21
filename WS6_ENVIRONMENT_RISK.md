@@ -1,6 +1,6 @@
 # WS6_ENVIRONMENT_RISK.md
 
-**Last updated:** 2026-04-20
+**Last updated:** 2026-04-21
 **Scope:** environmental and cross-system risks for WS6 (CFC Orders). Each entry is an independent risk with its own status and severity. Closes or downgrades only with evidence.
 
 ---
@@ -8,7 +8,7 @@
 ## E-001 — Sandbox CFC backend targets production-class B2BWave tenant
 
 **Status:** OPEN (MITIGATED)
-**Severity:** HIGH (downgraded from CRITICAL on 2026-04-20 after Option A guardrails went live)
+**Severity:** HIGH (downgraded from CRITICAL on 2026-04-20 after Option A guardrails went live; email-egress coverage completed 2026-04-21 with G4)
 **Opened:** 2026-04-19
 **Authority:** WS6_CFC_ORDERS_SOT.md:299, repo + live runtime evidence
 
@@ -19,20 +19,26 @@ The CFC backend marketed as "sandbox" is pointed at what is operationally a prod
 - Backend `B2BWAVE_URL` is env-driven with no sandbox/prod distinction in code (`config.py:26`).
 - Frontend hardcodes a production-class B2BWave URL in `src/config.js:27`; env override via `VITE_B2BWAVE_ORDER_URL` is supported but not set on sandbox Vercel.
 - Live order 5554 (2026-04-18) contains real customer PII — confirms the tenant is populated with real data.
-- Live `GET /` on 2026-04-20 reports `email_allowlist_active=true` and `b2bwave_mutations_enabled=false` — previously-enumerated side-effect classes are currently suppressed at the code layer.
+- Live `GET /` and `GET /debug/env-readiness` on 2026-04-21 report `email_allowlist_active=true`, `b2bwave_mutations_enabled=false`, `recommended_posture="safe_option_a"` — previously-enumerated side-effect classes are suppressed at the code layer.
+- All three code-level email egress paths are now covered:
+  - Path A (`email_sender.send_order_email`) — G1 active.
+  - Path B (`gmail_sender.send_email`) — DEAD (module absent from repo; imports fail silently).
+  - Path C (`checkout_routes._send_gmail_message`) — G4 active as of commit `15fef2cc` (2026-04-21).
 
 ### RISK (with current mitigation state)
-- Customer-visible email send — **MITIGATED** by `EMAIL_ALLOWLIST` (G1).
+- Customer-visible email send via `email_sender.send_order_email` — **MITIGATED** by `EMAIL_ALLOWLIST` (G1).
+- Customer-visible email send via `_send_gmail_message` (verify-address, commercial-confirm, admin/quote_engine sends) — **MITIGATED** by `EMAIL_ALLOWLIST` (G4, 2026-04-21).
+- Lifecycle/quote-reminder email sends via `gmail_sender.send_email` — **MITIGATED** by absence of the `gmail_sender` module (dead path). Revalidate if `gmail_sender.py` is ever introduced.
 - B2BWave order mutation (address update) — **MITIGATED** by `B2BWAVE_MUTATIONS_ENABLED=false` (G2a).
 - Auto-cancel on day 21 reaching production tenant — **MITIGATED** by `B2BWAVE_MUTATIONS_ENABLED=false` (G2b).
 - Square payment link leakage — **UNMITIGATED** at code layer; relies on `SQUARE_ENVIRONMENT=sandbox` env posture (not re-verified this session).
-- Supplier notifications reaching real suppliers — **PARTIALLY MITIGATED** only by `EMAIL_ALLOWLIST` if supplier emails pass through `send_order_email`; supplier-specific override in `config.py SUPPLIER_INFO` is still active.
+- Supplier notifications reaching real suppliers via `supplier_polling_engine` — **PARTIALLY MITIGATED** only where the send passes through `send_order_email` or `_send_gmail_message`; supplier-specific sends through other modules remain unaudited for this session.
 - Webhook replay fan-out — **UNMITIGATED**; see E-003.
-- PII capture in sandbox logs / UI — **UNMITIGATED**; sandbox DB still holds real customer records until sanitise endpoint is live and run.
+- PII capture in sandbox logs / UI — **UNMITIGATED**; sandbox DB still holds real customer records until sanitise endpoint is invoked on cutover day.
 
 ### RESOLUTION PATH
-- Option A (controlled production-integrated testing) — active today, guardrails enforce the boundary at code layer.
-- Option B (true sandbox separation) — preparation in progress; cutover requires a B2BWave sandbox tenant (external) plus running `POST /debug/sanitise-sandbox-db` (LIVE-DEPLOYED as of 2026-04-21, un-invoked, admin + `X-Allow-Destructive: yes` gated). Overall E-001 status unchanged — blast radius remains MITIGATED by Option A guardrails until cutover executes.
+- Option A (controlled production-integrated testing) — active today; guardrails enforce the boundary at code layer. Fit-state verified live.
+- Option B (true sandbox separation) — preparation complete on the repo side: shared prerequisites P1–P4, guardrails G1–G4, readiness endpoint, sanitise endpoint, cutover runbook, and smoke tests are all in place. Cutover gated on external B2BWave sandbox tenant provisioning.
 
 ---
 
@@ -66,13 +72,16 @@ The backend `B2BWAVE_URL` resolves to `https://cabinetsforcontactors.b2bwave.com
 The B2BWave order webhook at `checkout_routes.py:635` has no authentication. Any captured payload can be replayed against sandbox or production; the public admin UI is itself documented at SOT:421 as a caller of this endpoint. The first DB write inside the handler (unguarded INSERT into `pending_checkouts`) is not idempotent against replays beyond the `ON CONFLICT (order_id) DO UPDATE` semantic; downstream side effects are not gated against replay at all in the un-patched flow.
 
 ### CURRENT MITIGATION
-- Downstream side effects (email, B2BWave address update, supplier notifications, auto-cancel) are all gated by the G1/G2 guardrails today, so replay today cannot produce customer-visible damage.
+- Downstream side effects:
+  - Email sends (customer invoice, verify-address, commercial-confirm, internal notifications) — gated by G1 + G4. Replay cannot leak emails while allowlist is active.
+  - B2BWave address update / auto-cancel — gated by G2a + G2b. Replay cannot mutate the production tenant while kill-switch is engaged.
+- Thus replay today cannot produce customer-visible damage via email or B2BWave write.
 - A proposed webhook-idempotency gate (reject or short-circuit when `pending_checkouts.payment_completed_at IS NOT NULL` for the incoming order_id) was specified in the observability-plan turn but NOT implemented.
 
 ### RESIDUAL RISK
 - Replay can still create or refresh `pending_checkouts` rows for arbitrary `order_id` values.
 - Replay can still trigger fresh `fetch_b2bwave_order` calls against the production tenant (read-only, rate-limit-impacting).
-- Once G1/G2 are relaxed (e.g. during Option B testing against a real sandbox tenant), replay becomes active again.
+- Once G1/G2/G4 are relaxed (e.g. during Option B testing against a real sandbox tenant), replay becomes active again against the sandbox tenant.
 
 ### RESOLUTION PATH
 - Implement the deferred webhook idempotency gate in `checkout_routes.py:657` (SELECT `payment_completed_at`; early-return when non-null).
