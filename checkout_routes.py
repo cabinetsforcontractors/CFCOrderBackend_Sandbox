@@ -121,6 +121,19 @@ def _get_gmail_token():
 
 
 def _send_gmail_message(token: str, to: str, subject: str, body: str):
+    # Sandbox safety: EMAIL_ALLOWLIST gate (mirrors email_sender.send_order_email).
+    # Default (env unset) = full backward compatibility, no change.
+    _email_allowlist = os.environ.get("EMAIL_ALLOWLIST", "").strip()
+    if _email_allowlist:
+        allowed = {e.strip().lower() for e in _email_allowlist.split(",") if e.strip()}
+        if to.lower() not in allowed:
+            redirect = os.environ.get("INTERNAL_SAFETY_EMAIL", "").strip()
+            if redirect:
+                print(f"[EMAIL-GUARD] redirected to={to} -> {redirect} via=_send_gmail_message subject={subject[:60]!r}")
+                to = redirect
+            else:
+                print(f"[EMAIL-GUARD] blocked to={to} reason=not_in_allowlist via=_send_gmail_message subject={subject[:60]!r}")
+                return
     import json, base64, urllib.request
     from email.mime.text import MIMEText
     from email.mime.multipart import MIMEMultipart
