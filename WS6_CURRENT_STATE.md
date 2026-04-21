@@ -1,6 +1,6 @@
 # WS6_CURRENT_STATE.md
 
-**Last updated:** 2026-04-20
+**Last updated:** 2026-04-21
 
 ## FRAMING
 
@@ -19,23 +19,32 @@ This document reflects the **live, evidence-validated operational state** of WS6
 * Schema → CONFIRMED (all required columns verified via /debug/orders-columns)
 * Service → CONFIRMED (webhook + sync separation validated)
 * Integrations → CONFIRMED (B2BWave + Square observed live; current `b2bwave_target=https://cabinetsforcontactors.b2bwave.com` — domain spelling discrepancy vs frontend literal tracked under E-001 in WS6_ENVIRONMENT_RISK.md)
+* Email egress → CONFIRMED (all three sender paths analyzed; Path A guarded by G1, Path B dead — `gmail_sender.py` absent from repo, Path C guarded by G4 as of 2026-04-21)
 
 ---
 
 ## OPTION A GUARDRAILS (ACTIVE)
 
-Live-verified via `GET /` on 2026-04-20:
+Live-verified via `GET /` and `GET /debug/env-readiness` on 2026-04-21:
 
 * `email_allowlist_active = true`
 * `b2bwave_mutations_enabled = false`
 * `recommended_posture = "safe_option_a"` (via `GET /debug/env-readiness`)
 
+### Email sender path coverage (as of 2026-04-21)
+
+* **Path A — `email_sender.send_order_email`**: guarded by G1 (`EMAIL_ALLOWLIST` check inside `send_order_email`). Covers pickup invoice (`checkout_routes.py:466`), Case A freight invoice (`:822`), admin `/email/*` (`email_routes.py:83`).
+* **Path B — `gmail_sender.send_email`**: **DEAD PATH**. The `gmail_sender` module does not exist in the repo; all `from gmail_sender import send_email` imports in `lifecycle_engine.py` fail silently via the existing `try/except ImportError`. Lifecycle reminders and quote reminders via this path therefore never send. Revalidate if `gmail_sender.py` is ever introduced.
+* **Path C — `checkout_routes._send_gmail_message`**: guarded by G4 as of 2026-04-21 (commit `15fef2cc`). Covers all 6+ call sites: verify-address, internal address alert, internal order notification, internal pickup notification, commercial-confirmed, plus `orders_routes.py:1198` and `quote_engine.py:129,:183`.
+
 ### Option B Readiness
 
 * Shared prerequisites P1–P4 complete.
-* G1–G3 guardrails complete and active.
+* G1–G4 guardrails complete and active (G4 closed the Path C email leak on 2026-04-21).
 * `GET /debug/env-readiness` endpoint LIVE.
-* `POST /debug/sanitise-sandbox-db` endpoint LIVE-DEPLOYED, admin-gated, UN-INVOKED (do not invoke until cutover day; requires `X-Allow-Destructive: yes`).
+* `POST /debug/sanitise-sandbox-db` endpoint LIVE-DEPLOYED, admin-gated, UN-INVOKED (do not invoke until cutover day; requires `X-Allow-Destructive: yes`). Truncates 7 customer-data tables only; `warehouse_mapping` preserved by design; `trusted_customers` must be manually cleared on cutover day (see runbook §4.3a).
+* Cutover runbook LIVE at `handoffs/CFC_ORDERS_OPTION_B_CUTOVER_RUNBOOK.md` (commit `785ba956`).
+* Email-guard smoke test available at `test_ws6_email_guard.py` — guardrail-assertion-only, does not send email.
 
 ---
 
@@ -163,7 +172,7 @@ Conclusion:
 ## GOLDEN REFERENCE (RUNTIME CONTROL)
 
 Order: 5554
-Functional baseline (positive control) — order 5554 still returns a fully populated freight order with 2 shipments as of 2026-04-20; confirms Option A guardrails have not broken order ingestion or display paths.
+Functional baseline (positive control) — order 5554 still returns a fully populated freight order with 2 shipments as of 2026-04-21; confirms Option A guardrails (including the new G4) have not broken order ingestion or display paths.
 
 Observed:
 
@@ -186,9 +195,10 @@ Conclusion:
 * Auth broken → FALSE
 * Migration failure → FALSE
 * Webhook failure → FALSE
+* Unguarded email egress paths (Path B, Path C) → FALSE (Path B dead; Path C guarded as of 2026-04-21)
 
-Superseded: prior "schema hypothesis open" and "webhook ambiguity" entries are retired as of 2026-04-20.
-All have been disproven by runtime evidence and none are treated as active blockers.
+Superseded: prior "schema hypothesis open", "webhook ambiguity", and "Path C email leak" entries are retired as of 2026-04-21.
+All have been disproven or closed by runtime evidence and none are treated as active blockers.
 
 ---
 
@@ -228,16 +238,16 @@ Impact:
 
 ---
 
-## ADMIN ENDPOINTS (NEW / UPDATED 2026-04-20)
+## ADMIN ENDPOINTS (NEW / UPDATED 2026-04-20 / 2026-04-21)
 
-* `GET /` — now returns `b2bwave_target`, `email_allowlist_active`, `b2bwave_mutations_enabled` keys in addition to prior fields.
+* `GET /` — returns `b2bwave_target`, `email_allowlist_active`, `b2bwave_mutations_enabled` keys in addition to prior fields.
 * `GET /debug/env-readiness` — LIVE. Returns `{b2bwave_target, matches_production_literal, matches_sandbox_pattern, email_allowlist_active, b2bwave_mutations_enabled, recommended_posture}`. Admin-gated.
 * `POST /debug/sanitise-sandbox-db` — LIVE-DEPLOYED, UN-INVOKED. Admin-gated + `X-Allow-Destructive: yes` required. Truncates 7 customer-data tables (no CASCADE, no dynamic SQL); `warehouse_mapping` and `trusted_customers` intentionally untouched.
 
 ### New stdout log markers (Render logs)
 
 * `[ENV] b2bwave_url=... email_allowlist=... b2bwave_mutations=...` — startup banner, one line per boot.
-* `[EMAIL-GUARD] blocked|redirected ...` — fires when EMAIL_ALLOWLIST suppresses or redirects a send.
+* `[EMAIL-GUARD] blocked|redirected ...` — fires when EMAIL_ALLOWLIST suppresses or redirects a send. Covers BOTH Path A (`email_sender.send_order_email`) and Path C (`checkout_routes._send_gmail_message` — tagged `via=_send_gmail_message`).
 * `[B2BWAVE-GUARD] mutation blocked ...` — fires when B2BWAVE_MUTATIONS_ENABLED=false suppresses a write.
 * `[B2BWAVE-WARN] LIVE mutation committed ...` — fires when a real B2BWave mutation reaches the tenant (audit trail for production-side effects).
 
@@ -302,6 +312,7 @@ Order-Level:
 
 * Diagnosability gaps only
 * No system correctness risks identified
+* E-001 (OPEN, MITIGATED, HIGH), E-002 (OPEN, LOW-MED), E-003 (OPEN, MEDIUM) — tracked in WS6_ENVIRONMENT_RISK.md; none are active blockers
 
 ---
 
@@ -346,15 +357,25 @@ Use this to quickly classify issues without re-investigating the system.
 
 ---
 
+## RECENT COMMITS (cutover-adjacent, 2026-04-20 / 2026-04-21)
+
+* `cc2526a7` — `migration_routes.py`: Option B endpoints (`GET /debug/env-readiness`, `POST /debug/sanitise-sandbox-db`)
+* `15fef2cc` — `checkout_routes.py`: G4 EMAIL_ALLOWLIST guard on `_send_gmail_message` (closes Path C email leak)
+* `785ba956` — `handoffs/CFC_ORDERS_OPTION_B_CUTOVER_RUNBOOK.md`: authoritative cutover runbook
+* `199225208f` / `e61aab49c8` / `af28b8a182` — doc alignment for WS6_CURRENT_STATE / WS6_ENVIRONMENT / WS6_ENVIRONMENT_RISK
+
+---
+
 ## FINAL SUMMARY
 
 WS6 is fully aligned with SOT and validated by runtime evidence.
 
-All prior uncertainty has been eliminated.
+All prior uncertainty has been eliminated. All three email egress paths are fully covered (Path A guarded, Path B dead, Path C guarded). Option B cutover tooling is live-deployed and un-invoked; the authoritative runbook is in place.
 
 Future work is limited to:
 
 * order-level tracing
 * observability improvements
+* Option B cutover execution (gated on B2BWave sandbox tenant provisioning)
 
 NOT system debugging.
