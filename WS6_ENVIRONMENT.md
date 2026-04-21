@@ -53,6 +53,7 @@ https://github.com/cabinetsforcontractors/CFCOrderBackend_Sandbox.git
 
 ### New admin endpoint
 - `GET /debug/env-readiness` — returns structured posture verdict including `recommended_posture`.
+- `POST /debug/sanitise-sandbox-db` — LIVE. Admin-gated + `X-Allow-Destructive: yes` header required. Truncates customer-data tables only; `warehouse_mapping` and `trusted_customers` preserved by design.
 
 ### Notes
 - This file is environment-specific
