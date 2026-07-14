@@ -5,8 +5,9 @@ All endpoints require admin token (X-Admin-Token header).
 """
 
 import os
-from typing import Optional
+from typing import List, Optional
 from fastapi import APIRouter, Depends, Header
+from pydantic import BaseModel
 from auth import require_admin
 from db_helpers import get_db
 from config import B2BWAVE_URL
@@ -144,6 +145,46 @@ def init_db(_: bool = Depends(require_admin)):
         with conn.cursor() as cur:
             cur.execute(SCHEMA_SQL)
     return {"status": "ok", "message": "Database schema initialized", "version": "5.8.0"}
+
+
+# =============================================================================
+# WAREHOUSE MAPPING CLEANUP
+# =============================================================================
+
+class WarehouseMappingCleanup(BaseModel):
+    prefixes: List[str]
+
+
+@migration_router.post("/debug/warehouse-mapping-cleanup")
+def warehouse_mapping_cleanup(
+    body: WarehouseMappingCleanup,
+    _: bool = Depends(require_admin),
+    x_allow_destructive: Optional[str] = Header(None, alias="X-Allow-Destructive"),
+):
+    """
+    Delete an explicit list of sku_prefix rows from warehouse_mapping.
+    No wildcards — every prefix must be named. Requires `X-Allow-Destructive: yes`.
+    Added 2026-07-14 for the SOT warehouse-map cleanup (stale name-keyed and
+    retired-prefix rows); safe to reuse for future map maintenance.
+    """
+    if (x_allow_destructive or "").strip().lower() != "yes":
+        return {"status": "error", "message": "X-Allow-Destructive: yes header required"}
+    if not body.prefixes:
+        return {"status": "error", "message": "prefixes list is empty"}
+
+    deleted, not_found = [], []
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            for p in body.prefixes:
+                cur.execute(
+                    "DELETE FROM warehouse_mapping WHERE UPPER(sku_prefix) = UPPER(%s) RETURNING sku_prefix",
+                    (p,),
+                )
+                row = cur.fetchone()
+                (deleted if row else not_found).append(p)
+        conn.commit()
+
+    return {"status": "ok", "deleted_count": len(deleted), "deleted": deleted, "not_found": not_found}
 
 
 # =============================================================================
