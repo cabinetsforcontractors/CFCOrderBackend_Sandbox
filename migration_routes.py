@@ -188,221 +188,42 @@ def warehouse_mapping_cleanup(
 
 
 # =============================================================================
-# DEBUG
+# R+L API SCOPE PROBE (read-only)
 # =============================================================================
 
-@migration_router.get("/debug/orders-columns")
-def debug_orders_columns(_: bool = Depends(require_admin)):
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT column_name, data_type
-                FROM information_schema.columns
-                WHERE table_name = 'orders'
-                ORDER BY ordinal_position
-            """)
-            orders_cols = cur.fetchall()
-            cur.execute("""
-                SELECT column_name, data_type
-                FROM information_schema.columns
-                WHERE table_name = 'pending_checkouts'
-                ORDER BY ordinal_position
-            """)
-            checkout_cols = cur.fetchall()
-            cur.execute("""
-                SELECT column_name, data_type
-                FROM information_schema.columns
-                WHERE table_name = 'order_shipments'
-                ORDER BY ordinal_position
-            """)
-            shipment_cols = cur.fetchall()
-            return {
-                "orders_columns": [c[0] for c in orders_cols],
-                "pending_checkouts_columns": [c[0] for c in checkout_cols],
-                "order_shipments_columns": [c[0] for c in shipment_cols],
-            }
+@migration_router.get("/debug/rl-probe/{pro_number}")
+def debug_rl_probe(pro_number: str, _: bool = Depends(require_admin)):
+    """
+    Probe what the R+L account key can access for a PRO number: shipment tracing
+    plus document-retrieval endpoint variants (invoice copies, W&I certs).
+    Read-only GETs against api.rlc.com; returns raw status + body snippets.
+    Added 2026-07-15 for pallet-multiplier calibration / charged-vs-paid audit.
+    """
+    import json as _json
+    import urllib.error
+    import urllib.request
 
+    key = os.environ.get("RL_CARRIERS_API_KEY", "")
+    if not key:
+        return {"status": "error", "message": "RL_CARRIERS_API_KEY not configured"}
 
-@migration_router.get("/debug/env-readiness")
-def debug_env_readiness(_: bool = Depends(require_admin)):
-    """Option B readiness probe. Reports tenant target + guardrail state."""
-    url = B2BWAVE_URL or ""
-    matches_production_literal = ("cabinetsforcontractors" in url) or ("cabinetsforcontactors" in url)
-    matches_sandbox_pattern = "sandbox" in url
-    email_allowlist_active = bool(os.environ.get("EMAIL_ALLOWLIST", "").strip())
-    b2bwave_mutations_enabled = os.environ.get("B2BWAVE_MUTATIONS_ENABLED", "true").lower() != "false"
-
-    if matches_production_literal and not b2bwave_mutations_enabled and email_allowlist_active:
-        recommended_posture = "safe_option_a"
-    elif matches_sandbox_pattern:
-        recommended_posture = "ready_for_guardrail_relaxation"
-    else:
-        recommended_posture = "unknown"
-
-    return {
-        "b2bwave_target": url or "(not set)",
-        "matches_production_literal": matches_production_literal,
-        "matches_sandbox_pattern": matches_sandbox_pattern,
-        "email_allowlist_active": email_allowlist_active,
-        "b2bwave_mutations_enabled": b2bwave_mutations_enabled,
-        "recommended_posture": recommended_posture,
+    attempts = {
+        "tracing": f"ShipmentTracing?request.traceNumbers={pro_number}&request.traceType=PRO",
+        "docs_a": f"DocumentRetrieval?request.proNumber={pro_number}",
+        "docs_b": f"DocumentRetrieval/GetDocuments?request.proNumber={pro_number}",
+        "docs_c": f"Documents?proNumber={pro_number}",
+        "invoice": f"DocumentRetrieval?request.proNumber={pro_number}&request.documentTypes=Invoice",
     }
-
-
-@migration_router.get("/debug/shipment/{order_id}")
-def debug_shipment(order_id: str, _: bool = Depends(require_admin)):
-    """Show all order_shipments rows for an order_id, plus whether the orders row exists."""
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT order_id, customer_name, email FROM orders WHERE order_id = %s", (order_id,))
-            order_row = cur.fetchone()
-
-            cur.execute("""
-                SELECT shipment_id, warehouse, status, pickup_type,
-                       supplier_token, supplier_poll_1_sent_at,
-                       pickup_ready_date, customer_pickup_confirmed,
-                       created_at
-                FROM order_shipments WHERE order_id = %s
-                ORDER BY created_at
-            """, (order_id,))
-            rows = cur.fetchall()
-
-            cur.execute(
-                "SELECT shipment_id, order_id, pickup_type FROM order_shipments WHERE shipment_id LIKE %s",
-                (f"{order_id}-%",)
-            )
-            pattern_rows = cur.fetchall()
-
-            return {
-                "order_id": order_id,
-                "order_row_exists": order_row is not None,
-                "order_customer": order_row[1] if order_row else None,
-                "shipment_count_by_order_id": len(rows),
-                "shipment_count_by_pattern": len(pattern_rows),
-                "shipments_by_order_id": [
-                    {
-                        "shipment_id": r[0], "warehouse": r[1], "status": r[2],
-                        "pickup_type": r[3], "has_token": bool(r[4]),
-                        "poll_sent": str(r[5]) if r[5] else None,
-                        "pickup_ready": str(r[6]) if r[6] else None,
-                        "confirmed": r[7], "created": str(r[8]),
-                    }
-                    for r in rows
-                ],
-                "shipments_by_pattern": [
-                    {"shipment_id": r[0], "order_id": r[1], "pickup_type": r[2]}
-                    for r in pattern_rows
-                ],
-            }
-
-
-@migration_router.post("/debug/sanitise-sandbox-db")
-def debug_sanitise_sandbox_db(
-    _: bool = Depends(require_admin),
-    x_allow_destructive: Optional[str] = Header(None, alias="X-Allow-Destructive"),
-):
-    """
-    Option B cutover: truncate customer-data tables. warehouse_mapping and
-    trusted_customers are intentionally left untouched — see WS6_CURRENT_STATE.md.
-    DESTRUCTIVE. Requires header `X-Allow-Destructive: yes`.
-    """
-    if (x_allow_destructive or "").strip().lower() != "yes":
-        return {"status": "error", "message": "X-Allow-Destructive: yes header required"}
-
-    tables_to_truncate = [
-        "order_shipments",
-        "order_email_snippets",
-        "order_events",
-        "order_alerts",
-        "order_line_items",
-        "orders",
-        "pending_checkouts",
-    ]
-    truncated, seeded = [], []
-
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            # Single multi-table TRUNCATE statement: FK constraints from child tables
-            # (order_*) to orders are satisfied because all referenced/referencing
-            # tables are listed together. No CASCADE used. Any failure raises to
-            # FastAPI as a 500 with the full Postgres error — loud, not silent.
-            cur.execute("TRUNCATE TABLE " + ", ".join(tables_to_truncate))
-            truncated.extend(tables_to_truncate)
-            conn.commit()
-
-    return {"status": "ok", "truncated": truncated, "seeded": seeded}
-
-
-@migration_router.post("/debug/insert-pickup-shipment/{order_id}")
-def debug_insert_pickup_shipment(order_id: str, _: bool = Depends(require_admin)):
-    """
-    Debug: manually attempt a pickup shipment INSERT for order_id.
-    Returns the exact error if it fails — use this to diagnose constraint issues.
-    NOTE: quote_number intentionally excluded — pickups have no R+L quote.
-    """
-    shipment_id = f"{order_id}-Cabinetry-Distribution"
-    results = {}
-
-    # Step 1: Check orders row
-    try:
-        with get_db() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT order_id FROM orders WHERE order_id = %s", (order_id,))
-                row = cur.fetchone()
-                results["orders_row_exists"] = row is not None
-    except Exception as e:
-        results["orders_check_error"] = str(e)
-
-    # Step 2: Check if shipment already exists
-    try:
-        with get_db() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT id, order_id FROM order_shipments WHERE shipment_id = %s", (shipment_id,))
-                row = cur.fetchone()
-                results["shipment_already_exists"] = row is not None
-                results["existing_shipment_order_id"] = row[1] if row else None
-    except Exception as e:
-        results["shipment_check_error"] = str(e)
-
-    # Step 3: Attempt INSERT WITH pickup_type (no quote_number — pickups have no R+L quote)
-    if not results.get("shipment_already_exists"):
+    out = {}
+    for name, path in attempts.items():
         try:
-            with get_db() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        """INSERT INTO order_shipments
-                           (order_id, shipment_id, warehouse, status, origin_zip,
-                            weight, has_oversized, is_residential, pickup_type)
-                           VALUES (%s, %s, 'Cabinetry Distribution', 'needs_order', '32148',
-                                   600, FALSE, FALSE, 'warehouse_pickup')
-                           RETURNING id""",
-                        (order_id, shipment_id)
-                    )
-                    row = cur.fetchone()
-                    results["insert_with_pickup_type"] = "SUCCESS"
-                    results["new_shipment_id_pk"] = row[0] if row else None
+            req = urllib.request.Request(f"https://api.rlc.com/{path}")
+            req.add_header("apiKey", key)
+            with urllib.request.urlopen(req, timeout=30) as r:
+                body = r.read().decode(errors="replace")
+                out[name] = {"http": r.status, "body": body[:2500]}
+        except urllib.error.HTTPError as e:
+            out[name] = {"http": e.code, "body": e.read().decode(errors="replace")[:400]}
         except Exception as e:
-            results["insert_with_pickup_type"] = f"FAILED: {str(e)}"
-
-            # Fallback: without pickup_type column
-            try:
-                with get_db() as conn:
-                    with conn.cursor() as cur:
-                        cur.execute(
-                            """INSERT INTO order_shipments
-                               (order_id, shipment_id, warehouse, status, origin_zip,
-                                weight, has_oversized, is_residential)
-                               VALUES (%s, %s, 'Cabinetry Distribution', 'needs_order', '32148',
-                                       600, FALSE, FALSE)
-                               RETURNING id""",
-                            (order_id, shipment_id)
-                        )
-                        row = cur.fetchone()
-                        results["insert_fallback"] = "SUCCESS"
-                        results["new_shipment_id_pk"] = row[0] if row else None
-            except Exception as e2:
-                results["insert_fallback"] = f"FAILED: {str(e2)}"
-    else:
-        results["insert_skipped"] = "Shipment already exists"
-
-    return results
+            out[name] = {"error": str(e)}
+    return {"status": "ok", "pro": pro_number, "results": out}
