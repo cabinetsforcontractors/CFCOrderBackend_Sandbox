@@ -260,3 +260,78 @@ def debug_rl_post(req_in: RLPostRequest, _: bool = Depends(require_admin)):
         return {"http": e.code, "body": e.read().decode(errors="replace")[:2000]}
     except Exception as e:
         return {"error": str(e)}
+
+
+# =============================================================================
+# RTA PRODUCTS LOAD (v43 SOT-authoritative freight data)
+# =============================================================================
+
+class RTALoadRequest(BaseModel):
+    rows: List[dict]
+
+
+@migration_router.post("/debug/rta-load")
+def debug_rta_load(req_in: RTALoadRequest, _: bool = Depends(require_admin)):
+    """
+    Batch upsert rows into rta_products. Row keys: product_sku (required),
+    pre_sku, post_sku, product_code, width, height, depth, supplier, weight,
+    cube_ft3, requires_long_pallet. Creates table/columns if missing.
+    Added 2026-07-15 for the v43 SOT-authoritative freight data load
+    (weights = supplier weight SOT; cube = container carton or subtype density;
+    long-pallet flag per William's 96in/6in + composite-tall rules).
+    """
+    if not req_in.rows:
+        return {"status": "error", "message": "rows list is empty"}
+    upserted = 0
+    errors = []
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS rta_products (
+                    id SERIAL PRIMARY KEY,
+                    product_sku VARCHAR(100) UNIQUE NOT NULL,
+                    pre_sku VARCHAR(50), post_sku VARCHAR(100),
+                    door_name VARCHAR(200), product_code VARCHAR(200),
+                    product_type VARCHAR(100), cabinet_type VARCHAR(50),
+                    width DECIMAL(10,2), height DECIMAL(10,2), depth DECIMAL(10,2),
+                    supplier VARCHAR(100), door_style VARCHAR(100),
+                    cogs DECIMAL(10,2), sales_price DECIMAL(10,2), weight DECIMAL(10,2),
+                    requires_long_pallet BOOLEAN DEFAULT FALSE,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                )
+            """)
+            cur.execute("ALTER TABLE rta_products ADD COLUMN IF NOT EXISTS cube_ft3 DECIMAL(10,3)")
+            for row in req_in.rows:
+                sku = (row.get("product_sku") or "").strip()
+                if not sku:
+                    continue
+                try:
+                    cur.execute("""
+                        INSERT INTO rta_products (
+                            product_sku, pre_sku, post_sku, product_code, width, height,
+                            depth, supplier, weight, cube_ft3, requires_long_pallet, updated_at
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                        ON CONFLICT (product_sku) DO UPDATE SET
+                            pre_sku = EXCLUDED.pre_sku,
+                            post_sku = EXCLUDED.post_sku,
+                            product_code = EXCLUDED.product_code,
+                            width = EXCLUDED.width,
+                            height = EXCLUDED.height,
+                            depth = EXCLUDED.depth,
+                            supplier = EXCLUDED.supplier,
+                            weight = EXCLUDED.weight,
+                            cube_ft3 = EXCLUDED.cube_ft3,
+                            requires_long_pallet = EXCLUDED.requires_long_pallet,
+                            updated_at = NOW()
+                    """, (
+                        sku, row.get("pre_sku"), row.get("post_sku"),
+                        row.get("product_code"), row.get("width"), row.get("height"),
+                        row.get("depth"), row.get("supplier"), row.get("weight"),
+                        row.get("cube_ft3"), bool(row.get("requires_long_pallet", False)),
+                    ))
+                    upserted += 1
+                except Exception as e:
+                    errors.append(f"{sku}: {str(e)[:120]}")
+        conn.commit()
+    return {"status": "ok", "upserted": upserted, "errors": errors[:10], "error_count": len(errors)}
