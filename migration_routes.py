@@ -188,42 +188,32 @@ def warehouse_mapping_cleanup(
 
 
 # =============================================================================
-# R+L API SCOPE PROBE (read-only)
+# R+L READ-ONLY PASSTHROUGH (calibration research)
 # =============================================================================
 
-@migration_router.get("/debug/rl-probe/{pro_number}")
-def debug_rl_probe(pro_number: str, _: bool = Depends(require_admin)):
+@migration_router.get("/debug/rl-get")
+def debug_rl_get(path: str, _: bool = Depends(require_admin)):
     """
-    Probe what the R+L account key can access for a PRO number: shipment tracing
-    plus document-retrieval endpoint variants (invoice copies, W&I certs).
-    Read-only GETs against api.rlc.com; returns raw status + body snippets.
-    Added 2026-07-15 for pallet-multiplier calibration / charged-vs-paid audit.
+    Generic READ-ONLY passthrough to api.rlc.com. `path` = everything after
+    https://api.rlc.com/ (caller URL-encodes). GET only; no mutations possible.
+    Added 2026-07-15 for pallet-multiplier calibration / charged-vs-paid audit —
+    lets calibration iterate on ShipmentTracing / DocumentRetrieval params
+    without a redeploy per variant.
     """
-    import json as _json
     import urllib.error
     import urllib.request
 
     key = os.environ.get("RL_CARRIERS_API_KEY", "")
     if not key:
         return {"status": "error", "message": "RL_CARRIERS_API_KEY not configured"}
-
-    attempts = {
-        "tracing": f"ShipmentTracing?request.traceNumbers={pro_number}&request.traceType=PRO",
-        "docs_a": f"DocumentRetrieval?request.proNumber={pro_number}",
-        "docs_b": f"DocumentRetrieval/GetDocuments?request.proNumber={pro_number}",
-        "docs_c": f"Documents?proNumber={pro_number}",
-        "invoice": f"DocumentRetrieval?request.proNumber={pro_number}&request.documentTypes=Invoice",
-    }
-    out = {}
-    for name, path in attempts.items():
-        try:
-            req = urllib.request.Request(f"https://api.rlc.com/{path}")
-            req.add_header("apiKey", key)
-            with urllib.request.urlopen(req, timeout=30) as r:
-                body = r.read().decode(errors="replace")
-                out[name] = {"http": r.status, "body": body[:2500]}
-        except urllib.error.HTTPError as e:
-            out[name] = {"http": e.code, "body": e.read().decode(errors="replace")[:400]}
-        except Exception as e:
-            out[name] = {"error": str(e)}
-    return {"status": "ok", "pro": pro_number, "results": out}
+    if "://" in path or path.startswith("/") or ".." in path:
+        return {"status": "error", "message": "path must be a relative api.rlc.com path"}
+    try:
+        req = urllib.request.Request(f"https://api.rlc.com/{path}")
+        req.add_header("apiKey", key)
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return {"http": r.status, "body": r.read().decode(errors="replace")[:100000]}
+    except urllib.error.HTTPError as e:
+        return {"http": e.code, "body": e.read().decode(errors="replace")[:2000]}
+    except Exception as e:
+        return {"error": str(e)}
