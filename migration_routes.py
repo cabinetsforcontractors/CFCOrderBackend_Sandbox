@@ -217,3 +217,46 @@ def debug_rl_get(path: str, _: bool = Depends(require_admin)):
         return {"http": e.code, "body": e.read().decode(errors="replace")[:2000]}
     except Exception as e:
         return {"error": str(e)}
+
+
+class RLPostRequest(BaseModel):
+    path: str
+    body: dict
+
+
+@migration_router.post("/debug/rl-post")
+def debug_rl_post(req_in: RLPostRequest, _: bool = Depends(require_admin)):
+    """
+    Query-style POST passthrough to api.rlc.com for R+L services whose queries
+    require POST bodies. WHITELISTED read-only-in-effect paths only — BOL,
+    pickup and claim creation endpoints are NOT allowed. Added 2026-07-15 for
+    pallet-multiplier calibration / charged-vs-paid audit.
+    """
+    import json as _json
+    import urllib.error
+    import urllib.request
+
+    ALLOWED = {
+        "ActivityHistory/ShipmentHistory",
+        "DocumentRetrieval/GetDocumentTypes",
+        "DocumentRetrieval",
+        "ShipmentTracing",
+        "PickupRequestHistory",
+        "TransitTimes",
+    }
+    key = os.environ.get("RL_CARRIERS_API_KEY", "")
+    if not key:
+        return {"status": "error", "message": "RL_CARRIERS_API_KEY not configured"}
+    if req_in.path not in ALLOWED:
+        return {"status": "error", "message": f"path not in read-only whitelist: {sorted(ALLOWED)}"}
+    try:
+        data = _json.dumps(req_in.body).encode()
+        req = urllib.request.Request(f"https://api.rlc.com/{req_in.path}", data=data, method="POST")
+        req.add_header("apiKey", key)
+        req.add_header("Content-Type", "application/json")
+        with urllib.request.urlopen(req, timeout=90) as r:
+            return {"http": r.status, "body": r.read().decode(errors="replace")[:200000]}
+    except urllib.error.HTTPError as e:
+        return {"http": e.code, "body": e.read().decode(errors="replace")[:2000]}
+    except Exception as e:
+        return {"error": str(e)}
