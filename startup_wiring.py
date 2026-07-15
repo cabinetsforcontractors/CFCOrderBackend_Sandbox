@@ -57,6 +57,15 @@ def wire_all(app: FastAPI) -> dict:
     except ImportError as e:
         results["quotes"] = False
         print(f"[STARTUP] quote_routes not found: {e}")
+
+    # Freight Plan engine (/freight/*) — pallet plans + fees from freight_logic (2026-07-15)
+    try:
+        from freight_routes import freight_router
+        app.include_router(freight_router)
+        results["freight"] = True
+    except ImportError as e:
+        results["freight"] = False
+        print(f"[STARTUP] freight_routes not found: {e}")
     
     loaded = sum(1 for v in results.values() if v)
     print(f"[STARTUP] startup_wiring: {loaded}/{len(results)} modules loaded")
