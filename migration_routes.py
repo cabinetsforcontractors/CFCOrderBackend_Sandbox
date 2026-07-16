@@ -275,10 +275,10 @@ def debug_rta_load(req_in: RTALoadRequest, _: bool = Depends(require_admin)):
     """
     Batch upsert rows into rta_products. Row keys: product_sku (required),
     pre_sku, post_sku, product_code, width, height, depth, supplier, weight,
-    cube_ft3, requires_long_pallet. Creates table/columns if missing.
-    Added 2026-07-15 for the v43 SOT-authoritative freight data load
-    (weights = supplier weight SOT; cube = container carton or subtype density;
-    long-pallet flag per William's 96in/6in + composite-tall rules).
+    cube_ft3, requires_long_pallet, supplier_sku. Creates table/columns if missing.
+    2026-07-15: v43 SOT-authoritative freight data load.
+    2026-07-16: supplier_sku added (website SKU -> raw supplier SKU from the SOT
+    map, SUPPLIER_SKU_MAP_20260716.csv) for automatic warehouse ordering.
     """
     if not req_in.rows:
         return {"status": "error", "message": "rows list is empty"}
@@ -302,6 +302,7 @@ def debug_rta_load(req_in: RTALoadRequest, _: bool = Depends(require_admin)):
                 )
             """)
             cur.execute("ALTER TABLE rta_products ADD COLUMN IF NOT EXISTS cube_ft3 DECIMAL(10,3)")
+            cur.execute("ALTER TABLE rta_products ADD COLUMN IF NOT EXISTS supplier_sku VARCHAR(150)")
             for row in req_in.rows:
                 sku = (row.get("product_sku") or "").strip()
                 if not sku:
@@ -310,8 +311,9 @@ def debug_rta_load(req_in: RTALoadRequest, _: bool = Depends(require_admin)):
                     cur.execute("""
                         INSERT INTO rta_products (
                             product_sku, pre_sku, post_sku, product_code, width, height,
-                            depth, supplier, weight, cube_ft3, requires_long_pallet, updated_at
-                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                            depth, supplier, weight, cube_ft3, requires_long_pallet,
+                            supplier_sku, updated_at
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
                         ON CONFLICT (product_sku) DO UPDATE SET
                             pre_sku = EXCLUDED.pre_sku,
                             post_sku = EXCLUDED.post_sku,
@@ -323,12 +325,14 @@ def debug_rta_load(req_in: RTALoadRequest, _: bool = Depends(require_admin)):
                             weight = EXCLUDED.weight,
                             cube_ft3 = EXCLUDED.cube_ft3,
                             requires_long_pallet = EXCLUDED.requires_long_pallet,
+                            supplier_sku = COALESCE(EXCLUDED.supplier_sku, rta_products.supplier_sku),
                             updated_at = NOW()
                     """, (
                         sku, row.get("pre_sku"), row.get("post_sku"),
                         row.get("product_code"), row.get("width"), row.get("height"),
                         row.get("depth"), row.get("supplier"), row.get("weight"),
                         row.get("cube_ft3"), bool(row.get("requires_long_pallet", False)),
+                        row.get("supplier_sku"),
                     ))
                     upserted += 1
                 except Exception as e:
