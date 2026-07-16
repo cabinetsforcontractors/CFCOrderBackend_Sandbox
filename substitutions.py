@@ -14,7 +14,11 @@ Flow:
   4. Approve -> the line swap is applied to the website order via the B2BWave
      API with the substitute priced at the ORIGINAL line's price (customer
      total unchanged — CFC eats the difference), then William is alerted.
-     Decline -> customer's note recorded, William alerted, order untouched.
+     Decline -> customer's note recorded and PARSED FOR A SKU REQUEST
+     ("replace with a TF396 instead" resolves via the original line's prefix);
+     William's alert shows the recognized item + catalog price vs held price,
+     and POST /substitutions/{id}/counter-apply swaps to it in one click
+     (customer gets a confirmation email). Order untouched until then.
 
 B2BWave API quirks (proven live 2026-07-16 on test orders 4860/5706):
   - Accept: application/json is REQUIRED — without it mutations APPLY but the
@@ -28,6 +32,7 @@ B2BWave API quirks (proven live 2026-07-16 on test orders 4860/5706):
 
 import json
 import os
+import re
 import secrets
 from datetime import datetime, timezone
 from typing import Dict, Optional
@@ -74,6 +79,10 @@ def ensure_substitutions_table(conn):
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
             )
         """)
+        cur.execute("ALTER TABLE order_substitutions ADD COLUMN IF NOT EXISTS requested_sku VARCHAR(100)")
+        cur.execute("ALTER TABLE order_substitutions ADD COLUMN IF NOT EXISTS requested_name TEXT")
+        cur.execute("ALTER TABLE order_substitutions ADD COLUMN IF NOT EXISTS requested_price DECIMAL(10,2)")
+        cur.execute("ALTER TABLE order_substitutions ADD COLUMN IF NOT EXISTS requested_detail TEXT")
         conn.commit()
 
 
@@ -114,8 +123,72 @@ def fetch_b2b_product(code: str) -> Optional[Dict]:
     return None
 
 
+def search_b2b_products(fragment: str) -> list:
+    st, data = _b2b("GET", f"products.json?code_cont={fragment}")
+    if st == 200 and isinstance(data, list):
+        return [p.get("product", p) for p in data]
+    return []
+
+
 def _order_products(order: Dict) -> list:
     return [p.get("order_product", p) for p in (order.get("order_products") or [])]
+
+
+# =============================================================================
+# DECLINE-NOTE SKU RECOGNITION
+# =============================================================================
+
+_SKU_TOKEN = re.compile(r"\b([A-Za-z]{1,6}(?:-[A-Za-z0-9./]+)*-?[A-Za-z]*\d[A-Za-z0-9./-]*)\b")
+
+
+def resolve_note_sku(note: str, original_sku: str) -> Dict:
+    """Parse a customer's decline note for a SKU request.
+
+    Handles: full SKUs ("WSP-WF342"), bare body tokens ("TF396" -> completed
+    with the original line's prefix), and single-hit catalog fragments.
+    Returns {"resolved": bool, "sku","name","price","product_id","detail"}.
+    "TF396 exists in other lines but not this one" is reported, never guessed.
+    """
+    out = {"resolved": False, "sku": None, "name": None, "price": None,
+           "product_id": None, "detail": ""}
+    if not note:
+        out["detail"] = "no note"
+        return out
+    prefix = (original_sku or "").split("-")[0].upper()
+    tokens = sorted({t.upper().strip("-.") for t in _SKU_TOKEN.findall(note)},
+                    key=len, reverse=True)
+    if not tokens:
+        out["detail"] = "no SKU-like token in note"
+        return out
+
+    for tok in tokens[:5]:
+        # 1) note contains a full SKU
+        p = fetch_b2b_product(tok)
+        # 2) bare body token -> complete with the original line's prefix
+        if not p and prefix and not tok.startswith(prefix + "-"):
+            p = fetch_b2b_product(f"{prefix}-{tok}")
+        if p:
+            out.update({"resolved": True, "sku": p.get("code"), "name": p.get("name"),
+                        "price": p.get("price"), "product_id": p.get("id"),
+                        "detail": f"matched token '{tok}'"})
+            return out
+        # 3) catalog fragment search — accept only an unambiguous hit
+        hits = search_b2b_products(tok)
+        if hits:
+            in_line = [h for h in hits if (h.get("code") or "").upper().startswith(prefix + "-")]
+            if len(in_line) == 1:
+                p = in_line[0]
+                out.update({"resolved": True, "sku": p.get("code"), "name": p.get("name"),
+                            "price": p.get("price"), "product_id": p.get("id"),
+                            "detail": f"matched token '{tok}' within line {prefix}"})
+                return out
+            codes = ", ".join((h.get("code") or "") for h in hits[:8])
+            out["detail"] = (f"'{tok}' exists in the catalog ({codes}"
+                             f"{'...' if len(hits) > 8 else ''}) but NOT in line "
+                             f"{prefix} — needs a human decision")
+            return out
+    out["detail"] = f"no catalog match for token(s): {', '.join(tokens[:5])}"
+    return out
 
 
 # =============================================================================
@@ -320,7 +393,8 @@ def get_substitution(token: str) -> Optional[Dict]:
 
 def record_response(token: str, approved: bool, note: str = "") -> Dict:
     """Record the customer's click. Approve -> attempt the B2BWave apply.
-    Either way William gets an alert email. Idempotent per token."""
+    Decline -> parse the note for a SKU request (recognized item goes into
+    William's alert with a one-click counter-apply). Idempotent per token."""
     sub = get_substitution(token)
     if not sub:
         return {"status": "error", "message": "unknown token"}
@@ -328,20 +402,32 @@ def record_response(token: str, approved: bool, note: str = "") -> Dict:
         return {"status": "already_responded", "substitution": _public_view(sub)}
 
     new_status = "approved" if approved else "declined"
+    requested = None
+    if not approved and note:
+        try:
+            requested = resolve_note_sku(note, sub["original_sku"])
+        except Exception as e:
+            requested = {"resolved": False, "detail": f"recognition error: {e}"}
+
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute("""
                 UPDATE order_substitutions
-                SET status = %s, customer_note = %s, responded_at = NOW()
+                SET status = %s, customer_note = %s, responded_at = NOW(),
+                    requested_sku = %s, requested_name = %s,
+                    requested_price = %s, requested_detail = %s
                 WHERE token = %s AND status = 'pending'
-            """, (new_status, (note or "")[:2000], token))
+            """, (new_status, (note or "")[:2000],
+                  (requested or {}).get("sku"), (requested or {}).get("name"),
+                  (requested or {}).get("price"), (requested or {}).get("detail"),
+                  token))
             changed = cur.rowcount
             cur.execute("""
                 INSERT INTO order_events (order_id, event_type, event_data, source)
                 VALUES (%s, 'substitution_response', %s, 'substitutions')
             """, (sub["order_id"], json.dumps({
                 "substitution_id": sub["id"], "approved": approved,
-                "note": (note or "")[:500],
+                "note": (note or "")[:500], "recognized": requested,
             })))
             conn.commit()
     if not changed:
@@ -351,15 +437,19 @@ def record_response(token: str, approved: bool, note: str = "") -> Dict:
     if approved:
         apply_result = apply_substitution(sub)
 
-    _alert_william(sub, approved, note, apply_result)
-    return {"status": "ok", "approved": approved, "apply_result": apply_result}
+    _alert_william(sub, approved, note, apply_result, requested)
+    return {"status": "ok", "approved": approved, "apply_result": apply_result,
+            "recognized": requested}
 
 
-def apply_substitution(sub: Dict) -> Dict:
-    """Swap the line on the B2BWave order: ADD substitute at the original
+def apply_substitution(sub: Dict, substitute_sku: str = None,
+                       applied_status: str = "applied") -> Dict:
+    """Swap the line on the B2BWave order: ADD the substitute at the original
     price first (customer total unchanged), verify by readback, then REMOVE
-    the original line, verify again. Guarded by B2BWAVE_MUTATIONS_ENABLED."""
-    result = {"applied": False, "steps": []}
+    the original line, verify again. Guarded by B2BWAVE_MUTATIONS_ENABLED.
+    substitute_sku overrides the proposed one (counter-apply)."""
+    target_sku = substitute_sku or sub["substitute_sku"]
+    result = {"applied": False, "substitute_sku": target_sku, "steps": []}
     if os.environ.get("B2BWAVE_MUTATIONS_ENABLED", "true").lower() == "false":
         result["error"] = ("approved by customer but NOT applied: B2BWave "
                            "mutations disabled (B2BWAVE_MUTATIONS_ENABLED=false)")
@@ -378,9 +468,9 @@ def apply_substitution(sub: Dict) -> Dict:
         result["error"] = f"original line {sub['original_sku']} no longer on order"
         _store_apply_result(sub, "apply_failed", result)
         return result
-    sub_product = fetch_b2b_product(sub["substitute_sku"])
+    sub_product = fetch_b2b_product(target_sku)
     if not sub_product:
-        result["error"] = f"substitute {sub['substitute_sku']} not found"
+        result["error"] = f"substitute {target_sku} not found"
         _store_apply_result(sub, "apply_failed", result)
         return result
 
@@ -398,7 +488,7 @@ def apply_substitution(sub: Dict) -> Dict:
     check = fetch_b2b_order(order_id)
     new_lines = [p for p in _order_products(check or {}) if p["id"] not in before_ids]
     added = next((p for p in new_lines
-                  if (p.get("product_code") or "").upper() == sub["substitute_sku"].upper()), None)
+                  if (p.get("product_code") or "").upper() == target_sku.upper()), None)
     if not added:
         result["error"] = f"add_product did not verify (HTTP {st})"
         _store_apply_result(sub, "apply_failed", result)
@@ -418,7 +508,38 @@ def apply_substitution(sub: Dict) -> Dict:
         return result
 
     result["applied"] = True
-    _store_apply_result(sub, "applied", result)
+    _store_apply_result(sub, applied_status, result)
+    return result
+
+
+def counter_apply(sub: Dict, sku_override: str = None) -> Dict:
+    """Swap to the CUSTOMER-REQUESTED item (from their decline note, or an
+    explicit admin override). On success the customer gets a confirmation
+    email. Held at the original line price, same as any substitution."""
+    target = (sku_override or sub.get("requested_sku") or "").strip()
+    if not target:
+        return {"applied": False,
+                "error": ("no recognized SKU on this substitution "
+                          f"({sub.get('requested_detail') or 'no note parsed'}); "
+                          "pass {\"sku\": \"...\"} to override")}
+    result = apply_substitution(sub, substitute_sku=target,
+                                applied_status="counter_applied")
+    if result.get("applied"):
+        first = (sub.get("customer_name") or "there").split()[0]
+        html = f"""
+<div style='color:#393939;font-family:"Open Sans","Helvetica Neue",Helvetica,Arial,sans-serif;font-size:13px;line-height:1.5;max-width:50em;'>
+  <h1>Done — order #{sub['order_id']} updated</h1>
+  <p>Hi {first},</p>
+  <p>As you asked, we replaced <s>{sub['original_sku']}</s> with
+     <strong>{target}</strong> on your order #{sub['order_id']}.
+     <strong>Your price stays the same</strong> — we covered the difference.</p>
+  <p>Every other item is unchanged. Questions? Just reply or call (770) 990-4885.</p>
+  <p>Thank you,<br>The CFC Team</p>
+</div>"""
+        result["customer_email"] = _send_guarded_email(
+            sub["order_id"], sub.get("customer_email") or "",
+            f"Order #{sub['order_id']} — updated as you asked ({target})",
+            html, triggered_by="substitution_counter_apply")
     return result
 
 
@@ -428,7 +549,8 @@ def _store_apply_result(sub: Dict, status: str, result: Dict):
             cur.execute("""
                 UPDATE order_substitutions
                 SET status = %s, apply_result = %s,
-                    applied_at = CASE WHEN %s = 'applied' THEN NOW() ELSE applied_at END
+                    applied_at = CASE WHEN %s IN ('applied', 'counter_applied')
+                                      THEN NOW() ELSE applied_at END
                 WHERE id = %s
             """, (status, json.dumps(result)[:4000], status, sub["id"]))
             cur.execute("""
@@ -439,7 +561,8 @@ def _store_apply_result(sub: Dict, status: str, result: Dict):
             conn.commit()
 
 
-def _alert_william(sub: Dict, approved: bool, note: str, apply_result: Optional[Dict]):
+def _alert_william(sub: Dict, approved: bool, note: str,
+                   apply_result: Optional[Dict], requested: Optional[Dict] = None):
     verdict = "APPROVED" if approved else "DECLINED"
     lines = [
         f"<p><strong>Substitution {verdict}</strong> — Order #{sub['order_id']}</p>",
@@ -457,6 +580,20 @@ def _alert_william(sub: Dict, approved: bool, note: str, apply_result: Optional[
             lines.append(f"<p style='color:#c00;'><strong>ACTION NEEDED:</strong> "
                          f"order NOT updated — {err}</p>")
     else:
+        if requested and requested.get("resolved"):
+            cat = requested.get("price")
+            cat_txt = f"${float(cat):,.2f}" if cat is not None else "n/a"
+            lines.append(
+                f"<p style='background:#eef7ff;padding:8px;border-radius:6px;'>"
+                f"<strong>Recognized request:</strong> {requested['sku']} — "
+                f"{requested.get('name', '')}<br>"
+                f"Catalog price {cat_txt} vs held ${float(sub['keep_price'] or 0):,.2f}.<br>"
+                f"One click to accept: POST /substitutions/{sub['id']}/counter-apply "
+                f"(swaps at the held price + emails the customer).</p>")
+        elif requested:
+            lines.append(f"<p style='background:#fff4e5;padding:8px;border-radius:6px;'>"
+                         f"<strong>Could not auto-recognize the request:</strong> "
+                         f"{requested.get('detail', '')}</p>")
         lines.append("<p>Order untouched. Follow up with the customer.</p>")
     _send_guarded_email(sub["order_id"], INTERNAL_ALERT_EMAIL,
                         f"Substitution {verdict}: order #{sub['order_id']} "
