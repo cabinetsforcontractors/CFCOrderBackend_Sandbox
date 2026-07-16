@@ -3,8 +3,8 @@ estimate_verifier.py
 Auto-verify on reply — the loop-closer for the auto-ordering lane.
 
 Watches Gmail for supplier reply documents (estimates / sales orders /
-quotes), runs the validated per-supplier parsers, diffs against what we sent,
-and flips the supplier_orders state row:
+quotes / confirmations), runs the validated per-supplier parsers, diffs
+against what we sent, and flips the supplier_orders state row:
 
     clean diff        -> status 'confirmed' (quiet — shows in the digest)
     anything off      -> status 'discrepancy' + alert email to William
@@ -16,10 +16,11 @@ actually are):
         GHI Sales Order, Milestone QUOFL, C&S Quotation, LI Estimate/Invoice
     HTML body "#SO#####" + NetSuite markers -> DuraStone (also feeds the
         revision tripwire history via supplier_doc_parser).
+    HTML body ROC markers ("Roc Cabinetry" + "SKU:") -> ROC confirmation /
+        invoice (roc_parser; carries our PO in "PO Number#").
 
 Diff space matches the /freight/verify-order endpoint: GHI + DS in
-website-SKU space, LI/LM/C&S in body space (their line-code maps are still
-pending William).
+website-SKU space, LI/LM/C&S/ROC in body space.
 
 Every processed Gmail message is recorded in supplier_reply_scans so the
 periodic scan is idempotent; the manual endpoint can force-reprocess.
@@ -36,12 +37,14 @@ from db_helpers import get_db
 INTERNAL_ALERT_EMAIL = os.environ.get("WAREHOUSE_NOTIFICATION_EMAIL",
                                       "cabinetsforcontractors@gmail.com").strip()
 
-# Gmail search for candidate reply documents (content markers do the real
-# routing; this just narrows the scan volume)
-CANDIDATE_QUERY = ('has:attachment filename:pdf '
-                   '(ghicabinets OR QUOFL OR "Quotation_S" OR Estimate_ OR '
-                   'Invoice_ OR milestonecabinetry OR cabinetstone OR '
-                   '"Cabinetry Distribution" OR "Sales Order")')
+# Gmail searches for candidate reply documents (content markers do the real
+# routing; these just narrow the scan volume)
+CANDIDATE_QUERY_PDF = ('has:attachment filename:pdf '
+                       '(ghicabinets OR QUOFL OR "Quotation_S" OR Estimate_ OR '
+                       'Invoice_ OR milestonecabinetry OR cabinetstone OR '
+                       '"Cabinetry Distribution" OR "Sales Order")')
+CANDIDATE_QUERY_HTML = ('(from:roccabinetry.com OR from:sent-via.netsuite.com) '
+                        '("order confirmation" OR "Invoice" OR "Sales Order")')
 
 
 # =============================================================================
@@ -186,6 +189,24 @@ def verify_ds_html(order_id: str, html: str) -> Dict:
             "line_count": len(parsed.get("lines") or []), "sent_count": len(sent)}
 
 
+def verify_roc_html(order_id: str, html: str) -> Dict:
+    """ROC confirmation/invoice HTML -> body-space diff vs the sent ROC lines."""
+    import supplier_doc_parser as sdp
+    from freight_routes import _order_lines_for_supplier
+    from roc_parser import fold_roc_lines, parse_roc_confirmation_html
+    from psycopg2.extras import RealDictCursor
+
+    parsed = parse_roc_confirmation_html(html)
+    with get_db() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            sent = _order_lines_for_supplier(cur, order_id, (),
+                                             ("ROC", "ROC Cabinetry"))
+        report = sdp.body_space_diff(sent, fold_roc_lines(parsed["lines"]))
+    return {"supplier": "ROC", "doc_ref": parsed.get("roc_order_number"),
+            "po": parsed.get("po"), "report": report,
+            "line_count": len(parsed.get("lines") or []), "sent_count": len(sent)}
+
+
 def _apply_verdict(order_id: str, supplier: str, verdict_ok: bool,
                    doc_ref: str, report: Dict, message_id: str) -> str:
     """Flip (or create) the supplier_orders row and alert on discrepancy."""
@@ -279,22 +300,37 @@ def process_message(message_id: str, force: bool = False) -> Dict:
             continue
         results.append(v)
 
+    html = msg.get("html") or ""
+
     # DuraStone NetSuite HTML body
-    if msg.get("html") and "#SO" in msg["html"] and "netsuite" in msg["html"].lower():
+    if html and "#SO" in html and "netsuite" in html.lower():
         try:
             import supplier_doc_parser as sdp
-            sdp_parsed = sdp.parse_durastone_email(msg["html"])
+            sdp_parsed = sdp.parse_durastone_email(html)
             if sdp_parsed.get("so_number") and sdp_parsed.get("po"):
                 # feed the revision tripwire history too
                 with get_db() as conn:
                     try:
-                        sdp.record_and_check_ds_email(conn, message_id, msg["html"])
+                        sdp.record_and_check_ds_email(conn, message_id, html)
                     except Exception:
                         pass
-                v = verify_ds_html(sdp_parsed["po"], msg["html"])
+                v = verify_ds_html(sdp_parsed["po"], html)
                 results.append(v)
         except Exception as e:
             results.append({"supplier": "DuraStone", "error": str(e)})
+
+    # ROC confirmation / invoice HTML body
+    if html:
+        try:
+            from roc_parser import looks_like_roc_confirmation, parse_roc_confirmation_html
+            if looks_like_roc_confirmation(html):
+                pre = parse_roc_confirmation_html(html)
+                if pre.get("po") and pre.get("lines"):
+                    order_key = "".join(c for c in str(pre["po"]) if c.isdigit())
+                    v = verify_roc_html(order_key, html)
+                    results.append(v)
+        except Exception as e:
+            results.append({"supplier": "ROC", "error": str(e)})
 
     processed = []
     for v in results:
@@ -353,23 +389,28 @@ def scan_replies(hours_back: int = 24) -> Dict:
                 "processed": 0, "discrepancies": 0, "errors": []}
     out = {"status": "ok", "checked": 0, "processed": 0, "confirmed": 0,
            "discrepancies": 0, "errors": [], "details": []}
-    try:
-        messages = search_emails(f"newer_than:{int(hours_back)}h {CANDIDATE_QUERY}")
-    except Exception as e:
-        return {"status": "error", "processed": 0, "discrepancies": 0,
-                "errors": [f"search: {e}"]}
-    for m in messages:
-        out["checked"] += 1
+    seen = set()
+    for query in (CANDIDATE_QUERY_PDF, CANDIDATE_QUERY_HTML):
         try:
-            res = process_message(m["id"])
-            if res.get("status") == "ok":
-                out["processed"] += 1
-                for r in res.get("results", []):
-                    if r.get("verdict") == "confirmed":
-                        out["confirmed"] += 1
-                    elif r.get("verdict") == "discrepancy":
-                        out["discrepancies"] += 1
-                out["details"].append(res)
+            messages = search_emails(f"newer_than:{int(hours_back)}h {query}")
         except Exception as e:
-            out["errors"].append(f"{m.get('id')}: {e}")
+            out["errors"].append(f"search: {e}")
+            continue
+        for m in messages:
+            if m["id"] in seen:
+                continue
+            seen.add(m["id"])
+            out["checked"] += 1
+            try:
+                res = process_message(m["id"])
+                if res.get("status") == "ok":
+                    out["processed"] += 1
+                    for r in res.get("results", []):
+                        if r.get("verdict") == "confirmed":
+                            out["confirmed"] += 1
+                        elif r.get("verdict") == "discrepancy":
+                            out["discrepancies"] += 1
+                    out["details"].append(res)
+            except Exception as e:
+                out["errors"].append(f"{m.get('id')}: {e}")
     return out
