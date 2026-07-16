@@ -10,6 +10,10 @@ Flow:
      [Approve] and [No — tell us what you'd prefer] buttons. Pass
      oos_message_id (the warehouse's out-of-stock Gmail message id) to enable
      the automatic supplier reply at the end.
+     ONE PENDING PROPOSAL PER ORDER+SKU (William 2026-07-17: two open
+     approvable emails for the same line = double-approval risk) — a second
+     proposal is refused unless supersede=true, which cancels the old one
+     (its emailed link then shows "already answered").
   3. NOTHING changes on the order until the customer responds. The email
      buttons land on a confirmation page (one extra click) so email-scanner
      link prefetching can never phantom-approve.
@@ -469,10 +473,14 @@ def _send_guarded_email(order_id: str, to_email: str, subject: str, html: str,
 
 def create_substitution_proposal(order_id: str, original_sku: str,
                                  substitute_sku: str, reason: str = "out_of_stock",
-                                 oos_message_id: str = None) -> Dict:
+                                 oos_message_id: str = None,
+                                 supersede: bool = False) -> Dict:
     """Create + email a substitution proposal. Does NOT touch the order.
     oos_message_id = Gmail id of the warehouse's out-of-stock email; when set,
-    the supplier gets a threaded reply with the correction after the swap."""
+    the supplier gets a threaded reply with the correction after the swap.
+    ONE PENDING PROPOSAL PER ORDER+SKU: a second proposal for the same line
+    is refused unless supersede=True (which cancels the old one so its email
+    link shows 'already answered')."""
     order = fetch_b2b_order(order_id)
     if not order:
         return {"status": "error", "message": f"order {order_id} not found on B2BWave"}
@@ -485,6 +493,28 @@ def create_substitution_proposal(order_id: str, original_sku: str,
     if not sub_product:
         return {"status": "error",
                 "message": f"substitute SKU {substitute_sku} not found on B2BWave"}
+
+    # duplicate guard (William 2026-07-17): never two open approvable emails
+    # for the same order line
+    with get_db() as conn:
+        ensure_substitutions_table(conn)
+        with conn.cursor() as cur:
+            cur.execute("""SELECT id FROM order_substitutions
+                           WHERE order_id = %s AND UPPER(original_sku) = %s
+                             AND status = 'pending'""",
+                        (str(order_id), original_sku.upper()))
+            existing = [r[0] for r in cur.fetchall()]
+            if existing and not supersede:
+                return {"status": "error",
+                        "message": (f"pending substitution #{existing[0]} already "
+                                    f"exists for {original_sku} on order {order_id} "
+                                    f"— wait for the customer's answer, or pass "
+                                    f"supersede=true to replace it")}
+            if existing and supersede:
+                cur.execute("""UPDATE order_substitutions
+                               SET status = 'superseded', responded_at = NOW()
+                               WHERE id = ANY(%s)""", (existing,))
+                conn.commit()
 
     sub = {
         "token": secrets.token_urlsafe(24),
@@ -534,11 +564,13 @@ def create_substitution_proposal(order_id: str, original_sku: str,
                 "substitute_sku": sub["substitute_sku"], "quantity": sub["quantity"],
                 "keep_price": sub["keep_price"], "email": email_result,
                 "oos_message_id": oos_message_id,
+                "superseded": existing if supersede else [],
             })))
             conn.commit()
     return {"status": "ok", "substitution_id": sub_id, "token": sub["token"],
             "landing_url": f"{PUBLIC_BASE_URL}/substitution/{sub['token']}",
             "email": email_result,
+            "superseded": existing if supersede else [],
             "proposal": {k: sub[k] for k in ("original_sku", "substitute_sku",
                                              "quantity", "keep_price", "customer_email")}}
 
