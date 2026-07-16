@@ -13,6 +13,9 @@ Format (decoded from real confirmation 2026-07-06, order #000040179):
   NOTE: ROC's store SKUs are their own codes (this order used SNW-*, which
   coincidentally collides with our SNW prefix) — verification therefore runs
   in BODY space against the sent lines' supplier tokens.
+  A-* SKUs (A-BER-B lazy-susan trays, assembly lines) are COMPANIONS — free,
+  baked into the product price (William 2026-07-17) — folded as fees so the
+  quantity diff ignores them but the report still lists them.
 """
 
 import re
@@ -76,10 +79,17 @@ def parse_roc_confirmation_html(html: str) -> Dict:
 
 def fold_roc_lines(lines: List[Dict]) -> List[Dict]:
     """Fold to body space: each ROC store SKU contributes itself and its
-    after-prefix body as match candidates (SNW-B12 -> {SNWB12, B12})."""
+    after-prefix body as match candidates (SNW-B12 -> {SNWB12, B12}).
+    A-* SKUs (free trays / assembly) fold as companions (fee=True) so the
+    quantity diff skips them; they still show in the report's fee list."""
     out = []
     for ln in lines:
         sku = ln["sku"]
+        if sku.upper().startswith("A-"):
+            out.append({"body": sku, "qty": ln["qty"], "raw": sku,
+                        "flags": ["COMPANION (free tray/assembly line)"],
+                        "fee": True})
+            continue
         bodies = [sku]
         if "-" in sku:
             bodies.append(sku.split("-", 1)[1])
