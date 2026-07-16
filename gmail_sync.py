@@ -241,30 +241,44 @@ def update_last_customer_email(conn, order_id: str, email_date_str: str = None):
         conn.commit()
 
 
-def check_cancel_keyword(conn, order_id: str, email_body: str, email_subject: str):
+def check_cancel_keyword(conn, order_id: str, email_body: str, email_subject: str,
+                         message_id: str = None):
     """
-    Check if a customer email contains a cancel keyword.
-    If detected, triggers lifecycle cancellation.
-    
-    Returns True if cancel was detected and processed.
+    Check if a customer email contains a cancel PHRASE (strict matcher in
+    cancel_requests.py — the bare word 'cancel' no longer matches).
+
+    CONFIRM-FIRST (William 2026-07-16): detection no longer cancels anything.
+    It records a token-gated cancel request and emails William a
+    Confirm/Dismiss link; the order is only canceled after a human confirms
+    on the landing page. Dedupe by Gmail message id + open request lives in
+    create_cancel_request (the sync rescans the same 2h window every cycle).
+
+    Returns True if a cancel phrase was detected.
     """
-    from lifecycle_engine import detect_cancel_keyword, cancel_order
-    
+    from cancel_requests import detect_cancel_phrase, create_cancel_request
+
     text = f"{email_subject} {email_body}"
-    if detect_cancel_keyword(text):
-        print(f"[GMAIL] Cancel keyword detected for order {order_id}")
-        result = cancel_order(order_id, reason="customer_request")
-        
-        # Log the detection event
-        with conn.cursor() as cur:
-            cur.execute("""
-                INSERT INTO order_events (order_id, event_type, event_data, source)
-                VALUES (%s, 'cancel_keyword_detected', %s, 'gmail_sync')
-            """, (order_id, json.dumps({
-                'subject': email_subject[:100],
-                'body_snippet': email_body[:200]
-            })))
-            conn.commit()
+    phrase = detect_cancel_phrase(text)
+    if phrase:
+        print(f"[GMAIL] Cancel phrase '{phrase}' detected for order {order_id} — confirm-first")
+        result = create_cancel_request(order_id, email_subject or "", email_body or "",
+                                       matched_phrase=phrase, message_id=message_id)
+
+        # Log the detection event only when a request was actually created
+        # (dedupes fire every sync cycle for up to 2h — don't spam events)
+        if result.get("status") == "created":
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO order_events (order_id, event_type, event_data, source)
+                    VALUES (%s, 'cancel_keyword_detected', %s, 'gmail_sync')
+                """, (order_id, json.dumps({
+                    'subject': (email_subject or '')[:100],
+                    'body_snippet': (email_body or '')[:200],
+                    'matched_phrase': phrase,
+                    'mode': 'confirm_first',
+                    'request_id': result.get('request_id'),
+                })))
+                conn.commit()
         
         return True
     return False
@@ -461,7 +475,8 @@ def run_gmail_sync(db_conn, hours_back=2):
                         canceled = check_cancel_keyword(
                             db_conn, order_id, 
                             email.get('body', ''), 
-                            email.get('subject', '')
+                            email.get('subject', ''),
+                            message_id=email.get('id')
                         )
                         if canceled:
                             results["cancel_detections"] += 1
