@@ -14,6 +14,7 @@ Module Map:
   supplier_routes.py       — /supplier/{token}/* (public) + /supplier/{id}/send-poll [admin]
   invoice_routes.py        — /invoice/scan /invoice/status /invoice/emails /invoice/flags
   substitution_routes.py   — /substitutions/* [admin] + /substitution/{token} (public)
+  supplier_order_routes.py — /supplier-orders/* [admin] (state machine + dispatch)
   routes/audit.py          — /audit/log (POST write, GET read)
   auth.py                  — require_admin Depends() — X-Admin-Token or Bearer JWT
   rate_limit.py            — shared slowapi Limiter instance
@@ -105,6 +106,13 @@ except ImportError:
     print("[STARTUP] substitution_routes module not found, substitution flow disabled")
 
 try:
+    from supplier_order_routes import supplier_order_router
+    SUPPLIER_ORDERS_LOADED = True
+except ImportError:
+    SUPPLIER_ORDERS_LOADED = False
+    print("[STARTUP] supplier_order_routes module not found, dispatch engine disabled")
+
+try:
     from routes.audit import audit_router
     AUDIT_LOADED = True
 except ImportError:
@@ -169,6 +177,9 @@ if INVOICE_LOADED:
 
 if SUBSTITUTIONS_LOADED:
     app.include_router(substitution_router)   # Auto-ordering: /substitutions/* + /substitution/{token}
+
+if SUPPLIER_ORDERS_LOADED:
+    app.include_router(supplier_order_router) # Auto-ordering: /supplier-orders/* (state machine + dispatch)
 
 if AUDIT_LOADED:
     app.include_router(audit_router)          # Phase 5: /audit/log
@@ -252,6 +263,7 @@ def root():
         "b2bwave_target": B2BWAVE_URL or "(not set)",
         "email_allowlist_active": bool(os.environ.get("EMAIL_ALLOWLIST", "").strip()),
         "b2bwave_mutations_enabled": os.environ.get("B2BWAVE_MUTATIONS_ENABLED", "true").lower() != "false",
+        "auto_dispatch_enabled": os.environ.get("AUTO_DISPATCH_ENABLED", "false").lower() == "true",
         "auto_sync": get_sync_status(),
         "gmail_sync": {"enabled": gmail_configured()},
         "square_sync": {"enabled": square_configured()},
@@ -261,6 +273,7 @@ def root():
         "ai_configure": {"enabled": WIRING_STATUS.get("ai_configure", False)},
         "invoice_intel": {"enabled": INVOICE_LOADED},
         "substitution_flow": {"enabled": SUBSTITUTIONS_LOADED},
+        "supplier_order_engine": {"enabled": SUPPLIER_ORDERS_LOADED},
         "audit_log": {"enabled": AUDIT_LOADED},
         "rate_limiting": {"enabled": True, "default_limit": "200/minute"},
         "bol_generation": {"enabled": True},
