@@ -1,7 +1,8 @@
 """
 supplier_order_routes.py
 Routes for the supplier-order state machine + dispatch engine (see
-supplier_orders.py). All admin-gated.
+supplier_orders.py) and the reply auto-verifier (estimate_verifier.py).
+All admin-gated.
 
   POST /supplier-orders/dispatch/{order_id}?auto_send=true&dry_run=false
        — generate + send every warehouse's order artifact. dry_run returns
@@ -12,6 +13,10 @@ supplier_orders.py). All admin-gated.
        — manual transitions (mark-sent after a portal upload, confirmed,
          scheduled, picked_up, delivered, invoice_verified...).
   GET  /supplier-orders/digest — the "what needs me today" view.
+  POST /supplier-orders/scan-replies?hours_back=24 — scan Gmail for supplier
+       reply documents (estimates/SOs/quotes), verify, flip rows.
+  POST /supplier-orders/verify-email/{message_id}?force=false — process one
+       specific Gmail message (any sender — content markers route it).
 """
 
 from typing import Optional
@@ -61,3 +66,27 @@ def update_status(row_id: int, req: StatusUpdate,
 def get_digest(_: bool = Depends(require_admin)):
     from supplier_orders import digest
     return digest()
+
+
+@supplier_order_router.post("/supplier-orders/scan-replies")
+def scan_replies_now(hours_back: int = 24, _: bool = Depends(require_admin)):
+    """Scan Gmail for supplier reply documents and auto-verify [admin].
+    Also runs automatically inside gmail_sync."""
+    from estimate_verifier import scan_replies
+    try:
+        return scan_replies(hours_back=hours_back)
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@supplier_order_router.post("/supplier-orders/verify-email/{message_id}")
+def verify_email_now(message_id: str, force: bool = False,
+                     _: bool = Depends(require_admin)):
+    """Process ONE Gmail message through the reply verifier [admin].
+    Content markers route it regardless of sender — built for beta testing
+    where documents arrive from the safety inbox."""
+    from estimate_verifier import process_message
+    try:
+        return process_message(message_id, force=force)
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
