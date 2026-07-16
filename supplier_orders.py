@@ -9,37 +9,28 @@ Status flow:
     sent/prepared -> confirmed | discrepancy      (verification step)
     confirmed -> scheduled -> picked_up -> delivered -> invoice_verified
 
+SUPPLIER EMAIL FORMAT (William 2026-07-17, supersedes the LI/GHI customer-info
+exception for EMAIL BODIES — the GHI xlsx sheet keeps its Ship To field):
+  - NO customer info in any supplier email (no name/address/phone)
+  - NO "Our SKU" column — supplier sees THEIR SKUs only
+  - our door-style names STRIPPED from descriptions ("TRUE WHITE SHAKER,
+    WALL FILLER 3''W" -> "WALL FILLER 3''W")
+  - wording: "Please process our order PO {id}: ({their door name}, {their
+    presku})" — door info from SUPPLIER_DOOR_INFO (unknown lines omit it)
+  - footer: "Total Qty All SKUS: ##"
+
 Channels (SUPPLIER_ORDER_CHANNELS_20260716.md + William rulings):
-  EMAIL-AUTO  (artifact emailed straight to the supplier on dispatch):
-    GHI             — their xlsx order sheet (template via GHI_TEMPLATE_PATH)
-    LI              — forward-style order text (customer info ALLOWED)
-    Cabinet & Stone — PO email body (Amy/Jennifer style)
-    DuraStone       — PO email body
-    Love-Milestone  — PO email body (their cart is back UP as of 2026-07-17
-                      with a SKU,QTY quick-order CSV — switch to portal CSV
-                      once William rules the LM store line codes)
-  PORTAL-PREPARED (artifact emailed TO US for the ~2-min manual upload —
-                   William ruling: no browser automation):
-    ROC (quick-order CSV), DL, L&C Cabinetry, Linda, Go Bravura
+  EMAIL-AUTO: GHI (xlsx sheet), LI, Cabinet & Stone, DuraStone, Love-Milestone
+  PORTAL-PREPARED (emailed TO US for the ~2-min upload): ROC (quick-order
+  CSV), DL, L&C Cabinetry, Linda, Go Bravura
 
-ROC QUICK-ORDER DIALECT (William's live portal test 2026-07-17 + confirmation
-#000040179): the CSV needs ROC's STORE-prefixed SKUs (SNW-TK8), not bare
-tokens (TK8). ROC_STORE_PREFIX maps our website line -> their store line;
-lines without a known store prefix are BLOCKED for review, never guessed.
-COMPANION RULE (William 2026-07-17): easy-reach bases need the free
-lazy-susan tray A-BER-B (same SKU for 33"/36", any color) — auto-added.
-FINAL SANITY CHECK: CSV unit total must equal the website order's unit total
-for the warehouse (companions counted separately) or the warehouse blocks.
+ROC QUICK-ORDER DIALECT: store-prefixed SKUs (SNW-TK8); ROC_STORE_PREFIX maps
+our line -> their store line; unknown lines BLOCK. COMPANION RULE: easy-reach
+bases auto-add the free lazy-susan tray A-BER-B. QUANTITY PARITY: CSV units
+must equal website-order units or the warehouse blocks.
 
-PRIVACY RULE (William 2026-07-16): supplier order correspondence carries NO
-customer information — EXCEPT LI and GHI. Everyone else gets PO number +
-supplier SKUs + quantities + product descriptions only.
-
-PAYMENT TRIGGER (wired in payment_triggers.py): dispatch fires automatically
-on payment ONLY when (a) AUTO_DISPATCH_ENABLED=true and (b) the payment
-amount matches the order total within $1 (fuzzy Gmail-matched payments must
-never place supplier orders). Otherwise rows are created as 'pending' and
-William gets a confirm-dispatch alert.
+PAYMENT TRIGGER (payment_triggers.py): auto-dispatch only when
+AUTO_DISPATCH_ENABLED=true AND payment matches order total within $1.
 
 All sends go through the Gmail path with the EMAIL_ALLOWLIST guard —
 in the beta everything redirects to the test inbox.
@@ -67,40 +58,65 @@ STATUSES = ("pending", "sent", "prepared", "blocked", "confirmed", "discrepancy"
 
 # warehouse key (as used by /freight/supplier-sheet) -> channel config
 SUPPLIER_CHANNELS = {
-    "GHI":             {"mode": "email_auto", "artifact": "ghi_xlsx",
-                        "customer_info": True},
-    "LI":              {"mode": "email_auto", "artifact": "forward_text",
-                        "customer_info": True},
-    "Cabinet & Stone": {"mode": "email_auto", "artifact": "po_email",
-                        "customer_info": False},
-    "DuraStone":       {"mode": "email_auto", "artifact": "po_email",
-                        "customer_info": False},
-    "Love-Milestone":  {"mode": "email_auto", "artifact": "po_email",
-                        "customer_info": False},
-    "ROC":             {"mode": "portal_prepared", "artifact": "roc_csv",
-                        "customer_info": False},
-    "DL":              {"mode": "portal_prepared", "artifact": "po_email",
-                        "customer_info": False},
-    "L&C Cabinetry":   {"mode": "portal_prepared", "artifact": "po_email",
-                        "customer_info": False},
-    "Linda":           {"mode": "portal_prepared", "artifact": "po_email",
-                        "customer_info": False},
-    "Go Bravura":      {"mode": "portal_prepared", "artifact": "po_email",
-                        "customer_info": False},
+    "GHI":             {"mode": "email_auto", "artifact": "ghi_xlsx"},
+    "LI":              {"mode": "email_auto", "artifact": "po_email"},
+    "Cabinet & Stone": {"mode": "email_auto", "artifact": "po_email"},
+    "DuraStone":       {"mode": "email_auto", "artifact": "po_email"},
+    "Love-Milestone":  {"mode": "email_auto", "artifact": "po_email"},
+    "ROC":             {"mode": "portal_prepared", "artifact": "roc_csv"},
+    "DL":              {"mode": "portal_prepared", "artifact": "po_email"},
+    "L&C Cabinetry":   {"mode": "portal_prepared", "artifact": "po_email"},
+    "Linda":           {"mode": "portal_prepared", "artifact": "po_email"},
+    "Go Bravura":      {"mode": "portal_prepared", "artifact": "po_email"},
 }
 
 # our website line prefix -> ROC store line prefix (their quick-order SKUs).
-# LNS -> SNW proven by William's portal upload test + confirmation #000040179
-# (2026-07-17). Add lines here as they're proven; unknown lines BLOCK.
+# LNS -> SNW proven by William's portal upload test + confirmation #000040179.
 ROC_STORE_PREFIX = {
     "LNS": "SNW",
 }
 
 # Easy-reach bases need the free lazy-susan TRAYS on ROC orders (William
-# 2026-07-17): tray SKU A-BER-B, $0 (baked into the lazy susan price), same
-# SKU for 33" and 36", fits any color. Auto-added at the base's quantity.
+# 2026-07-17): tray SKU A-BER-B, $0, same SKU for 33"/36", any color.
 ROC_TRAY_SKU = "A-BER-B"
 _ROC_EASY_REACH = re.compile(r"^B?ER(33|36)$")
+
+# THE SUPPLIER'S door name + presku per (supplier, our line prefix) — used in
+# supplier-facing emails ("their door name, their door presku", William
+# 2026-07-17). Fill in as lines are ruled; unknown lines omit the door header.
+SUPPLIER_DOOR_INFO = {
+    ("DuraStone", "NSN"):      {"door_name": "Natural Wood",     "presku": "NW"},
+    ("ROC", "LNS"):            {"door_name": "Natural Shaker",   "presku": "SNW"},
+    ("GHI", "AKS"):            {"door_name": "Frontier",         "presku": "FTS"},
+    ("GHI", "APW"):            {"door_name": "Rustic Walnut",    "presku": "RWS"},
+    ("GHI", "GRSH"):           {"door_name": "Stone Harbor Gray", "presku": "SHG"},
+    ("GHI", "NOR"):            {"door_name": "Nantucket",        "presku": "NTL"},
+    ("GHI", "SNS"):            {"door_name": "Sonona Sand",      "presku": "SNS"},
+    ("GHI", "SNW"):            {"door_name": "Sonona Wheat",     "presku": "SNW"},
+    ("Love-Milestone", "SB"):  {"door_name": "Sage Breeze",      "presku": "SB"},
+}
+
+
+def strip_our_door_name(product_name: str) -> str:
+    """'TRUE WHITE SHAKER, WALL FILLER 3''W X 36''H' -> 'WALL FILLER 3''W X 36''H'
+    (our door-style name must not appear in supplier correspondence)."""
+    s = (product_name or "").strip()
+    if "," in s:
+        head, _, rest = s.partition(",")
+        # only strip when the head looks like a door-style name (letters/spaces)
+        if rest.strip() and not any(ch.isdigit() for ch in head):
+            return rest.strip()
+    return s
+
+
+def door_info_for(supplier: str, items: List[Dict]) -> Optional[Dict]:
+    """The supplier's door name/presku for this warehouse's lines (first known)."""
+    for i in items:
+        pre = (i.get("website_sku") or "").split("-")[0].upper()
+        info = SUPPLIER_DOOR_INFO.get((supplier, pre))
+        if info:
+            return info
+    return None
 
 
 # =============================================================================
@@ -131,15 +147,19 @@ def ensure_supplier_orders_table(conn):
                 UNIQUE (order_id, warehouse)
             )
         """)
+        cur.execute("ALTER TABLE supplier_orders ADD COLUMN IF NOT EXISTS revision_requested_at TIMESTAMP WITH TIME ZONE")
+        cur.execute("ALTER TABLE supplier_orders ADD COLUMN IF NOT EXISTS followup_sent_at TIMESTAMP WITH TIME ZONE")
+        cur.execute("ALTER TABLE supplier_orders ADD COLUMN IF NOT EXISTS no_response_alerted_at TIMESTAMP WITH TIME ZONE")
         conn.commit()
 
 
 # =============================================================================
-# GUARDED MAILER (allowlist + optional attachment)
+# GUARDED MAILER (allowlist + optional attachment + CC)
 # =============================================================================
 
 def _send_email(order_id: str, to_email: str, subject: str, html: str,
-                triggered_by: str, attachment: Optional[Dict] = None) -> Dict:
+                triggered_by: str, attachment: Optional[Dict] = None,
+                cc: Optional[str] = None) -> Dict:
     """Guarded Gmail send. attachment = {'filename','content'(bytes),'mime'}."""
     from config import GMAIL_SEND_ENABLED
     from email_sender import _log_email_event
@@ -161,12 +181,18 @@ def _send_email(order_id: str, to_email: str, subject: str, html: str,
                 print(f"[DISPATCH-GUARD] blocked {to_email} order={order_id}")
                 return {"success": False, "error": "recipient not in EMAIL_ALLOWLIST",
                         "dry_run": True, "original_to": to_email}
+        if cc and cc.lower() not in allowed:
+            cc = os.environ.get("INTERNAL_SAFETY_EMAIL", "").strip() or None
+            if cc and cc.lower() == to_email.lower():
+                cc = None  # avoid To == Cc after double redirect
     try:
         token = get_gmail_access_token()
         if not token:
             return {"success": False, "error": "no Gmail access token"}
         msg = MIMEMultipart("mixed")
         msg["To"] = to_email
+        if cc:
+            msg["Cc"] = cc
         msg["From"] = "William Prince — Cabinets For Contractors <william@cabinetsforcontractors.net>"
         msg["Subject"] = subject
         msg.attach(MIMEText(html, "html"))
@@ -190,7 +216,8 @@ def _send_email(order_id: str, to_email: str, subject: str, html: str,
         _log_email_event(order_id=order_id, template_id="supplier_dispatch",
                          to_email=to_email, subject=subject, message_id=message_id,
                          triggered_by=triggered_by, source="email_send")
-        return {"success": bool(message_id), "message_id": message_id, "to": to_email}
+        return {"success": bool(message_id), "message_id": message_id,
+                "to": to_email, "cc": cc}
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -199,62 +226,58 @@ def _send_email(order_id: str, to_email: str, subject: str, html: str,
 # ARTIFACT BUILDERS
 # =============================================================================
 
-def _order_header(order_id: str) -> Dict:
-    from psycopg2.extras import RealDictCursor
-    with get_db() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("""SELECT order_id, customer_name, company_name, street,
-                                  street2, city, state, zip_code, phone, email,
-                                  comments FROM orders WHERE order_id = %s""",
-                        (order_id,))
-            return cur.fetchone() or {}
-
-
-def _lines_table_html(items: List[Dict], show_website: bool = True) -> str:
+def _supplier_lines_table(items: List[Dict]) -> str:
+    """Supplier-facing table: THEIR SKU + qty + sanitized description only —
+    no 'Our SKU' column, our door names stripped (William 2026-07-17)."""
     rows = "".join(
         f"<tr><td style='padding:4px 10px;border-bottom:1px solid #ddd;'>{i['quantity']}</td>"
         f"<td style='padding:4px 10px;border-bottom:1px solid #ddd;'><strong>{i['supplier_sku']}</strong></td>"
-        + (f"<td style='padding:4px 10px;border-bottom:1px solid #ddd;color:#888;'>{i['website_sku']}</td>"
-           if show_website else "")
-        + f"<td style='padding:4px 10px;border-bottom:1px solid #ddd;'>{i.get('product_name', '')}</td></tr>"
+        f"<td style='padding:4px 10px;border-bottom:1px solid #ddd;'>{strip_our_door_name(i.get('product_name', ''))}</td></tr>"
         for i in items)
-    wcol = "<th align='left' style='padding:4px 10px;'>Our SKU</th>" if show_website else ""
     return (f"<table style='border-collapse:collapse;font-size:13px;'>"
             f"<tr style='background:#f2f2f2;'><th align='left' style='padding:4px 10px;'>Qty</th>"
-            f"<th align='left' style='padding:4px 10px;'>SKU</th>{wcol}"
+            f"<th align='left' style='padding:4px 10px;'>SKU</th>"
             f"<th align='left' style='padding:4px 10px;'>Description</th></tr>{rows}</table>")
 
 
-def build_po_email(order_id: str, warehouse: str, wdata: Dict,
-                   include_customer: bool) -> Dict:
-    """Sanitized PO email body. Customer info only when the channel allows it
-    (LI/GHI); everyone else gets PO + supplier SKUs + quantities only."""
+def _internal_lines_table(items: List[Dict]) -> str:
+    """Internal table (upload-needed emails to US): includes Our SKU."""
+    rows = "".join(
+        f"<tr><td style='padding:4px 10px;border-bottom:1px solid #ddd;'>{i['quantity']}</td>"
+        f"<td style='padding:4px 10px;border-bottom:1px solid #ddd;'><strong>{i['supplier_sku']}</strong></td>"
+        f"<td style='padding:4px 10px;border-bottom:1px solid #ddd;color:#888;'>{i['website_sku']}</td>"
+        f"<td style='padding:4px 10px;border-bottom:1px solid #ddd;'>{i.get('product_name', '')}</td></tr>"
+        for i in items)
+    return (f"<table style='border-collapse:collapse;font-size:13px;'>"
+            f"<tr style='background:#f2f2f2;'><th align='left' style='padding:4px 10px;'>Qty</th>"
+            f"<th align='left' style='padding:4px 10px;'>SKU</th>"
+            f"<th align='left' style='padding:4px 10px;'>Our SKU</th>"
+            f"<th align='left' style='padding:4px 10px;'>Description</th></tr>{rows}</table>")
+
+
+def build_po_email(order_id: str, warehouse: str, wdata: Dict) -> Dict:
+    """Supplier-facing PO email: no customer info, no Our SKU column, our
+    door names stripped, their door name/presku in the opening line,
+    'Total Qty All SKUS' footer (William 2026-07-17)."""
     items = wdata["items"]
     total_units = sum(int(i.get("quantity") or 0) for i in items)
-    header = ""
-    if include_customer:
-        o = _order_header(order_id)
-        ship = " ".join(str(o.get(k) or "") for k in
-                        ("street", "street2", "city", "state", "zip_code")).strip()
-        header = (f"<p>Customer: {o.get('company_name') or o.get('customer_name') or ''}<br>"
-                  f"Ship to: {ship}<br>Phone: {o.get('phone') or ''}</p>")
+    door = door_info_for(warehouse, items)
+    door_txt = f" ({door['door_name']}, {door['presku']})" if door else ""
     html = (f"<div style='font-family:Arial,sans-serif;font-size:14px;'>"
-            f"<p>Hello,</p><p>Please process our purchase order "
-            f"<strong>PO {order_id}</strong>:</p>{header}"
-            f"{_lines_table_html(items)}"
-            f"<p>{len(items)} lines, {total_units} total units. Please reply "
-            f"with your order confirmation/estimate for verification.</p>"
+            f"<p>Hello,</p><p>Please process our order "
+            f"<strong>PO {order_id}</strong>:{door_txt}</p>"
+            f"{_supplier_lines_table(items)}"
+            f"<p><strong>Total Qty All SKUS: {total_units}</strong></p>"
+            f"<p>Please reply with your order confirmation/estimate "
+            f"for verification.</p>"
             f"<p>Thank you,<br>Cabinets For Contractors<br>(770) 990-4885</p></div>")
     return {"html": html, "attachment": None, "units": total_units,
             "subject": f"PO {order_id} - Cabinets For Contractors"}
 
 
 def build_roc_csv(order_id: str, wdata: Dict) -> Dict:
-    """ROC quick-order CSV with THEIR store-prefixed SKUs (SNW-TK8 style —
-    proven by William's portal test 2026-07-17). Easy-reach bases auto-add
-    the free lazy-susan tray A-BER-B. FINAL SANITY CHECK (William): the CSV
-    unit total must equal the website order's unit total for this warehouse
-    (trays counted separately as companions) — mismatch blocks the send."""
+    """ROC quick-order CSV (store-prefixed SKUs) — INTERNAL email to us with
+    the upload instructions. Parity gate + free lazy-susan tray companions."""
     rows = []
     unknown = []
     order_units = 0
@@ -275,7 +298,6 @@ def build_roc_csv(order_id: str, wdata: Dict) -> Dict:
             store_sku = f"{store_prefix}-{token}"
         rows.append(f"{store_sku},{qty}\n")
         csv_units += qty
-        # companion rule: easy-reach base -> free lazy-susan trays
         if _ROC_EASY_REACH.match(token.upper()):
             tray_qty += qty
     if unknown:
@@ -295,10 +317,11 @@ def build_roc_csv(order_id: str, wdata: Dict) -> Dict:
             f"<p><strong>UPLOAD NEEDED - ROC quick-order CSV for PO {order_id}</strong></p>"
             f"<p><strong>Quantity check:</strong> website order units = {order_units}, "
             f"CSV units = {csv_units} &#10003;{tray_note}</p>"
+            f"<p><strong>Total Qty All SKUS: {order_units}</strong></p>"
             f"<p>Attached: the quick-order file. Upload at "
             f"roccabinetry.com/quick-order, ENTER PO {order_id} in their "
             f"PO/reference field, then mark this supplier order as sent.</p>"
-            f"{_lines_table_html(wdata['items'])}</div>")
+            f"{_internal_lines_table(wdata['items'])}</div>")
     return {"html": html, "units": order_units, "companions": tray_qty,
             "attachment": {"filename": f"ROC_order_{order_id}.csv",
                            "content": csv_text.encode(), "mime": "text/csv"},
@@ -306,7 +329,9 @@ def build_roc_csv(order_id: str, wdata: Dict) -> Dict:
 
 
 def build_ghi_xlsx(order_id: str, wdata: Dict) -> Dict:
-    """GHI order sheet (the 5707.xlsx format). Needs GHI_TEMPLATE_PATH."""
+    """GHI order sheet (the 5707.xlsx format). Needs GHI_TEMPLATE_PATH.
+    The email body is supplier-facing (no customer info); the sheet itself
+    keeps its Ship To field (William-approved artifact)."""
     tpl_path = os.environ.get("GHI_TEMPLATE_PATH", "").strip()
     if not (tpl_path and os.path.exists(tpl_path)):
         return {"error": "GHI_TEMPLATE_PATH not set on this environment — "
@@ -317,7 +342,12 @@ def build_ghi_xlsx(order_id: str, wdata: Dict) -> Dict:
         fwd = sdp.build_forward_map(conn)
     items = [{"website_sku": i["website_sku"], "quantity": i["quantity"]}
              for i in wdata["items"]]
-    o = _order_header(order_id)
+    from psycopg2.extras import RealDictCursor
+    with get_db() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT company_name, customer_name FROM orders WHERE order_id = %s",
+                        (order_id,))
+            o = cur.fetchone() or {}
     ship_to = (o.get("company_name") or o.get("customer_name") or "")
     with open(tpl_path, "rb") as f:
         tpl = f.read()
@@ -326,22 +356,21 @@ def build_ghi_xlsx(order_id: str, wdata: Dict) -> Dict:
     if report["unplaced"] or report["unmapped_prefix"]:
         return {"error": f"GHI sheet needs review before sending: "
                          f"unplaced={report['unplaced']} unmapped={report['unmapped_prefix']}"}
+    total_units = sum(int(i.get("quantity") or 0) for i in wdata["items"])
+    door = door_info_for("GHI", wdata["items"])
+    door_txt = f" ({door['door_name']}, {door['presku']})" if door else ""
     html = (f"<div style='font-family:Arial,sans-serif;font-size:14px;'>"
-            f"<p>Hello,</p><p>Please find attached our order sheet for "
-            f"<strong>PO {order_id}</strong> ({len(report['placed'])} lines, "
-            f"tabs: {', '.join(report['tabs'])}).</p>"
+            f"<p>Hello,</p><p>Please process our order "
+            f"<strong>PO {order_id}</strong>:{door_txt} — order sheet attached "
+            f"({len(report['placed'])} lines, tabs: {', '.join(report['tabs'])}).</p>"
+            f"<p><strong>Total Qty All SKUS: {total_units}</strong></p>"
             f"<p>Please reply with the sales order for verification.</p>"
             f"<p>Thank you,<br>Cabinets For Contractors<br>(770) 990-4885</p></div>")
-    return {"html": html,
+    return {"html": html, "units": total_units,
             "attachment": {"filename": f"CFC_PO_{order_id}_GHI.xlsx",
                            "content": xlsx,
                            "mime": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"},
             "subject": f"PO {order_id} - Cabinets For Contractors order sheet"}
-
-
-def build_forward_text(order_id: str, wdata: Dict) -> Dict:
-    """LI: forward-style order (customer info allowed per William)."""
-    return build_po_email(order_id, "LI", wdata, include_customer=True)
 
 
 # =============================================================================
@@ -366,7 +395,7 @@ def dispatch_order(order_id: str, auto_send: bool = True,
 
     for wh, wdata in (sheet.get("warehouses") or {}).items():
         ch = SUPPLIER_CHANNELS.get(wh, {"mode": "portal_prepared",
-                                        "artifact": "po_email", "customer_info": False})
+                                        "artifact": "po_email"})
         sinfo = SUPPLIER_INFO.get(wh, {})
         wres = {"mode": ch["mode"], "artifact": ch["artifact"],
                 "lines": len(wdata["items"]),
@@ -391,11 +420,8 @@ def dispatch_order(order_id: str, auto_send: bool = True,
             art = build_ghi_xlsx(order_id, wdata)
         elif ch["artifact"] == "roc_csv":
             art = build_roc_csv(order_id, wdata)
-        elif ch["artifact"] == "forward_text":
-            art = build_forward_text(order_id, wdata)
         else:
-            art = build_po_email(order_id, wh, wdata,
-                                 include_customer=ch.get("customer_info", False))
+            art = build_po_email(order_id, wh, wdata)
         if art.get("error"):
             status = "blocked"
             wres.update({"status": status, "note": art["error"]})
