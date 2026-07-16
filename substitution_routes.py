@@ -3,8 +3,10 @@ substitution_routes.py
 Customer-approved SKU substitution flow — routes.
 
 Admin:
-  POST /substitutions/propose {order_id, original_sku, substitute_sku, reason?}
-       -> creates the proposal + emails the customer. Order untouched.
+  POST /substitutions/propose {order_id, original_sku, substitute_sku,
+       reason?, oos_message_id?} -> creates the proposal + emails the
+       customer. Order untouched. oos_message_id = Gmail id of the
+       warehouse's out-of-stock email (enables the auto-reply after the swap).
   GET  /substitutions?limit=50 -> recent proposals + statuses.
   POST /substitutions/{sub_id}/apply -> retry the B2BWave apply for an
        approval that landed while mutations were disabled (or failed).
@@ -91,6 +93,7 @@ class ProposalRequest(BaseModel):
     original_sku: str
     substitute_sku: str
     reason: str = "out_of_stock"
+    oos_message_id: Optional[str] = None
 
 
 class CounterApplyRequest(BaseModel):
@@ -104,7 +107,8 @@ def propose_substitution(req: ProposalRequest, _: bool = Depends(require_admin))
     from substitutions import create_substitution_proposal
     try:
         return create_substitution_proposal(req.order_id, req.original_sku,
-                                            req.substitute_sku, req.reason)
+                                            req.substitute_sku, req.reason,
+                                            oos_message_id=req.oos_message_id)
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
@@ -122,8 +126,8 @@ def list_substitutions(limit: int = 50, _: bool = Depends(require_admin)):
                 SELECT id, order_id, original_sku, substitute_sku, quantity,
                        keep_price, status, customer_email, customer_note,
                        requested_sku, requested_name, requested_price,
-                       requested_detail, emailed_at, responded_at, applied_at,
-                       created_at
+                       requested_detail, oos_message_id, emailed_at,
+                       responded_at, applied_at, created_at
                 FROM order_substitutions
                 ORDER BY created_at DESC LIMIT %s
             """, (min(int(limit), 200),))
@@ -154,7 +158,7 @@ def counter_apply_now(sub_id: int, req: CounterApplyRequest = None,
     """Swap to the CUSTOMER-REQUESTED item from their decline note [admin].
     Uses the SKU recognized from the note (requested_sku); pass {"sku": "..."}
     to override. Held at the original line price; on success the customer
-    gets a confirmation email ("updated as you asked")."""
+    gets the updated-order confirmation email."""
     from substitutions import counter_apply
     sub = _get_sub_by_id(sub_id)
     if not sub:
