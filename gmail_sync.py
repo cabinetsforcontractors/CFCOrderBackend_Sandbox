@@ -488,6 +488,20 @@ def run_gmail_sync(db_conn, hours_back=2):
     except Exception as e:
         results["errors"].append(f"DuraStone scan error: {e}")
     
+    # 7. Supplier reply auto-verify (auto-ordering lane 2026-07-17): estimates /
+    # sales orders / quotes from GHI, LI, C&S, Milestone, DuraStone -> parse ->
+    # diff vs sent order -> supplier_orders row confirmed/discrepancy + alert.
+    # Guarded: never breaks the main sync.
+    try:
+        from estimate_verifier import scan_replies
+        ev = scan_replies(hours_back=max(hours_back, 24))
+        results["supplier_replies_verified"] = ev.get("processed", 0)
+        results["supplier_discrepancies"] = ev.get("discrepancies", 0)
+        for err in (ev.get("errors") or [])[:5]:
+            results["errors"].append(f"Reply verify: {err}")
+    except Exception as e:
+        results["errors"].append(f"Reply verify error: {e}")
+    
     print(f"[GMAIL] Sync complete: {results}")
     return results
 
