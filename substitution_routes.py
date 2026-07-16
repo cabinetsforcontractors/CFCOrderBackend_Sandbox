@@ -4,9 +4,12 @@ Customer-approved SKU substitution flow — routes.
 
 Admin:
   POST /substitutions/propose {order_id, original_sku, substitute_sku,
-       reason?, oos_message_id?} -> creates the proposal + emails the
-       customer. Order untouched. oos_message_id = Gmail id of the
+       reason?, oos_message_id?, supersede?} -> creates the proposal + emails
+       the customer. Order untouched. oos_message_id = Gmail id of the
        warehouse's out-of-stock email (enables the auto-reply after the swap).
+       ONE PENDING PROPOSAL PER ORDER+SKU: a second proposal for the same line
+       is refused unless supersede=true (cancels the old one — its emailed
+       link then shows "already answered").
   GET  /substitutions?limit=50 -> recent proposals + statuses.
   POST /substitutions/{sub_id}/apply -> retry the B2BWave apply for an
        approval that landed while mutations were disabled (or failed).
@@ -94,6 +97,7 @@ class ProposalRequest(BaseModel):
     substitute_sku: str
     reason: str = "out_of_stock"
     oos_message_id: Optional[str] = None
+    supersede: bool = False
 
 
 class CounterApplyRequest(BaseModel):
@@ -103,12 +107,15 @@ class CounterApplyRequest(BaseModel):
 @substitution_router.post("/substitutions/propose")
 def propose_substitution(req: ProposalRequest, _: bool = Depends(require_admin)):
     """Create + email a substitution proposal [admin]. The order is NOT
-    changed until the customer approves via the emailed link."""
+    changed until the customer approves via the emailed link. Refused if a
+    pending proposal already exists for the same order+SKU, unless
+    supersede=true (cancels the old one)."""
     from substitutions import create_substitution_proposal
     try:
         return create_substitution_proposal(req.order_id, req.original_sku,
                                             req.substitute_sku, req.reason,
-                                            oos_message_id=req.oos_message_id)
+                                            oos_message_id=req.oos_message_id,
+                                            supersede=req.supersede)
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
