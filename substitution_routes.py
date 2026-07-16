@@ -6,6 +6,8 @@ Admin:
   POST /substitutions/propose {order_id, original_sku, substitute_sku, reason?}
        -> creates the proposal + emails the customer. Order untouched.
   GET  /substitutions?limit=50 -> recent proposals + statuses.
+  POST /substitutions/{sub_id}/apply -> retry the B2BWave apply for an
+       approval that landed while mutations were disabled (or failed).
 
 Public (token-gated, linked from the proposal email):
   GET  /substitution/{token}         -> landing page with the real Approve /
@@ -84,6 +86,29 @@ def list_substitutions(limit: int = 50, _: bool = Depends(require_admin)):
             """, (min(int(limit), 200),))
             rows = cur.fetchall()
     return {"status": "ok", "count": len(rows), "substitutions": rows}
+
+
+@substitution_router.post("/substitutions/{sub_id}/apply")
+def apply_substitution_now(sub_id: int, _: bool = Depends(require_admin)):
+    """Retry the B2BWave apply for an approved substitution [admin].
+    For approvals that landed while B2BWAVE_MUTATIONS_ENABLED=false
+    (status approved_pending_apply) or whose apply failed."""
+    from psycopg2.extras import RealDictCursor
+    from db_helpers import get_db
+    from substitutions import apply_substitution, ensure_substitutions_table
+    with get_db() as conn:
+        ensure_substitutions_table(conn)
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT * FROM order_substitutions WHERE id = %s", (sub_id,))
+            sub = cur.fetchone()
+    if not sub:
+        return {"status": "error", "message": f"substitution {sub_id} not found"}
+    if sub["status"] not in ("approved", "approved_pending_apply", "apply_failed"):
+        return {"status": "error",
+                "message": f"substitution {sub_id} is '{sub['status']}' — only "
+                           f"customer-approved, not-yet-applied ones can be applied"}
+    return {"status": "ok", "substitution_id": sub_id,
+            "apply_result": apply_substitution(sub)}
 
 
 # =============================================================================
