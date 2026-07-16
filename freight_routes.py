@@ -14,10 +14,13 @@ the auto-email-to-warehouse workflow (William 2026-07-16): order placed in
 website SKUs -> lookup -> send the warehouse their SKUs.
 
 POST /freight/verify-order/{order_id} [admin] — upload the supplier's returned
-document (GHI Sales Order PDF or DuraStone NetSuite SO email HTML) -> parse to
-our SKUs (supplier_doc_parser) -> two-sided diff vs the sent order ->
-discrepancy report (missing/unexpected/qty/backorder/price-math). 50% of the
-lane's value is verifying what the supplier confirmed. NEVER auto-accept.
+document; the supplier is auto-detected (GHI SO PDF, DuraStone NetSuite email
+HTML, Milestone QUOFL PDF, C&S Quotation PDF, LI QuickBooks Estimate PDF) ->
+parse via supplier_doc_parser -> diff vs the sent order -> discrepancy report.
+GHI/DS diff in website-SKU space; LM/C&S/LI diff in BODY space (their split
+box+front combos folded back to cabinets; line-code maps pending William).
+50% of the lane's value is verifying what the supplier confirmed. NEVER
+auto-accept.
 
 POST /freight/scan-durastone [admin] — manual trigger for the DuraStone
 NetSuite revision tripwire (also runs inside gmail_sync). Same SO# re-sent =
@@ -141,18 +144,48 @@ def get_supplier_sheet(order_id: str, _: bool = Depends(require_admin)):
 # ORDER VERIFICATION (two-sided diff) — auto-ordering lane 2026-07-16
 # =============================================================================
 
-# supplier key -> (website prefixes, warehouse-name aliases)
+# supplier key -> (website prefixes, warehouse/rta-supplier aliases)
 _VERIFY_SUPPLIERS = {
     "GHI": (("AKS", "APW", "GRSH", "NOR", "SNS", "SNW"), ("GHI", "GHI Cabinets")),
     "DuraStone": (("NSN", "CMEN", "NBDS", "SIV"), ("DuraStone",)),
+    "Love-Milestone": ((), ("Love-Milestone",)),
+    "Cabinet & Stone": ((), ("Cabinet & Stone", "Cabinet & Stone CA")),
+    "LI": ((), ("LI", "Cabinetry Distribution")),
 }
 
+# uppercase text markers -> supplier key (checked in order; PDF docs only)
+_PDF_MARKERS = (
+    ("GHI", ("GHI CUSTOM", "GHI CABINET")),
+    ("Love-Milestone", ("QUOFL", "MILESTONE CABINETRY")),
+    ("Cabinet & Stone", ("C&S-HOUSTON", "CABINETSTONE")),
+    ("LI", ("CABINETRY DISTRIBUTION",)),
+)
 
-def _order_lines_for_supplier(cur, order_id, prefixes, warehouse_names):
-    """The order's line items belonging to one supplier (by website-SKU prefix,
-    with the warehouse column as a fallback signal)."""
+
+def _detect_pdf_supplier(data):
+    try:
+        import io
+        from pypdf import PdfReader
+        reader = PdfReader(io.BytesIO(data))
+        txt = " ".join((p.extract_text() or "") for p in reader.pages[:2]).upper()
+        for key, markers in _PDF_MARKERS:
+            if any(mk in txt for mk in markers):
+                return key
+    except Exception:
+        pass
+    return None
+
+
+def _order_lines_for_supplier(cur, order_id, prefixes, aliases):
+    """The order's line items belonging to one supplier — matched by website-SKU
+    prefix, rta_products.supplier, or the line's warehouse column. Includes the
+    SOT supplier token for body-space comparison."""
     cur.execute(
-        "SELECT sku, quantity, warehouse FROM order_line_items WHERE order_id = %s",
+        """SELECT oli.sku, oli.quantity, oli.warehouse,
+                  rp.supplier AS rta_supplier, rp.supplier_sku
+           FROM order_line_items oli
+           LEFT JOIN rta_products rp ON rp.product_sku = oli.sku
+           WHERE oli.order_id = %s""",
         (order_id,),
     )
     out = []
@@ -160,8 +193,11 @@ def _order_lines_for_supplier(cur, order_id, prefixes, warehouse_names):
         sku = (r.get("sku") or "").upper()
         pre = sku.split("-")[0]
         wh = r.get("warehouse") or ""
-        if pre in prefixes or wh in warehouse_names:
-            out.append({"website_sku": r.get("sku"), "quantity": r.get("quantity") or 1})
+        rta_sup = r.get("rta_supplier") or ""
+        if pre in prefixes or wh in aliases or rta_sup in aliases:
+            out.append({"website_sku": r.get("sku"),
+                        "quantity": r.get("quantity") or 1,
+                        "supplier_sku": r.get("supplier_sku") or ""})
     return out
 
 
@@ -170,8 +206,9 @@ async def verify_order(order_id: str, file: UploadFile = File(...),
                        supplier: str = "", _: bool = Depends(require_admin)):
     """
     Two-sided verification [admin]: upload the supplier's returned document,
-    parse it back to website SKUs, diff against what we sent on this order.
-    GHI = Sales Order PDF; DuraStone = NetSuite SO email HTML (.html/.eml body).
+    parse it back to our SKUs/bodies, diff against what we sent on this order.
+    Supplier auto-detected from the document; pass ?supplier= to override
+    (GHI, DuraStone, Love-Milestone, Cabinet & Stone, LI).
     The report is for a human — discrepancies are never auto-accepted.
     """
     import supplier_doc_parser as sdp
@@ -179,37 +216,58 @@ async def verify_order(order_id: str, file: UploadFile = File(...),
     data = await file.read()
     if not data:
         return {"status": "error", "message": "empty upload"}
-    is_pdf = data[:5] in (b"%PDF-",) or data[:4] == b"%PDF"
-    sup = (supplier or "").strip() or ("GHI" if is_pdf else "DuraStone")
+    is_pdf = data[:4] == b"%PDF"
+    sup = (supplier or "").strip()
+    if not sup:
+        sup = _detect_pdf_supplier(data) if is_pdf else "DuraStone"
     if sup not in _VERIFY_SUPPLIERS:
         return {"status": "error",
-                "message": f"unsupported supplier '{sup}' (have: {sorted(_VERIFY_SUPPLIERS)})"}
-    prefixes, wh_names = _VERIFY_SUPPLIERS[sup]
+                "message": f"could not detect supplier (got '{sup}'); pass ?supplier= "
+                           f"one of {sorted(_VERIFY_SUPPLIERS)}"}
+    prefixes, aliases = _VERIFY_SUPPLIERS[sup]
 
+    fees = []
     try:
         with get_db() as conn:
-            rev = sdp.build_reverse_map(conn)
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                sent = _order_lines_for_supplier(cur, order_id, prefixes, wh_names)
+                sent = _order_lines_for_supplier(cur, order_id, prefixes, aliases)
             if sup == "GHI":
+                rev = sdp.build_reverse_map(conn)
                 parsed = sdp.resolve_ghi_lines(sdp.parse_ghi_pdf(data), rev)
-                sent = sdp.expand_composites(sent, sdp.GHI_COMPOSITES)
-            else:
+                sent_side = sdp.expand_composites(sent, sdp.GHI_COMPOSITES)
+                report = sdp.two_sided_diff(sent_side, parsed["lines"])
+            elif sup == "DuraStone":
+                rev = sdp.build_reverse_map(conn)
                 html = data.decode("utf-8", errors="ignore")
                 parsed = sdp.resolve_durastone_lines(sdp.parse_durastone_email(html), rev)
+                report = sdp.two_sided_diff(sent, parsed["lines"])
                 # keep every DS SO we see — feeds the revision tripwire history
                 try:
                     sdp.record_and_check_ds_email(
                         conn, f"upload:{order_id}:{parsed.get('so_number')}", html)
                 except Exception:
                     pass
+            else:
+                if sup == "Love-Milestone":
+                    parsed = sdp.parse_lm_quote_pdf(data)
+                    folded = sdp.fold_lm_lines(parsed["lines"])
+                elif sup == "Cabinet & Stone":
+                    parsed = sdp.parse_cs_quotation_pdf(data)
+                    folded = sdp.fold_cs_lines(parsed["lines"])
+                else:  # LI
+                    parsed = sdp.parse_li_estimate_pdf(data)
+                    folded = sdp.fold_li_lines(parsed["lines"])
+                fees = [f for f in folded if f.get("fee")]
+                report = sdp.body_space_diff(sent, [f for f in folded if not f.get("fee")])
     except Exception as e:
         return {"status": "error", "message": f"parse failed: {e}"}
 
     if not sent:
         return {"status": "error",
                 "message": f"order {order_id} has no {sup} line items to verify"}
-    report = sdp.two_sided_diff(sent, parsed["lines"])
+    if not parsed.get("lines"):
+        return {"status": "error", "supplier": sup,
+                "message": "document parsed to zero lines — wrong file or format drift"}
     doc_po = parsed.get("po")
     po_matches = bool(doc_po) and str(doc_po).lstrip("0").startswith(str(order_id))
     if doc_po and not po_matches:
@@ -217,8 +275,12 @@ async def verify_order(order_id: str, file: UploadFile = File(...),
         report["ok"] = False
     return {
         "status": "ok", "order_id": order_id, "supplier": sup,
-        "document": {"po": doc_po, "so_number": parsed.get("so_number"),
-                     "total": parsed.get("total"), "line_count": len(parsed["lines"])},
+        "document": {"po": doc_po,
+                     "so_number": parsed.get("so_number") or parsed.get("quote_number")
+                                  or parsed.get("estimate_number"),
+                     "total": parsed.get("total"),
+                     "line_count": len(parsed["lines"])},
+        "fees": fees,
         "report": report,
     }
 
@@ -289,11 +351,11 @@ async def ghi_order_sheet(order_id: str, template: UploadFile = File(None),
         return {"status": "error",
                 "message": "no GHI template: upload 'template' or set GHI_TEMPLATE_PATH"}
 
-    prefixes, wh_names = _VERIFY_SUPPLIERS["GHI"]
+    prefixes, aliases = _VERIFY_SUPPLIERS["GHI"]
     with get_db() as conn:
         fwd = sdp.build_forward_map(conn)
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            items = _order_lines_for_supplier(cur, order_id, prefixes, wh_names)
+            items = _order_lines_for_supplier(cur, order_id, prefixes, aliases)
             cur.execute("SELECT company_name, customer_name FROM orders WHERE order_id = %s",
                         (order_id,))
             order = cur.fetchone() or {}
