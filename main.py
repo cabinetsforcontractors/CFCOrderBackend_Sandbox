@@ -15,6 +15,7 @@ Module Map:
   invoice_routes.py        — /invoice/scan /invoice/status /invoice/emails /invoice/flags
   substitution_routes.py   — /substitutions/* [admin] + /substitution/{token} (public)
   supplier_order_routes.py — /supplier-orders/* [admin] (state machine + dispatch)
+  cancel_requests.py       — /cancel-requests [admin] + /cancel-request/{token} (public confirm-first)
   routes/audit.py          — /audit/log (POST write, GET read)
   auth.py                  — require_admin Depends() — X-Admin-Token or Bearer JWT
   rate_limit.py            — shared slowapi Limiter instance
@@ -113,6 +114,13 @@ except ImportError:
     print("[STARTUP] supplier_order_routes module not found, dispatch engine disabled")
 
 try:
+    from cancel_requests import cancel_request_router
+    CANCEL_REQUESTS_LOADED = True
+except ImportError:
+    CANCEL_REQUESTS_LOADED = False
+    print("[STARTUP] cancel_requests module not found, confirm-first cancel flow disabled")
+
+try:
     from routes.audit import audit_router
     AUDIT_LOADED = True
 except ImportError:
@@ -180,6 +188,9 @@ if SUBSTITUTIONS_LOADED:
 
 if SUPPLIER_ORDERS_LOADED:
     app.include_router(supplier_order_router) # Auto-ordering: /supplier-orders/* (state machine + dispatch)
+
+if CANCEL_REQUESTS_LOADED:
+    app.include_router(cancel_request_router) # Confirm-first customer cancels: /cancel-request/{token} + /cancel-requests
 
 if AUDIT_LOADED:
     app.include_router(audit_router)          # Phase 5: /audit/log
@@ -274,6 +285,7 @@ def root():
         "invoice_intel": {"enabled": INVOICE_LOADED},
         "substitution_flow": {"enabled": SUBSTITUTIONS_LOADED},
         "supplier_order_engine": {"enabled": SUPPLIER_ORDERS_LOADED},
+        "cancel_confirm_first": {"enabled": CANCEL_REQUESTS_LOADED},
         "audit_log": {"enabled": AUDIT_LOADED},
         "rate_limiting": {"enabled": True, "default_limit": "200/minute"},
         "bol_generation": {"enabled": True},
