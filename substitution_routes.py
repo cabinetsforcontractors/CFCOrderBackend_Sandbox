@@ -8,6 +8,9 @@ Admin:
   GET  /substitutions?limit=50 -> recent proposals + statuses.
   POST /substitutions/{sub_id}/apply -> retry the B2BWave apply for an
        approval that landed while mutations were disabled (or failed).
+  POST /substitutions/{sub_id}/counter-apply [{"sku": "..."} optional] ->
+       swap to the CUSTOMER-REQUESTED item recognized from their decline note
+       (or the explicit override); customer gets a confirmation email.
 
 Public (token-gated, linked from the proposal email):
   GET  /substitution/{token}         -> landing page with the real Approve /
@@ -16,6 +19,8 @@ Public (token-gated, linked from the proposal email):
   POST /substitution/{token}/respond -> records the choice; on approve applies
                                         the swap on B2BWave (see substitutions.py)
 """
+
+from typing import Optional
 
 from fastapi import APIRouter, Depends, Form
 from fastapi.responses import HTMLResponse
@@ -45,6 +50,17 @@ def _page(title: str, body_html: str) -> HTMLResponse:
 <body><div class="card">{body_html}</div></body></html>""")
 
 
+def _get_sub_by_id(sub_id: int):
+    from psycopg2.extras import RealDictCursor
+    from db_helpers import get_db
+    from substitutions import ensure_substitutions_table
+    with get_db() as conn:
+        ensure_substitutions_table(conn)
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT * FROM order_substitutions WHERE id = %s", (sub_id,))
+            return cur.fetchone()
+
+
 # =============================================================================
 # ADMIN
 # =============================================================================
@@ -54,6 +70,10 @@ class ProposalRequest(BaseModel):
     original_sku: str
     substitute_sku: str
     reason: str = "out_of_stock"
+
+
+class CounterApplyRequest(BaseModel):
+    sku: Optional[str] = None
 
 
 @substitution_router.post("/substitutions/propose")
@@ -80,7 +100,9 @@ def list_substitutions(limit: int = 50, _: bool = Depends(require_admin)):
             cur.execute("""
                 SELECT id, order_id, original_sku, substitute_sku, quantity,
                        keep_price, status, customer_email, customer_note,
-                       emailed_at, responded_at, applied_at, created_at
+                       requested_sku, requested_name, requested_price,
+                       requested_detail, emailed_at, responded_at, applied_at,
+                       created_at
                 FROM order_substitutions
                 ORDER BY created_at DESC LIMIT %s
             """, (min(int(limit), 200),))
@@ -93,14 +115,8 @@ def apply_substitution_now(sub_id: int, _: bool = Depends(require_admin)):
     """Retry the B2BWave apply for an approved substitution [admin].
     For approvals that landed while B2BWAVE_MUTATIONS_ENABLED=false
     (status approved_pending_apply) or whose apply failed."""
-    from psycopg2.extras import RealDictCursor
-    from db_helpers import get_db
-    from substitutions import apply_substitution, ensure_substitutions_table
-    with get_db() as conn:
-        ensure_substitutions_table(conn)
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT * FROM order_substitutions WHERE id = %s", (sub_id,))
-            sub = cur.fetchone()
+    from substitutions import apply_substitution
+    sub = _get_sub_by_id(sub_id)
     if not sub:
         return {"status": "error", "message": f"substitution {sub_id} not found"}
     if sub["status"] not in ("approved", "approved_pending_apply", "apply_failed"):
@@ -109,6 +125,25 @@ def apply_substitution_now(sub_id: int, _: bool = Depends(require_admin)):
                            f"customer-approved, not-yet-applied ones can be applied"}
     return {"status": "ok", "substitution_id": sub_id,
             "apply_result": apply_substitution(sub)}
+
+
+@substitution_router.post("/substitutions/{sub_id}/counter-apply")
+def counter_apply_now(sub_id: int, req: CounterApplyRequest = None,
+                      _: bool = Depends(require_admin)):
+    """Swap to the CUSTOMER-REQUESTED item from their decline note [admin].
+    Uses the SKU recognized from the note (requested_sku); pass {"sku": "..."}
+    to override. Held at the original line price; on success the customer
+    gets a confirmation email ("updated as you asked")."""
+    from substitutions import counter_apply
+    sub = _get_sub_by_id(sub_id)
+    if not sub:
+        return {"status": "error", "message": f"substitution {sub_id} not found"}
+    if sub["status"] not in ("declined", "apply_failed"):
+        return {"status": "error",
+                "message": f"substitution {sub_id} is '{sub['status']}' — "
+                           f"counter-apply is for declined proposals"}
+    return {"status": "ok", "substitution_id": sub_id,
+            "result": counter_apply(sub, (req.sku if req else None))}
 
 
 # =============================================================================
