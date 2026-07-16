@@ -443,7 +443,8 @@ def record_response(token: str, approved: bool, note: str = "") -> Dict:
 
 
 def apply_substitution(sub: Dict, substitute_sku: str = None,
-                       applied_status: str = "applied") -> Dict:
+                       applied_status: str = "applied",
+                       pending_status: str = "approved_pending_apply") -> Dict:
     """Swap the line on the B2BWave order: ADD the substitute at the original
     price first (customer total unchanged), verify by readback, then REMOVE
     the original line, verify again. Guarded by B2BWAVE_MUTATIONS_ENABLED.
@@ -453,7 +454,7 @@ def apply_substitution(sub: Dict, substitute_sku: str = None,
     if os.environ.get("B2BWAVE_MUTATIONS_ENABLED", "true").lower() == "false":
         result["error"] = ("approved by customer but NOT applied: B2BWave "
                            "mutations disabled (B2BWAVE_MUTATIONS_ENABLED=false)")
-        _store_apply_result(sub, "approved_pending_apply", result)
+        _store_apply_result(sub, pending_status, result)
         return result
 
     order_id = sub["order_id"]
@@ -515,7 +516,9 @@ def apply_substitution(sub: Dict, substitute_sku: str = None,
 def counter_apply(sub: Dict, sku_override: str = None) -> Dict:
     """Swap to the CUSTOMER-REQUESTED item (from their decline note, or an
     explicit admin override). On success the customer gets a confirmation
-    email. Held at the original line price, same as any substitution."""
+    email. Held at the original line price, same as any substitution.
+    If the mutations guard blocks it the row STAYS 'declined' so this call
+    can simply be repeated after the guard is lifted."""
     target = (sku_override or sub.get("requested_sku") or "").strip()
     if not target:
         return {"applied": False,
@@ -523,7 +526,8 @@ def counter_apply(sub: Dict, sku_override: str = None) -> Dict:
                           f"({sub.get('requested_detail') or 'no note parsed'}); "
                           "pass {\"sku\": \"...\"} to override")}
     result = apply_substitution(sub, substitute_sku=target,
-                                applied_status="counter_applied")
+                                applied_status="counter_applied",
+                                pending_status="declined")
     if result.get("applied"):
         first = (sub.get("customer_name") or "there").split()[0]
         html = f"""
