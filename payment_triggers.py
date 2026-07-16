@@ -4,6 +4,10 @@ Automated triggers that fire when a Square payment is received.
 
 Trigger 2: Auto-create BOL for each LTL warehouse shipment
 Trigger 4: Send payment_confirmation email to customer
+Trigger 5: Supplier-order dispatch (auto-ordering lane, William 2026-07-16:
+           "100% auto send when payment is made") — gated by
+           AUTO_DISPATCH_ENABLED env + exact payment-amount match; see
+           supplier_orders.run_dispatch_on_payment.
 
 Entry point: run_payment_triggers(order_id, order_data, payment_amount)
 Called by square_sync.run_square_sync() after marking an order as paid.
@@ -184,7 +188,8 @@ def run_payment_triggers(order_id: str, order_data: dict, payment_amount: float)
         'order_id': order_id,
         'payment_amount': payment_amount,
         'email_confirmation': None,
-        'bols': []
+        'bols': [],
+        'supplier_dispatch': None,
     }
 
     # Trigger 4: Payment confirmation email
@@ -192,5 +197,20 @@ def run_payment_triggers(order_id: str, order_data: dict, payment_amount: float)
 
     # Trigger 2: Auto-create BOLs for LTL shipments
     results['bols'] = auto_create_bols(order_id)
+
+    # Trigger 5: Supplier-order dispatch (auto-ordering lane).
+    # Gated inside run_dispatch_on_payment: AUTO_DISPATCH_ENABLED env must be
+    # true AND the payment must exactly match the order total — fuzzy
+    # Gmail-matched payments never place supplier orders. Guarded so a
+    # dispatch failure can never break payment processing.
+    try:
+        from supplier_orders import run_dispatch_on_payment
+        results['supplier_dispatch'] = run_dispatch_on_payment(
+            order_id, order_data, payment_amount)
+        print(f"[PAYMENT TRIGGER] Supplier dispatch order {order_id}: "
+              f"{(results['supplier_dispatch'] or {}).get('status')}")
+    except Exception as e:
+        print(f"[PAYMENT TRIGGER] Supplier dispatch failed for order {order_id}: {e}")
+        results['supplier_dispatch'] = {'status': 'error', 'message': str(e)}
 
     return results
