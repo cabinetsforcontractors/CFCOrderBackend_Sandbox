@@ -7,7 +7,9 @@ Flow:
      (and warehouse stock for the substitute has been confirmed).
   2. POST /substitutions/propose -> EMAILS the customer a proposal styled like
      the B2BWave order-confirmation email: plain-language message box on top,
-     [Approve] and [No — tell us what you'd prefer] buttons.
+     [Approve] and [No — tell us what you'd prefer] buttons. Pass
+     oos_message_id (the warehouse's out-of-stock Gmail message id) to enable
+     the automatic supplier reply at the end.
   3. NOTHING changes on the order until the customer responds. The email
      buttons land on a confirmation page (one extra click) so email-scanner
      link prefetching can never phantom-approve.
@@ -16,10 +18,23 @@ Flow:
      total unchanged — CFC eats the difference), then William is alerted.
   5. Decline with a note -> the note is parsed for a SKU request; the customer
      is shown up to 3 fuzzy-matched IN-LINE options ("Did you mean...?") and
-     their pick auto-applies (they confirmed the exact SKU themselves = the
-     99.9% + sanity-check ruling) with a confirmation email + William FYI.
+     their pick auto-applies (they confirmed the exact SKU themselves).
      No match / "none of these" -> plain decline: note recorded, William
      alerted (with recognition detail), order untouched.
+  6. AFTER any successful apply (finalize step):
+       - the customer gets the full UPDATED ORDER email (clone of the B2BWave
+         order-confirmation table, swapped line highlighted),
+       - order_line_items is refreshed from B2BWave so the warehouse-facing
+         supplier sheet carries the corrected SKUs,
+       - the supplier correction ("PO x: replace N x OLD with N x NEW", in
+         SUPPLIER SKUs) is REPLIED into the out-of-stock Gmail thread when
+         oos_message_id is on file, otherwise included in William's alert.
+
+RECONSIDER LATER (William 2026-07-16, logged, deliberately not built):
+  - price-delta guard on customer picks (TF396 vs WF342 — too big a jump to
+    eat silently; threshold -> route to William instead of auto-apply)
+  - quantity-equivalence swaps (2 x WF336 -> 1 x TF396; length math)
+  - freight side-effects (swap adds/removes the only >84" trim -> $275 fee)
 
 B2BWave API quirks (proven live 2026-07-16 on test orders 4860/5706):
   - Accept: application/json is REQUIRED — without it mutations APPLY but the
@@ -31,12 +46,14 @@ B2BWave API quirks (proven live 2026-07-16 on test orders 4860/5706):
     (has_custom_price=1) achieves the same customer total.
 """
 
+import base64
 import difflib
 import json
 import os
 import re
 import secrets
 from datetime import datetime, timezone
+from email.mime.text import MIMEText
 from typing import Dict, List, Optional
 
 import requests
@@ -85,6 +102,7 @@ def ensure_substitutions_table(conn):
         cur.execute("ALTER TABLE order_substitutions ADD COLUMN IF NOT EXISTS requested_name TEXT")
         cur.execute("ALTER TABLE order_substitutions ADD COLUMN IF NOT EXISTS requested_price DECIMAL(10,2)")
         cur.execute("ALTER TABLE order_substitutions ADD COLUMN IF NOT EXISTS requested_detail TEXT")
+        cur.execute("ALTER TABLE order_substitutions ADD COLUMN IF NOT EXISTS oos_message_id VARCHAR(120)")
         conn.commit()
 
 
@@ -197,9 +215,8 @@ def suggest_in_line_alternatives(note: str, original_sku: str,
                                  limit: int = 3) -> List[Dict]:
     """Fuzzy 'did you mean' candidates WITHIN the customer's line, for the
     decline page. Bodies come from rta_products (the SOT-derived catalog —
-    the practical canonical stand-in: TF396 vs WF396 score 0.8); each
-    candidate is verified live on B2BWave before being offered.
-    Exact matches score 1.0 and sort first."""
+    the practical canonical stand-in: TF396 matched WSP-TF3-96 live); each
+    candidate is verified live on B2BWave before being offered."""
     prefix = (original_sku or "").split("-")[0].upper()
     if not prefix or not note:
         return []
@@ -248,11 +265,12 @@ def suggest_in_line_alternatives(note: str, original_sku: str,
 
 
 # =============================================================================
-# PROPOSAL EMAIL (clone of the B2BWave order-confirmation look)
+# EMAIL BUILDERS (clones of the B2BWave order-confirmation look)
 # =============================================================================
 
 _BTN = ("display:inline-block;padding:12px 28px;border-radius:6px;color:#ffffff;"
         "text-decoration:none;font-weight:bold;font-size:15px;margin:4px 8px 4px 0;")
+_TD = "border-bottom:1px solid #dddddd;padding:6px;"
 
 
 def build_proposal_email(order: Dict, sub: Dict) -> str:
@@ -261,7 +279,7 @@ def build_proposal_email(order: Dict, sub: Dict) -> str:
     first = (sub.get("customer_name") or order.get("customer_name") or "there").split()[0]
     order_id = sub["order_id"]
     landing = f"{PUBLIC_BASE_URL}/substitution/{sub['token']}"
-    td = ("border-bottom:1px solid #dddddd;padding:6px;")
+    td = _TD
     qty = sub.get("quantity") or 1
     price = float(sub.get("keep_price") or 0)
     line_total = price * qty
@@ -327,12 +345,75 @@ def build_proposal_email(order: Dict, sub: Dict) -> str:
 """
 
 
+def build_updated_order_email(order: Dict, sub: Dict, swapped_in_sku: str) -> str:
+    """Full UPDATED ORDER confirmation — clone of the B2BWave 'New Order'
+    email (same table layout), with the swapped-in line highlighted."""
+    first = (sub.get("customer_name") or order.get("customer_name") or "there").split()[0]
+    order_id = sub["order_id"]
+    td = _TD
+    rows = []
+    total = 0.0
+    for p in _order_products(order):
+        code = p.get("product_code") or ""
+        qty = float(p.get("quantity") or 0)
+        price = float(p.get("final_price") or 0)
+        line_total = qty * price
+        total += line_total
+        hl = ' style="background:#f0fbf7;"' if code.upper() == swapped_in_sku.upper() else ""
+        mark = ("<strong style='color:#1dc9b7;'>&#8226; swapped</strong> "
+                if code.upper() == swapped_in_sku.upper() else "")
+        rows.append(f"""
+      <tr{hl}>
+        <td style="{td}">{mark}</td>
+        <td style="{td}">{code}</td>
+        <td style="{td}">{p.get('product_name') or ''}</td>
+        <td style="{td}" align="right">${price:,.2f}</td>
+        <td style="{td}" align="right">{int(qty) if qty == int(qty) else qty}</td>
+        <td style="{td}" align="right">${line_total:,.2f}</td>
+      </tr>""")
+
+    return f"""
+<div style='color:#393939;font-family:"Open Sans","Helvetica Neue",Helvetica,Arial,sans-serif;font-size:13px;line-height:1.5;max-width:50em;'>
+  <h1>Updated Order</h1>
+  <p>Hi {first},</p>
+  <p>Your order <strong>#{order_id}</strong> has been updated as agreed:
+     <s>{sub['original_sku']}</s> &rarr; <strong>{swapped_in_sku}</strong>,
+     with your price held the same. Here is your complete updated order:</p>
+  <p>Order ID: {order_id}<br>
+     Name: {order.get('customer_name') or ''}<br>
+     Company: {order.get('customer_company') or ''}</p>
+  <table style="width:100%;max-width:50em;border-collapse:collapse;margin-bottom:20px;">
+    <thead>
+      <tr style="color:#707070;background:#f2f2f2;">
+        <th style="{td}" align="left"></th>
+        <th style="{td}" align="left">Code</th>
+        <th style="{td}" align="left">Name</th>
+        <th style="{td}" align="right">Price</th>
+        <th style="{td}" align="right">Quantity</th>
+        <th style="{td}" align="right">Total</th>
+      </tr>
+    </thead>
+    <tbody>{''.join(rows)}
+      <tr>
+        <td colspan="5" style="{td}" align="right"><strong>Totals:</strong></td>
+        <td style="{td}" align="right"><strong>${total:,.2f}</strong></td>
+      </tr>
+    </tbody>
+  </table>
+  <p>If anything doesn't look right, just reply to this email or call (770) 990-4885.</p>
+  <p>Thank you,<br>The Cabinets For Contractors team</p>
+</div>
+"""
+
+
 def _send_guarded_email(order_id: str, to_email: str, subject: str, html: str,
-                        triggered_by: str) -> Dict:
+                        triggered_by: str, thread_headers: Dict = None) -> Dict:
     """Send raw HTML through the same Gmail path + EMAIL_ALLOWLIST guard as
-    email_sender.send_order_email (which is template-registry-bound)."""
+    email_sender.send_order_email. thread_headers ({'thread_id','message_id',
+    'subject'}) turns it into a threaded reply (out-of-stock email replies)."""
     from config import GMAIL_SEND_ENABLED
-    from email_sender import _gmail_send, _log_email_event
+    from email_sender import _log_email_event
+    from gmail_sync import get_gmail_access_token
 
     if not to_email or "@" not in to_email:
         return {"success": False, "error": f"invalid email: {to_email}"}
@@ -351,7 +432,29 @@ def _send_guarded_email(order_id: str, to_email: str, subject: str, html: str,
                 return {"success": False, "error": "recipient not in EMAIL_ALLOWLIST",
                         "dry_run": True, "original_to": to_email}
     try:
-        message_id = _gmail_send(to_email, subject, html, order_id=order_id)
+        token = get_gmail_access_token()
+        if not token:
+            return {"success": False, "error": "no Gmail access token"}
+        msg = MIMEText(html, "html")
+        msg["To"] = to_email
+        msg["From"] = "William Prince — Cabinets For Contractors <william@cabinetsforcontractors.net>"
+        msg["Subject"] = subject
+        payload = {}
+        if thread_headers:
+            if thread_headers.get("message_id"):
+                msg["In-Reply-To"] = thread_headers["message_id"]
+                msg["References"] = thread_headers["message_id"]
+            if thread_headers.get("thread_id"):
+                payload["threadId"] = thread_headers["thread_id"]
+        payload["raw"] = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+        import urllib.request
+        req = urllib.request.Request(
+            "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
+            data=json.dumps(payload).encode(), method="POST")
+        req.add_header("Authorization", f"Bearer {token}")
+        req.add_header("Content-Type", "application/json")
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            message_id = json.loads(resp.read().decode()).get("id")
         _log_email_event(order_id=order_id, template_id="substitution_flow",
                          to_email=to_email, subject=subject, message_id=message_id,
                          triggered_by=triggered_by, source="email_send")
@@ -365,8 +468,11 @@ def _send_guarded_email(order_id: str, to_email: str, subject: str, html: str,
 # =============================================================================
 
 def create_substitution_proposal(order_id: str, original_sku: str,
-                                 substitute_sku: str, reason: str = "out_of_stock") -> Dict:
-    """Create + email a substitution proposal. Does NOT touch the order."""
+                                 substitute_sku: str, reason: str = "out_of_stock",
+                                 oos_message_id: str = None) -> Dict:
+    """Create + email a substitution proposal. Does NOT touch the order.
+    oos_message_id = Gmail id of the warehouse's out-of-stock email; when set,
+    the supplier gets a threaded reply with the correction after the swap."""
     order = fetch_b2b_order(order_id)
     if not order:
         return {"status": "error", "message": f"order {order_id} not found on B2BWave"}
@@ -402,12 +508,14 @@ def create_substitution_proposal(order_id: str, original_sku: str,
             cur.execute("""
                 INSERT INTO order_substitutions
                     (token, order_id, original_sku, substitute_sku, quantity,
-                     keep_price, reason, status, customer_email, customer_name)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, 'pending', %s, %s)
+                     keep_price, reason, status, customer_email, customer_name,
+                     oos_message_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, 'pending', %s, %s, %s)
                 RETURNING id
             """, (sub["token"], sub["order_id"], sub["original_sku"],
                   sub["substitute_sku"], sub["quantity"], sub["keep_price"],
-                  reason, sub["customer_email"], sub["customer_name"]))
+                  reason, sub["customer_email"], sub["customer_name"],
+                  oos_message_id))
             sub_id = cur.fetchone()[0]
             conn.commit()
 
@@ -425,6 +533,7 @@ def create_substitution_proposal(order_id: str, original_sku: str,
                 "substitution_id": sub_id, "original_sku": sub["original_sku"],
                 "substitute_sku": sub["substitute_sku"], "quantity": sub["quantity"],
                 "keep_price": sub["keep_price"], "email": email_result,
+                "oos_message_id": oos_message_id,
             })))
             conn.commit()
     return {"status": "ok", "substitution_id": sub_id, "token": sub["token"],
@@ -550,6 +659,9 @@ def record_customer_choice(token: str, chosen_sku: str, note: str = "") -> Dict:
     if result.get("applied"):
         verdict_lines.append("<p>Website order UPDATED automatically "
                              "(verified by readback); customer confirmation sent.</p>")
+        if result.get("supplier_correction"):
+            verdict_lines.append(f"<p><strong>Warehouse correction:</strong> "
+                                 f"{result['supplier_correction']}</p>")
     else:
         verdict_lines.append(f"<p style='color:#c00;'><strong>ACTION NEEDED:</strong> "
                              f"not applied yet — {result.get('error', 'unknown')}. "
@@ -569,7 +681,8 @@ def apply_substitution(sub: Dict, substitute_sku: str = None,
     """Swap the line on the B2BWave order: ADD the substitute at the original
     price first (customer total unchanged), verify by readback, then REMOVE
     the original line, verify again. Guarded by B2BWAVE_MUTATIONS_ENABLED.
-    substitute_sku overrides the proposed one (counter-apply)."""
+    On success, runs the finalize step (updated-order email to the customer,
+    local warehouse-line refresh, supplier OOS correction)."""
     target_sku = substitute_sku or sub["substitute_sku"]
     result = {"applied": False, "substitute_sku": target_sku, "steps": []}
     if os.environ.get("B2BWAVE_MUTATIONS_ENABLED", "true").lower() == "false":
@@ -630,14 +743,138 @@ def apply_substitution(sub: Dict, substitute_sku: str = None,
         return result
 
     result["applied"] = True
+    try:
+        result["finalize"] = finalize_applied_substitution(sub, target_sku, check)
+        if result["finalize"].get("supplier_correction"):
+            result["supplier_correction"] = result["finalize"]["supplier_correction"]
+    except Exception as e:
+        result["finalize"] = {"error": str(e)}
     _store_apply_result(sub, applied_status, result)
     return result
 
 
+# =============================================================================
+# FINALIZE (after a successful apply)
+# =============================================================================
+
+def _supplier_token(website_sku: str) -> str:
+    """rta_products supplier token for a website SKU (falls back to the SKU)."""
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT supplier_sku FROM rta_products WHERE product_sku = %s",
+                            (website_sku,))
+                row = cur.fetchone()
+                if row and row[0]:
+                    return row[0]
+    except Exception:
+        pass
+    return website_sku
+
+
+def refresh_local_order_lines(order_id: str, order: Dict) -> Dict:
+    """Refresh order_line_items from the (post-swap) B2BWave order so the
+    warehouse supplier sheet carries the corrected SKUs. Mirrors the
+    sync_service import: delete + reinsert with warehouse_mapping routing."""
+    from psycopg2.extras import RealDictCursor
+    lines = _order_products(order)
+    with get_db() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("DELETE FROM order_line_items WHERE order_id = %s", (order_id,))
+            for p in lines:
+                sku = p.get("product_code") or ""
+                prefix = sku.split("-")[0] if "-" in sku else ""
+                warehouse = None
+                if prefix:
+                    cur.execute("""SELECT warehouse_name FROM warehouse_mapping
+                                   WHERE UPPER(sku_prefix) = UPPER(%s)""", (prefix,))
+                    row = cur.fetchone()
+                    if row:
+                        warehouse = row["warehouse_name"]
+                qty = float(p.get("quantity") or 0)
+                price = float(p.get("final_price") or 0)
+                cur.execute("""
+                    INSERT INTO order_line_items
+                        (order_id, sku, sku_prefix, product_name, quantity,
+                         price, line_total, warehouse)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                """, (order_id, sku, prefix, p.get("product_name"), qty, price,
+                      round(qty * price, 2), warehouse))
+            conn.commit()
+    return {"refreshed_lines": len(lines)}
+
+
+def finalize_applied_substitution(sub: Dict, swapped_in_sku: str,
+                                  post_order: Dict = None) -> Dict:
+    """After a verified swap: (1) full updated-order clone email to the
+    customer, (2) refresh local order lines for the warehouse sheet,
+    (3) supplier correction in SUPPLIER SKUs — threaded reply into the
+    out-of-stock email when oos_message_id is on file."""
+    out = {}
+    order_id = sub["order_id"]
+    order = post_order or fetch_b2b_order(order_id) or {}
+
+    # (1) updated-order confirmation to the customer
+    html = build_updated_order_email(order, sub, swapped_in_sku)
+    out["customer_email"] = _send_guarded_email(
+        order_id, sub.get("customer_email") or "",
+        f"Updated Order — #{order_id} ({sub['original_sku']} -> {swapped_in_sku})",
+        html, triggered_by="substitution_finalize")
+
+    # (2) local warehouse-facing lines
+    try:
+        out["local_refresh"] = refresh_local_order_lines(order_id, order)
+    except Exception as e:
+        out["local_refresh"] = {"error": str(e)}
+
+    # (3) supplier correction, in the SUPPLIER's own SKUs
+    qty = sub.get("quantity") or 1
+    correction = (f"PO {order_id} correction: replace {qty} x "
+                  f"{_supplier_token(sub['original_sku'])} ({sub['original_sku']}) "
+                  f"with {qty} x {_supplier_token(swapped_in_sku)} ({swapped_in_sku}). "
+                  f"Same quantities otherwise; please confirm.")
+    out["supplier_correction"] = correction
+    if sub.get("oos_message_id"):
+        try:
+            from gmail_sync import gmail_api_request
+            meta = gmail_api_request(f"messages/{sub['oos_message_id']}",
+                                     {"format": "metadata"})
+            if meta:
+                headers = {h["name"].lower(): h["value"]
+                           for h in meta.get("payload", {}).get("headers", [])}
+                reply_to = headers.get("reply-to") or headers.get("from") or ""
+                m = re.search(r"<([^>]+)>", reply_to)
+                reply_addr = m.group(1) if m else reply_to.strip()
+                subject = headers.get("subject", f"PO {order_id}")
+                if not subject.lower().startswith("re:"):
+                    subject = "Re: " + subject
+                out["supplier_reply"] = _send_guarded_email(
+                    order_id, reply_addr, subject,
+                    f"<p>{correction}</p><p>Thank you,<br>Cabinets For Contractors</p>",
+                    triggered_by="substitution_oos_reply",
+                    thread_headers={"thread_id": meta.get("threadId"),
+                                    "message_id": headers.get("message-id")})
+        except Exception as e:
+            out["supplier_reply"] = {"success": False, "error": str(e)}
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO order_events (order_id, event_type, event_data, source)
+                VALUES (%s, 'substitution_finalized', %s, 'substitutions')
+            """, (order_id, json.dumps({"substitution_id": sub["id"],
+                                        "swapped_in": swapped_in_sku,
+                                        "finalize": {k: (v if isinstance(v, (str, int, dict))
+                                                         else str(v))
+                                                     for k, v in out.items()}})))
+            conn.commit()
+    return out
+
+
 def counter_apply(sub: Dict, sku_override: str = None) -> Dict:
     """Swap to the CUSTOMER-REQUESTED item (from their decline note/choice, or
-    an explicit admin override). On success the customer gets a confirmation
-    email. Held at the original line price, same as any substitution.
+    an explicit admin override). Finalize (updated-order email, warehouse
+    refresh, supplier correction) runs inside apply_substitution on success.
     If the mutations guard blocks it the row STAYS 'declined' so this call
     can simply be repeated after the guard is lifted."""
     target = (sku_override or sub.get("requested_sku") or "").strip()
@@ -646,26 +883,9 @@ def counter_apply(sub: Dict, sku_override: str = None) -> Dict:
                 "error": ("no recognized SKU on this substitution "
                           f"({sub.get('requested_detail') or 'no note parsed'}); "
                           "pass {\"sku\": \"...\"} to override")}
-    result = apply_substitution(sub, substitute_sku=target,
-                                applied_status="counter_applied",
-                                pending_status="declined")
-    if result.get("applied"):
-        first = (sub.get("customer_name") or "there").split()[0]
-        html = f"""
-<div style='color:#393939;font-family:"Open Sans","Helvetica Neue",Helvetica,Arial,sans-serif;font-size:13px;line-height:1.5;max-width:50em;'>
-  <h1>Done — order #{sub['order_id']} updated</h1>
-  <p>Hi {first},</p>
-  <p>As you asked, we replaced <s>{sub['original_sku']}</s> with
-     <strong>{target}</strong> on your order #{sub['order_id']}.
-     <strong>Your price stays the same</strong> — we covered the difference.</p>
-  <p>Every other item is unchanged. Questions? Just reply or call (770) 990-4885.</p>
-  <p>Thank you,<br>The CFC Team</p>
-</div>"""
-        result["customer_email"] = _send_guarded_email(
-            sub["order_id"], sub.get("customer_email") or "",
-            f"Order #{sub['order_id']} — updated as you asked ({target})",
-            html, triggered_by="substitution_counter_apply")
-    return result
+    return apply_substitution(sub, substitute_sku=target,
+                              applied_status="counter_applied",
+                              pending_status="declined")
 
 
 def _store_apply_result(sub: Dict, status: str, result: Dict):
@@ -677,12 +897,13 @@ def _store_apply_result(sub: Dict, status: str, result: Dict):
                     applied_at = CASE WHEN %s IN ('applied', 'counter_applied')
                                       THEN NOW() ELSE applied_at END
                 WHERE id = %s
-            """, (status, json.dumps(result)[:4000], status, sub["id"]))
+            """, (status, json.dumps(result, default=str)[:4000], status, sub["id"]))
             cur.execute("""
                 INSERT INTO order_events (order_id, event_type, event_data, source)
                 VALUES (%s, 'substitution_apply', %s, 'substitutions')
             """, (sub["order_id"], json.dumps({"substitution_id": sub["id"],
-                                               "status": status, "result": result})))
+                                               "status": status,
+                                               "result": result}, default=str)))
             conn.commit()
 
 
@@ -699,7 +920,11 @@ def _alert_william(sub: Dict, approved: bool, note: str,
         lines.append(f"<p><strong>Customer note:</strong> {note[:1000]}</p>")
     if approved:
         if apply_result and apply_result.get("applied"):
-            lines.append("<p>Website order UPDATED automatically (verified by readback).</p>")
+            lines.append("<p>Website order UPDATED automatically (verified by readback); "
+                         "customer got the updated-order confirmation.</p>")
+            if apply_result.get("supplier_correction"):
+                lines.append(f"<p><strong>Warehouse correction:</strong> "
+                             f"{apply_result['supplier_correction']}</p>")
         else:
             err = (apply_result or {}).get("error", "unknown")
             lines.append(f"<p style='color:#c00;'><strong>ACTION NEEDED:</strong> "
