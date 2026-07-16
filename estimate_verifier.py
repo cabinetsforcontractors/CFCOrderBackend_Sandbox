@@ -6,37 +6,30 @@ Watches Gmail for supplier reply documents (estimates / sales orders /
 quotes / confirmations), runs the validated per-supplier parsers, diffs
 against what we sent, and flips the supplier_orders state row:
 
-    clean diff        -> status 'confirmed' (quiet — shows in the digest)
-    anything off      -> status 'discrepancy' + alert email to William
-                         (human-readable tables, never raw JSON)
+    clean diff   -> status 'confirmed' (quiet — shows in the digest)
+    discrepancy  -> REVISION-REQUEST EMAIL TO THE SUPPLIER (their SKUs, their
+                    door name — never ours), CC us (William 2026-07-17).
+                    Escalation clock: no update after 4 business hours ->
+                    "just making sure you saw this" to the supplier; 4 more ->
+                    "ALERT!! NO RESPONSE FOR DISCREPANCIES ORDER #x" to us.
+                    Internal-table alert only as fallback when no actionable
+                    revision can be composed.
 
 ALERT THROTTLE: an identical discrepancy report (same order/supplier/hash)
-alerts AT MOST once per 6 hours, no matter how many times the verifier runs
-(periodic scan, manual force, retries). Rows still update every run.
+triggers the supplier email AT MOST once per 6 hours, no matter how many
+times the verifier runs. Rows still update every run. A NEW document with a
+different diff restarts the cycle (and the clock).
 
-Document routing (content-marker based, NOT sender based — in the beta all
-test emails come from the safety inbox, and markers are what the documents
-actually are):
-    PDF attachment markers (freight_routes._detect_pdf_supplier):
-        GHI Sales Order, Milestone QUOFL, C&S Quotation, LI Estimate/Invoice
-    HTML body "#SO#####" + NetSuite markers -> DuraStone (also feeds the
-        revision tripwire history via supplier_doc_parser).
-    HTML body ROC markers ("Roc Cabinetry" + "SKU:") -> ROC confirmation /
-        invoice (roc_parser; carries our PO in "PO Number#"). A-* companion
-        lines (free trays/assembly) are excluded from the diff.
-
-Diff space matches the /freight/verify-order endpoint: GHI + DS in
-website-SKU space, LI/LM/C&S/ROC in body space.
-
-Every processed Gmail message is recorded in supplier_reply_scans so the
-periodic scan is idempotent; the manual endpoint can force-reprocess.
+Document routing is content-marker based (PDF markers for GHI/LM/C&S/LI;
+HTML markers for DuraStone NetSuite and ROC confirmations). Diff space:
+GHI + DS in website-SKU space, LI/LM/C&S/ROC in body space.
 """
 
 import base64
 import hashlib
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
 from db_helpers import get_db
@@ -44,8 +37,6 @@ from db_helpers import get_db
 INTERNAL_ALERT_EMAIL = os.environ.get("WAREHOUSE_NOTIFICATION_EMAIL",
                                       "cabinetsforcontractors@gmail.com").strip()
 
-# Gmail searches for candidate reply documents (content markers do the real
-# routing; these just narrow the scan volume)
 CANDIDATE_QUERY_PDF = ('has:attachment filename:pdf '
                        '(ghicabinets OR QUOFL OR "Quotation_S" OR Estimate_ OR '
                        'Invoice_ OR milestonecabinetry OR cabinetstone OR '
@@ -53,9 +44,14 @@ CANDIDATE_QUERY_PDF = ('has:attachment filename:pdf '
 CANDIDATE_QUERY_HTML = ('(from:roccabinetry.com OR from:sent-via.netsuite.com) '
                         '("order confirmation" OR "Invoice" OR "Sales Order")')
 
+# business window approx 9a-5p ET expressed in UTC
+_BIZ_START_UTC, _BIZ_END_UTC = 13, 21
+FOLLOWUP_AFTER_BH = 4        # "just making sure you saw this" to supplier
+NO_RESPONSE_ALERT_BH = 8     # ALERT!! to us
+
 
 # =============================================================================
-# TABLE
+# TABLES / SCAN DEDUPE
 # =============================================================================
 
 def ensure_scan_table(conn):
@@ -145,8 +141,6 @@ def fetch_message_full(message_id: str) -> Optional[Dict]:
 # =============================================================================
 
 def verify_pdf(order_id: str, data: bytes, supplier: str) -> Dict:
-    """Diff a parsed supplier PDF against the sent order. Returns
-    {'supplier','doc_ref','report','line_count'}."""
     import supplier_doc_parser as sdp
     from freight_routes import _VERIFY_SUPPLIERS, _order_lines_for_supplier
     from psycopg2.extras import RealDictCursor
@@ -197,9 +191,6 @@ def verify_ds_html(order_id: str, html: str) -> Dict:
 
 
 def verify_roc_html(order_id: str, html: str) -> Dict:
-    """ROC confirmation/invoice HTML -> body-space diff vs the sent ROC lines.
-    A-* companion lines (free trays/assembly) are excluded from the diff and
-    reported under 'companions'."""
     import supplier_doc_parser as sdp
     from freight_routes import _order_lines_for_supplier
     from roc_parser import fold_roc_lines, parse_roc_confirmation_html
@@ -222,7 +213,95 @@ def verify_roc_html(order_id: str, html: str) -> Dict:
 
 
 # =============================================================================
-# DISCREPANCY ALERT (human-readable — never raw JSON; throttled)
+# SUPPLIER REVISION REQUEST (their SKUs / their door name — never ours)
+# =============================================================================
+
+def _their_sku(our_sku: str, supplier: str) -> str:
+    """The supplier's token for one of OUR skus (rta forward map; ROC gets
+    the store prefix). Falls back to the bare body."""
+    tok = None
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT supplier_sku FROM rta_products WHERE product_sku = %s",
+                            (our_sku,))
+                row = cur.fetchone()
+                if row and row[0]:
+                    tok = row[0]
+    except Exception:
+        pass
+    if not tok:
+        tok = our_sku.split("-", 1)[1] if "-" in our_sku else our_sku
+    if supplier == "ROC":
+        from supplier_orders import ROC_STORE_PREFIX
+        pre = (our_sku or "").split("-")[0].upper()
+        sp = ROC_STORE_PREFIX.get(pre)
+        if sp and not tok.upper().startswith(sp + "-"):
+            tok = f"{sp}-{tok}"
+    return tok
+
+
+def _clean_their_label(entry) -> str:
+    s = str(entry.get("sku") or entry.get("body") or "?")
+    if "/" in s:
+        s = min(s.split("/"), key=len)
+    return s
+
+
+def build_revision_request(order_id: str, supplier: str, doc_ref: str,
+                           report: Dict) -> Optional[Dict]:
+    """Compose the revise-your-quote email in the SUPPLIER's dialect.
+    Returns {'html','subject'} or None when there is nothing actionable."""
+    from supplier_orders import SUPPLIER_DOOR_INFO
+
+    asks = []
+    for e in report.get("qty_mismatch") or []:
+        their = _their_sku(e.get("sku") or "", supplier)
+        asks.append(f"Change <strong>{their}</strong> to Qty "
+                    f"<strong>{e.get('sent_qty')}</strong> "
+                    f"(your document shows {e.get('supplier_qty')})")
+    for e in report.get("missing_at_supplier") or []:
+        their = _their_sku(e.get("sku") or "", supplier)
+        need = e.get("unconfirmed_qty") or e.get("sent_qty")
+        total = e.get("sent_qty")
+        if need and total and need != total:
+            asks.append(f"Add <strong>{need}</strong> each "
+                        f"<strong>{their}</strong> for a total Qty of "
+                        f"<strong>{total}</strong>")
+        else:
+            asks.append(f"Add <strong>{total}</strong> each <strong>{their}</strong>")
+    for e in report.get("unexpected_from_supplier") or []:
+        their = _clean_their_label(e)
+        asks.append(f"Please confirm <strong>{their}</strong> x"
+                    f"{e.get('supplier_qty')} — this is not on our PO; "
+                    f"remove if added in error")
+    if not asks:
+        return None
+
+    # door header from the sent side's line prefix
+    door_txt = ""
+    first_our = next((e.get("sku") for e in
+                      (report.get("missing_at_supplier") or []) +
+                      (report.get("qty_mismatch") or []) if e.get("sku")), "")
+    pre = (first_our or "").split("-")[0].upper()
+    door = SUPPLIER_DOOR_INFO.get((supplier, pre))
+    if door:
+        door_txt = f" ({door['door_name']}, {door['presku']})"
+
+    items = "".join(f"<li style='margin:4px 0;'>{a}</li>" for a in asks)
+    html = (f"<div style='font-family:Arial,sans-serif;font-size:14px;'>"
+            f"<p>Hello,</p>"
+            f"<p>Please revise your document <strong>{doc_ref or ''}</strong> "
+            f"for our order <strong>PO {order_id}</strong>:{door_txt}</p>"
+            f"<ol>{items}</ol>"
+            f"<p>Please send the corrected confirmation for our records.</p>"
+            f"<p>Thank you,<br>Cabinets For Contractors<br>(770) 990-4885</p></div>")
+    return {"html": html,
+            "subject": f"PO {order_id} - please revise {doc_ref or 'your confirmation'}"}
+
+
+# =============================================================================
+# INTERNAL FALLBACK ALERT (human tables — used when nothing actionable)
 # =============================================================================
 
 _TD = "padding:4px 12px;border-bottom:1px solid #eee;"
@@ -238,83 +317,32 @@ def _tbl(rows, headers) -> str:
             f"margin:4px 0 14px 0;'><tr>{th}</tr>{trs}</table>")
 
 
-def _clean_sku(entry) -> str:
-    """Display label: unexpected body labels like 'SNWVSD42/VSD42' -> 'VSD42'."""
-    s = str(entry.get("sku") or entry.get("body") or "?")
-    if "/" in s:
-        s = min(s.split("/"), key=len)
-    return s
-
-
-def _more(vals, cap=10) -> str:
-    return (f"<p style='color:#888;margin:-8px 0 12px 0;'>"
-            f"...and {len(vals) - cap} more</p>" if len(vals) > cap else "")
-
-
-def _discrepancy_email_html(order_id: str, supplier: str, doc_ref: str,
-                            r: Dict) -> str:
-    parts = [
-        f"<div style='font-family:Arial,sans-serif;font-size:14px;max-width:640px;'>",
-        f"<h2 style='margin:0 0 2px 0;'>Discrepancy &mdash; Order #{order_id}</h2>",
-        f"<p style='margin:0 0 14px 0;color:#666;'>{supplier} &middot; "
-        f"document {doc_ref or '?'}</p>",
-    ]
-    qm = r.get("qty_mismatch") or []
-    if qm:
-        parts.append("<p style='margin:0;'><strong>Quantity mismatches</strong></p>")
-        parts.append(_tbl([(e.get("sku"), e.get("sent_qty"), e.get("supplier_qty"))
-                           for e in qm[:10]], ("SKU", "We sent", "They confirm")))
-        parts.append(_more(qm))
-    ms = r.get("missing_at_supplier") or []
-    if ms:
-        parts.append("<p style='margin:0;'><strong>We sent &mdash; they didn't confirm</strong></p>")
-        parts.append(_tbl([(e.get("sku"), e.get("sent_qty")) for e in ms[:10]],
-                          ("SKU", "Qty")))
-        parts.append(_more(ms))
-    ux = r.get("unexpected_from_supplier") or []
-    if ux:
-        parts.append("<p style='margin:0;'><strong>They list &mdash; we didn't send</strong></p>")
-        parts.append(_tbl([(_clean_sku(e), e.get("supplier_qty")) for e in ux[:10]],
-                          ("Their SKU", "Qty")))
-        parts.append(_more(ux))
-    subs = r.get("possible_substitutions") or []
-    if subs:
-        parts.append("<p style='margin:0;'><strong>Probable dialect pairs "
-                     "(matching quantities &mdash; likely the same item)</strong></p>")
-        parts.append(_tbl([(e.get("sent_sku"), e.get("supplier_sku"), e.get("sent_qty"))
-                           for e in subs[:10]], ("We sent", "They used", "Qty")))
-        parts.append(_more(subs))
+def _internal_discrepancy_html(order_id, supplier, doc_ref, r) -> str:
+    parts = [f"<div style='font-family:Arial,sans-serif;font-size:14px;'>"
+             f"<h2 style='margin:0 0 2px 0;'>Discrepancy &mdash; Order #{order_id}</h2>"
+             f"<p style='margin:0 0 14px 0;color:#666;'>{supplier} &middot; "
+             f"document {doc_ref or '?'} &middot; no actionable revision — "
+             f"needs a human</p>"]
     unres = r.get("unresolved_supplier_lines") or []
     if unres:
         parts.append("<p style='margin:0;'><strong>Document lines we couldn't resolve</strong></p>")
         parts.append(_tbl([((e.get("item") or e.get("desc") or "?"), e.get("qty"),
                             (e.get("note") or "")[:70]) for e in unres[:10]],
                           ("Line", "Qty", "Note")))
-        parts.append(_more(unres))
-    comp = r.get("companions") or []
-    if comp:
-        parts.append("<p style='margin:0;'><strong>Companion lines "
-                     "(free trays/assembly &mdash; informational)</strong></p>")
-        parts.append(_tbl([(e.get("sku"), e.get("qty")) for e in comp[:10]],
-                          ("SKU", "Qty")))
     flags = r.get("flags") or []
     if flags:
-        parts.append("<p style='margin:0;'><strong>Flags</strong></p><ul style='margin-top:4px;'>"
+        parts.append("<p style='margin:0;'><strong>Flags</strong></p><ul>"
                      + "".join(f"<li>{f}</li>" for f in flags[:10]) + "</ul>")
-    matched_n = r.get("matched_qty")
-    if matched_n is None:
-        matched_n = len(r.get("matched") or [])
-    parts.append(f"<p style='color:#666;'>Matched: {matched_n} &middot; "
-                 f"units sent {r.get('sent_line_total', '?')} vs confirmed "
-                 f"{r.get('supplier_line_total', '?')}</p>")
     parts.append(f"<p style='color:#888;font-size:13px;'>Full detail: "
                  f"GET /supplier-orders?order_id={order_id}</p></div>")
     return "".join(parts)
 
 
-def _alert_already_sent(order_id: str, supplier: str, report_hash: str) -> bool:
-    """Throttle: has this exact discrepancy already been alerted in the last
-    6 hours? (Prevents alert storms from repeated verifies.)"""
+# =============================================================================
+# VERDICT + REVISION SEND (throttled)
+# =============================================================================
+
+def _alert_already_sent(order_id: str, report_hash: str) -> bool:
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
@@ -347,8 +375,9 @@ def _mark_alert_sent(order_id: str, supplier: str, report_hash: str):
 
 def _apply_verdict(order_id: str, supplier: str, verdict_ok: bool,
                    doc_ref: str, report: Dict, message_id: str) -> str:
-    """Flip (or create) the supplier_orders row; alert on discrepancy —
-    at most once per identical report per 6 hours."""
+    """Flip (or create) the supplier_orders row; on discrepancy, email the
+    SUPPLIER a revision request (CC us) and start the escalation clock."""
+    from config import SUPPLIER_INFO
     from supplier_orders import ensure_supplier_orders_table, _send_email
 
     status = "confirmed" if verdict_ok else "discrepancy"
@@ -387,22 +416,133 @@ def _apply_verdict(order_id: str, supplier: str, verdict_ok: bool,
             }, default=str)))
             conn.commit()
 
-    if not verdict_ok:
-        report_hash = hashlib.sha1(
-            json.dumps({"o": order_id, "s": supplier, "d": doc_ref, "r": report},
-                       sort_keys=True, default=str).encode()).hexdigest()[:16]
-        if _alert_already_sent(order_id, supplier, report_hash):
-            print(f"[VERIFY] alert throttled (already sent) order={order_id} "
-                  f"supplier={supplier} hash={report_hash}")
-        else:
-            result = _send_email(
-                order_id, INTERNAL_ALERT_EMAIL,
-                f"DISCREPANCY: {supplier} doc for order #{order_id}",
-                _discrepancy_email_html(order_id, supplier, doc_ref, report),
-                triggered_by="estimate_verifier")
-            if result.get("success"):
-                _mark_alert_sent(order_id, supplier, report_hash)
+    if verdict_ok:
+        return status
+
+    report_hash = hashlib.sha1(
+        json.dumps({"o": order_id, "s": supplier, "d": doc_ref, "r": report},
+                   sort_keys=True, default=str).encode()).hexdigest()[:16]
+    if _alert_already_sent(order_id, report_hash):
+        print(f"[VERIFY] revision request throttled order={order_id} hash={report_hash}")
+        return status
+
+    revision = build_revision_request(order_id, supplier, doc_ref, report)
+    supplier_email = (SUPPLIER_INFO.get(supplier) or {}).get("email", "")
+    sent_ok = False
+    if revision and supplier_email:
+        result = _send_email(order_id, supplier_email, revision["subject"],
+                             revision["html"], triggered_by="revision_request",
+                             cc=INTERNAL_ALERT_EMAIL)
+        sent_ok = result.get("success", False)
+        if sent_ok:
+            with get_db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        UPDATE supplier_orders
+                        SET revision_requested_at = NOW(),
+                            followup_sent_at = NULL,
+                            no_response_alerted_at = NULL,
+                            updated_at = NOW()
+                        WHERE order_id = %s AND warehouse = %s
+                    """, (order_id, supplier))
+                    conn.commit()
+    if not sent_ok:
+        # fallback: internal alert (nothing actionable, or send failed)
+        result = _send_email(order_id, INTERNAL_ALERT_EMAIL,
+                             f"DISCREPANCY (needs human): {supplier} doc for "
+                             f"order #{order_id}",
+                             _internal_discrepancy_html(order_id, supplier,
+                                                        doc_ref, report),
+                             triggered_by="estimate_verifier")
+        sent_ok = result.get("success", False)
+    if sent_ok:
+        _mark_alert_sent(order_id, supplier, report_hash)
     return status
+
+
+# =============================================================================
+# ESCALATION CLOCK (4 business hours -> follow-up; 8 -> ALERT to us)
+# =============================================================================
+
+def business_hours_between(start: datetime, end: datetime) -> int:
+    """Whole hours inside Mon-Fri 9a-5p ET (approximated as 13-21 UTC)."""
+    if not start or start >= end:
+        return 0
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+    hours = 0
+    t = start.replace(minute=0, second=0, microsecond=0)
+    steps = 0
+    while t < end and steps < 24 * 30:
+        if t.weekday() < 5 and _BIZ_START_UTC <= t.hour < _BIZ_END_UTC:
+            hours += 1
+        t += timedelta(hours=1)
+        steps += 1
+    return hours
+
+
+def check_discrepancy_followups() -> Dict:
+    """Runs with every reply scan: pushes the supplier at +4 business hours,
+    alerts William at +8. Cleared automatically when a new document flips the
+    row (confirmed) or a new revision restarts the clock."""
+    from config import SUPPLIER_INFO
+    from supplier_orders import _send_email
+    from psycopg2.extras import RealDictCursor
+
+    out = {"followups": 0, "alerts": 0, "checked": 0}
+    now = datetime.now(timezone.utc)
+    with get_db() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT * FROM supplier_orders
+                WHERE status = 'discrepancy'
+                  AND revision_requested_at IS NOT NULL
+            """)
+            rows = cur.fetchall()
+    for row in rows:
+        out["checked"] += 1
+        bh = business_hours_between(row["revision_requested_at"], now)
+        supplier_email = (SUPPLIER_INFO.get(row["warehouse"]) or {}).get("email", "")
+        if bh >= FOLLOWUP_AFTER_BH and not row["followup_sent_at"] and supplier_email:
+            res = _send_email(
+                row["order_id"], supplier_email,
+                f"PO {row['order_id']} - checking in on the revision "
+                f"({row['supplier_doc_ref'] or ''})",
+                f"<div style='font-family:Arial,sans-serif;font-size:14px;'>"
+                f"<p>Hello,</p><p>Just making sure you saw our revision request "
+                f"for <strong>PO {row['order_id']}</strong> "
+                f"(your document {row['supplier_doc_ref'] or ''}). "
+                f"Could you confirm it's being updated?</p>"
+                f"<p>Thank you,<br>Cabinets For Contractors<br>(770) 990-4885</p></div>",
+                triggered_by="revision_followup", cc=INTERNAL_ALERT_EMAIL)
+            if res.get("success"):
+                out["followups"] += 1
+                with get_db() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("""UPDATE supplier_orders SET followup_sent_at = NOW(),
+                                       updated_at = NOW() WHERE id = %s""", (row["id"],))
+                        conn.commit()
+        if bh >= NO_RESPONSE_ALERT_BH and not row["no_response_alerted_at"]:
+            res = _send_email(
+                row["order_id"], INTERNAL_ALERT_EMAIL,
+                f"ALERT!! NO RESPONSE FOR DISCREPANCIES ORDER #{row['order_id']}",
+                f"<div style='font-family:Arial,sans-serif;font-size:14px;'>"
+                f"<p><strong>{row['warehouse']}</strong> has not responded to the "
+                f"revision request for <strong>PO {row['order_id']}</strong> "
+                f"(doc {row['supplier_doc_ref'] or '?'}).</p>"
+                f"<p>Revision requested: {row['revision_requested_at']}<br>"
+                f"Follow-up sent: {row['followup_sent_at'] or 'no'}</p>"
+                f"<p>Time to pick up the phone: "
+                f"{(SUPPLIER_INFO.get(row['warehouse']) or {}).get('contact', '')}</p></div>",
+                triggered_by="revision_no_response")
+            if res.get("success"):
+                out["alerts"] += 1
+                with get_db() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("""UPDATE supplier_orders SET no_response_alerted_at = NOW(),
+                                       updated_at = NOW() WHERE id = %s""", (row["id"],))
+                        conn.commit()
+    return out
 
 
 # =============================================================================
@@ -419,7 +559,6 @@ def process_message(message_id: str, force: bool = False) -> Dict:
         return {"status": "error", "message": "could not fetch message"}
 
     results = []
-    # PDF attachments -> marker-based supplier detection
     from freight_routes import _detect_pdf_supplier
     for att in msg["attachments"]:
         sup = _detect_pdf_supplier(att["data"])
@@ -435,13 +574,11 @@ def process_message(message_id: str, force: bool = False) -> Dict:
 
     html = msg.get("html") or ""
 
-    # DuraStone NetSuite HTML body
     if html and "#SO" in html and "netsuite" in html.lower():
         try:
             import supplier_doc_parser as sdp
             sdp_parsed = sdp.parse_durastone_email(html)
             if sdp_parsed.get("so_number") and sdp_parsed.get("po"):
-                # feed the revision tripwire history too
                 with get_db() as conn:
                     try:
                         sdp.record_and_check_ds_email(conn, message_id, html)
@@ -452,7 +589,6 @@ def process_message(message_id: str, force: bool = False) -> Dict:
         except Exception as e:
             results.append({"supplier": "DuraStone", "error": str(e)})
 
-    # ROC confirmation / invoice HTML body
     if html:
         try:
             from roc_parser import looks_like_roc_confirmation, parse_roc_confirmation_html
@@ -471,7 +607,6 @@ def process_message(message_id: str, force: bool = False) -> Dict:
             processed.append(v)
             continue
         order_id = str(v["po"]).lstrip("0")
-        # PO like '5694A' -> strip trailing letters for the order key
         order_key = "".join(c for c in order_id if c.isdigit()) or order_id
         status = _apply_verdict(order_key, v["supplier"],
                                 bool(v["report"].get("ok")), v.get("doc_ref"),
@@ -514,7 +649,8 @@ def verify_pdf_from_doc(data: bytes, supplier: str) -> Dict:
 
 
 def scan_replies(hours_back: int = 24) -> Dict:
-    """Periodic Gmail scan (wired into gmail_sync + manual endpoint)."""
+    """Periodic Gmail scan (wired into gmail_sync + manual endpoint).
+    Also runs the discrepancy escalation clock."""
     from gmail_sync import gmail_configured, search_emails
 
     if not gmail_configured():
@@ -546,4 +682,8 @@ def scan_replies(hours_back: int = 24) -> Dict:
                     out["details"].append(res)
             except Exception as e:
                 out["errors"].append(f"{m.get('id')}: {e}")
+    try:
+        out["escalations"] = check_discrepancy_followups()
+    except Exception as e:
+        out["errors"].append(f"escalation clock: {e}")
     return out
