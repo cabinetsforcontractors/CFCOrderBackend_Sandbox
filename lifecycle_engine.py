@@ -107,6 +107,13 @@ def cancel_order_on_b2bwave(order_id: str) -> Dict:
     """
     Cancel an order on B2BWave via their API.
 
+    Uses the documented endpoint PATCH /api/orders/<id>/change_status with the
+    store's 'Canceled' status id (live store: 7, verified via GET
+    /api/status_orders on 2026-07-16; override with B2BWAVE_CANCELED_STATUS_ID).
+    Proven live on test order 5706 (Submitted -> Canceled, 2026-07-16).
+    The previous implementation PATCHed /api/v1/orders/<id> {"status":
+    "canceled"} — that endpoint does not exist in the B2BWave API.
+
     Returns dict with success status and details.
     """
     if os.environ.get("B2BWAVE_MUTATIONS_ENABLED", "true").lower() == "false":
@@ -116,16 +123,18 @@ def cancel_order_on_b2bwave(order_id: str) -> Dict:
         return {"success": False, "error": "B2BWave API not configured"}
 
     try:
-        url = f"{B2BWAVE_URL}/api/v1/orders/{order_id}"
+        canceled_status_id = int(os.environ.get("B2BWAVE_CANCELED_STATUS_ID", "7"))
+        url = f"{B2BWAVE_URL}/api/orders/{order_id}/change_status"
         headers = {
             "Content-Type": "application/json",
+            # Without Accept, B2BWave applies the mutation but responds 500/406
+            "Accept": "application/json",
         }
         auth = (B2BWAVE_USERNAME, B2BWAVE_API_KEY)
 
-        # Try PATCH to update order status to canceled
         response = requests.patch(
             url,
-            json={"status": "canceled"},
+            json={"status_order_id": canceled_status_id},
             headers=headers,
             auth=auth,
             timeout=30
