@@ -15,10 +15,17 @@ Channels (SUPPLIER_ORDER_CHANNELS_20260716.md + William rulings):
     LI              — forward-style order text (customer info ALLOWED)
     Cabinet & Stone — PO email body (Amy/Jennifer style)
     DuraStone       — PO email body
-    Love-Milestone  — PO email body (cart is down; email is current process)
+    Love-Milestone  — PO email body (their cart is back UP as of 2026-07-17
+                      with a SKU,QTY quick-order CSV — switch to portal CSV
+                      once William rules the LM store line codes)
   PORTAL-PREPARED (artifact emailed TO US for the ~2-min manual upload —
                    William ruling: no browser automation):
     ROC (quick-order CSV), DL, L&C Cabinetry, Linda, Go Bravura
+
+ROC QUICK-ORDER DIALECT (William's live portal test 2026-07-17 + confirmation
+#000040179): the CSV needs ROC's STORE-prefixed SKUs (SNW-TK8), not bare
+tokens (TK8). ROC_STORE_PREFIX maps our website line -> their store line;
+lines without a known store prefix are BLOCKED for review, never guessed.
 
 PRIVACY RULE (William 2026-07-16): supplier order correspondence carries NO
 customer information — EXCEPT LI and GHI. Everyone else gets PO number +
@@ -75,6 +82,13 @@ SUPPLIER_CHANNELS = {
                         "customer_info": False},
     "Go Bravura":      {"mode": "portal_prepared", "artifact": "po_email",
                         "customer_info": False},
+}
+
+# our website line prefix -> ROC store line prefix (their quick-order SKUs).
+# LNS -> SNW proven by William's portal upload test + confirmation #000040179
+# (2026-07-17). Add lines here as they're proven; unknown lines BLOCK.
+ROC_STORE_PREFIX = {
+    "LNS": "SNW",
 }
 
 
@@ -220,21 +234,42 @@ def build_po_email(order_id: str, warehouse: str, wdata: Dict,
             f"confirmation/estimate for verification.</p>"
             f"<p>Thank you,<br>Cabinets For Contractors<br>(770) 990-4885</p></div>")
     return {"html": html, "attachment": None,
-            "subject": f"PO {order_id} — Cabinets For Contractors"}
+            "subject": f"PO {order_id} - Cabinets For Contractors"}
 
 
 def build_roc_csv(order_id: str, wdata: Dict) -> Dict:
-    csv_text = "sku,qty\n" + "".join(
-        f"{i['supplier_sku']},{i['quantity']}\n" for i in wdata["items"])
+    """ROC quick-order CSV with THEIR store-prefixed SKUs (SNW-TK8 style —
+    proven by William's portal test 2026-07-17). Lines whose store prefix is
+    unknown block the warehouse for review rather than guessing."""
+    rows = []
+    unknown = []
+    for i in wdata["items"]:
+        token = (i["supplier_sku"] or "").strip()
+        our_prefix = (i["website_sku"] or "").split("-")[0].upper()
+        if "-" in token and token.split("-")[0].upper() in ROC_STORE_PREFIX.values():
+            store_sku = token  # map already carries a store-prefixed SKU
+        else:
+            store_prefix = ROC_STORE_PREFIX.get(our_prefix)
+            if not store_prefix:
+                unknown.append(i["website_sku"])
+                continue
+            store_sku = f"{store_prefix}-{token}"
+        rows.append(f"{store_sku},{i['quantity']}\n")
+    if unknown:
+        return {"error": (f"ROC store prefix unknown for line(s) of: "
+                          f"{', '.join(unknown[:10])} — add to ROC_STORE_PREFIX "
+                          f"after confirming on their portal")}
+    csv_text = "sku,qty\n" + "".join(rows)
     html = (f"<div style='font-family:Arial,sans-serif;font-size:14px;'>"
-            f"<p><strong>UPLOAD NEEDED — ROC quick-order CSV for PO {order_id}</strong></p>"
-            f"<p>Attached: the quick-order file ({len(wdata['items'])} lines). "
-            f"Upload at roccabinetry.com/quick-order, then mark this supplier "
-            f"order as sent.</p>{_lines_table_html(wdata['items'])}</div>")
+            f"<p><strong>UPLOAD NEEDED - ROC quick-order CSV for PO {order_id}</strong></p>"
+            f"<p>Attached: the quick-order file ({len(rows)} lines, store-prefixed "
+            f"SKUs). Upload at roccabinetry.com/quick-order, ENTER PO {order_id} "
+            f"in their PO/reference field, then mark this supplier order as sent.</p>"
+            f"{_lines_table_html(wdata['items'])}</div>")
     return {"html": html,
             "attachment": {"filename": f"ROC_order_{order_id}.csv",
                            "content": csv_text.encode(), "mime": "text/csv"},
-            "subject": f"UPLOAD NEEDED: ROC quick-order CSV — PO {order_id}"}
+            "subject": f"UPLOAD NEEDED: ROC quick-order CSV - PO {order_id}"}
 
 
 def build_ghi_xlsx(order_id: str, wdata: Dict) -> Dict:
@@ -268,7 +303,7 @@ def build_ghi_xlsx(order_id: str, wdata: Dict) -> Dict:
             "attachment": {"filename": f"CFC_PO_{order_id}_GHI.xlsx",
                            "content": xlsx,
                            "mime": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"},
-            "subject": f"PO {order_id} — Cabinets For Contractors order sheet"}
+            "subject": f"PO {order_id} - Cabinets For Contractors order sheet"}
 
 
 def build_forward_text(order_id: str, wdata: Dict) -> Dict:
@@ -440,7 +475,7 @@ def run_dispatch_on_payment(order_id: str, order_data: dict,
     except Exception as e:
         preview = {"status": "error", "message": str(e)}
     _send_email(order_id, INTERNAL_ALERT_EMAIL,
-                f"CONFIRM DISPATCH: order #{order_id} paid — supplier orders ready",
+                f"CONFIRM DISPATCH: order #{order_id} paid - supplier orders ready",
                 f"<p>Payment received for order <strong>#{order_id}</strong> "
                 f"(${payment_amount:,.2f}).</p>"
                 f"<p><strong>Not auto-dispatched:</strong> {reason}</p>"
