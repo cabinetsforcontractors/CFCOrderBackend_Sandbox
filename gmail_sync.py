@@ -475,6 +475,19 @@ def run_gmail_sync(db_conn, hours_back=2):
     except Exception as e:
         results["errors"].append(f"Lifecycle scan error: {e}")
     
+    # 6. DuraStone NetSuite SO revision tripwire (auto-ordering lane 2026-07-16)
+    # Same SO# re-sent = their mistake signal (SO112268: $3,405.50 -> $1,955.50
+    # 40 min apart, B21 qty 12 -> 2). Guarded: never breaks the main sync.
+    try:
+        from supplier_doc_parser import scan_durastone_emails
+        ds = scan_durastone_emails(db_conn, hours_back=max(hours_back, 24))
+        results["durastone_sos"] = ds.get("processed", 0)
+        results["durastone_revision_alerts"] = ds.get("alerts", 0)
+        for err in (ds.get("errors") or [])[:5]:
+            results["errors"].append(f"DuraStone scan: {err}")
+    except Exception as e:
+        results["errors"].append(f"DuraStone scan error: {e}")
+    
     print(f"[GMAIL] Sync complete: {results}")
     return results
 
