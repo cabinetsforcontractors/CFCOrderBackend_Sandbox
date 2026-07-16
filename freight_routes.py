@@ -26,6 +26,13 @@ POST /freight/scan-durastone [admin] — manual trigger for the DuraStone
 NetSuite revision tripwire (also runs inside gmail_sync). Same SO# re-sent =
 their mistake signal; alerts on dropped items/quantities.
 
+GET  /freight/supplier-sku-stats [admin] — per-supplier counts of rta_products
+rows with/without a supplier token (map-load coverage check).
+
+POST /freight/supplier-sku-load [admin] — UPDATE-ONLY supplier_sku loader
+(rows: [{product_sku, supplier_sku}]). Never touches the v43 freight columns —
+use this instead of /debug/rta-load for token-only reloads.
+
 GET  /freight/roc-csv/{order_id} [admin] — ROC quick-order CSV (sku,qty) for
 roccabinetry.com/quick-order upload. Refuses if any ROC line is untranslated.
 
@@ -35,9 +42,11 @@ GHI lines. Proven flow: order 5155 -> FTS tab, 13/14 lines, William approved.
 """
 
 import os
+from typing import List
 
 from fastapi import APIRouter, Depends, File, UploadFile
 from fastapi.responses import PlainTextResponse, Response
+from pydantic import BaseModel
 from psycopg2.extras import RealDictCursor
 
 from auth import require_admin
@@ -138,6 +147,61 @@ def get_supplier_sheet(order_id: str, _: bool = Depends(require_admin)):
         "warehouses": warehouses,
         "ready_to_send": ready,
     }
+
+
+# =============================================================================
+# SUPPLIER-SKU MAP MAINTENANCE (token-only — never touches freight columns)
+# =============================================================================
+
+class SupplierSkuRows(BaseModel):
+    rows: List[dict]
+
+
+@freight_router.get("/freight/supplier-sku-stats")
+def supplier_sku_stats(_: bool = Depends(require_admin)):
+    """Per-supplier counts of rta_products rows with/without supplier_sku."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT COALESCE(supplier, '(none)') AS s,
+                                  COUNT(*) FILTER (WHERE supplier_sku IS NOT NULL
+                                                     AND supplier_sku <> '') AS with_token,
+                                  COUNT(*) AS total
+                           FROM rta_products GROUP BY 1 ORDER BY 1""")
+            rows = cur.fetchall()
+    return {"status": "ok", "suppliers": [
+        {"supplier": r[0], "with_token": r[1], "total": r[2]} for r in rows]}
+
+
+@freight_router.post("/freight/supplier-sku-load")
+def supplier_sku_load(req: SupplierSkuRows, _: bool = Depends(require_admin)):
+    """
+    UPDATE-only supplier token loader [admin]: rows = [{product_sku,
+    supplier_sku}]. Unlike /debug/rta-load this can NOT null out the v43
+    freight columns — it only sets supplier_sku on existing rows. Products not
+    present in rta_products are reported back, never inserted.
+    """
+    if not req.rows:
+        return {"status": "error", "message": "rows list is empty"}
+    updated, missing = 0, []
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            for row in req.rows:
+                sku = (row.get("product_sku") or "").strip()
+                tok = (row.get("supplier_sku") or "").strip()
+                if not sku or not tok:
+                    continue
+                cur.execute(
+                    """UPDATE rta_products SET supplier_sku = %s, updated_at = NOW()
+                       WHERE product_sku = %s""",
+                    (tok, sku),
+                )
+                if cur.rowcount:
+                    updated += 1
+                else:
+                    missing.append(sku)
+        conn.commit()
+    return {"status": "ok", "updated": updated,
+            "missing_count": len(missing), "missing_sample": missing[:20]}
 
 
 # =============================================================================
