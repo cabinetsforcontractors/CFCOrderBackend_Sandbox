@@ -17,7 +17,8 @@ actually are):
     HTML body "#SO#####" + NetSuite markers -> DuraStone (also feeds the
         revision tripwire history via supplier_doc_parser).
     HTML body ROC markers ("Roc Cabinetry" + "SKU:") -> ROC confirmation /
-        invoice (roc_parser; carries our PO in "PO Number#").
+        invoice (roc_parser; carries our PO in "PO Number#"). A-* companion
+        lines (free trays/assembly) are excluded from the diff.
 
 Diff space matches the /freight/verify-order endpoint: GHI + DS in
 website-SKU space, LI/LM/C&S/ROC in body space.
@@ -190,18 +191,25 @@ def verify_ds_html(order_id: str, html: str) -> Dict:
 
 
 def verify_roc_html(order_id: str, html: str) -> Dict:
-    """ROC confirmation/invoice HTML -> body-space diff vs the sent ROC lines."""
+    """ROC confirmation/invoice HTML -> body-space diff vs the sent ROC lines.
+    A-* companion lines (free trays/assembly) are excluded from the diff and
+    reported under 'companions'."""
     import supplier_doc_parser as sdp
     from freight_routes import _order_lines_for_supplier
     from roc_parser import fold_roc_lines, parse_roc_confirmation_html
     from psycopg2.extras import RealDictCursor
 
     parsed = parse_roc_confirmation_html(html)
+    folded = fold_roc_lines(parsed["lines"])
+    companions = [f for f in folded if f.get("fee")]
     with get_db() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             sent = _order_lines_for_supplier(cur, order_id, (),
                                              ("ROC", "ROC Cabinetry"))
-        report = sdp.body_space_diff(sent, fold_roc_lines(parsed["lines"]))
+        report = sdp.body_space_diff(sent, [f for f in folded if not f.get("fee")])
+    if companions:
+        report["companions"] = [{"sku": c.get("raw") or c.get("body"),
+                                 "qty": c.get("qty")} for c in companions]
     return {"supplier": "ROC", "doc_ref": parsed.get("roc_order_number"),
             "po": parsed.get("po"), "report": report,
             "line_count": len(parsed.get("lines") or []), "sent_count": len(sent)}
