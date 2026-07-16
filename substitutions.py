@@ -14,11 +14,12 @@ Flow:
   4. Approve -> the line swap is applied to the website order via the B2BWave
      API with the substitute priced at the ORIGINAL line's price (customer
      total unchanged — CFC eats the difference), then William is alerted.
-     Decline -> customer's note recorded and PARSED FOR A SKU REQUEST
-     ("replace with a TF396 instead" resolves via the original line's prefix);
-     William's alert shows the recognized item + catalog price vs held price,
-     and POST /substitutions/{id}/counter-apply swaps to it in one click
-     (customer gets a confirmation email). Order untouched until then.
+  5. Decline with a note -> the note is parsed for a SKU request; the customer
+     is shown up to 3 fuzzy-matched IN-LINE options ("Did you mean...?") and
+     their pick auto-applies (they confirmed the exact SKU themselves = the
+     99.9% + sanity-check ruling) with a confirmation email + William FYI.
+     No match / "none of these" -> plain decline: note recorded, William
+     alerted (with recognition detail), order untouched.
 
 B2BWave API quirks (proven live 2026-07-16 on test orders 4860/5706):
   - Accept: application/json is REQUIRED — without it mutations APPLY but the
@@ -30,12 +31,13 @@ B2BWave API quirks (proven live 2026-07-16 on test orders 4860/5706):
     (has_custom_price=1) achieves the same customer total.
 """
 
+import difflib
 import json
 import os
 import re
 import secrets
 from datetime import datetime, timezone
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 import requests
 
@@ -135,7 +137,7 @@ def _order_products(order: Dict) -> list:
 
 
 # =============================================================================
-# DECLINE-NOTE SKU RECOGNITION
+# DECLINE-NOTE SKU RECOGNITION + FUZZY IN-LINE SUGGESTIONS
 # =============================================================================
 
 _SKU_TOKEN = re.compile(r"\b([A-Za-z]{1,6}(?:-[A-Za-z0-9./]+)*-?[A-Za-z]*\d[A-Za-z0-9./-]*)\b")
@@ -188,6 +190,60 @@ def resolve_note_sku(note: str, original_sku: str) -> Dict:
                              f"{prefix} — needs a human decision")
             return out
     out["detail"] = f"no catalog match for token(s): {', '.join(tokens[:5])}"
+    return out
+
+
+def suggest_in_line_alternatives(note: str, original_sku: str,
+                                 limit: int = 3) -> List[Dict]:
+    """Fuzzy 'did you mean' candidates WITHIN the customer's line, for the
+    decline page. Bodies come from rta_products (the SOT-derived catalog —
+    the practical canonical stand-in: TF396 vs WF396 score 0.8); each
+    candidate is verified live on B2BWave before being offered.
+    Exact matches score 1.0 and sort first."""
+    prefix = (original_sku or "").split("-")[0].upper()
+    if not prefix or not note:
+        return []
+    tokens = sorted({t.upper().strip("-.") for t in _SKU_TOKEN.findall(note)},
+                    key=len, reverse=True)
+    if not tokens:
+        return []
+
+    bodies = {}
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT product_sku FROM rta_products WHERE product_sku LIKE %s",
+                            (prefix + "-%",))
+                for (sku,) in cur.fetchall():
+                    body = sku.split("-", 1)[1].upper() if "-" in sku else sku.upper()
+                    bodies[body] = sku
+    except Exception as e:
+        print(f"[SUBS] suggestion body lookup failed: {e}")
+        return []
+    if not bodies:
+        return []
+
+    scored = {}
+    original_body = original_sku.split("-", 1)[1].upper() if "-" in original_sku else ""
+    for tok in tokens[:3]:
+        body_tok = tok.split("-", 1)[1] if tok.startswith(prefix + "-") else tok
+        for m in difflib.get_close_matches(body_tok, list(bodies), n=limit * 3, cutoff=0.55):
+            if m == original_body:
+                continue  # don't suggest the item that's out of stock
+            score = difflib.SequenceMatcher(None, body_tok, m).ratio()
+            sku = bodies[m]
+            if sku not in scored or scored[sku] < score:
+                scored[sku] = score
+
+    out = []
+    for sku, score in sorted(scored.items(), key=lambda x: -x[1]):
+        p = fetch_b2b_product(sku)  # must be live on the site to be offered
+        if p:
+            out.append({"sku": p.get("code"), "name": p.get("name") or "",
+                        "price": p.get("price"), "product_id": p.get("id"),
+                        "score": round(score, 3)})
+        if len(out) >= limit:
+            break
     return out
 
 
@@ -442,6 +498,71 @@ def record_response(token: str, approved: bool, note: str = "") -> Dict:
             "recognized": requested}
 
 
+def record_customer_choice(token: str, chosen_sku: str, note: str = "") -> Dict:
+    """Customer picked a specific in-line SKU from the 'did you mean' options.
+    They confirmed the exact item themselves -> auto-apply (guarded), send
+    them the confirmation email, and FYI William. Idempotent per token."""
+    sub = get_substitution(token)
+    if not sub:
+        return {"status": "error", "message": "unknown token"}
+    if sub["status"] != "pending":
+        return {"status": "already_responded", "substitution": _public_view(sub)}
+    product = fetch_b2b_product(chosen_sku)
+    if not product:
+        return {"status": "error", "message": f"{chosen_sku} not found on the site"}
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE order_substitutions
+                SET status = 'declined', customer_note = %s, responded_at = NOW(),
+                    requested_sku = %s, requested_name = %s,
+                    requested_price = %s,
+                    requested_detail = 'customer chose from suggestions'
+                WHERE token = %s AND status = 'pending'
+            """, ((note or "")[:2000], product.get("code"), product.get("name"),
+                  product.get("price"), token))
+            changed = cur.rowcount
+            cur.execute("""
+                INSERT INTO order_events (order_id, event_type, event_data, source)
+                VALUES (%s, 'substitution_response', %s, 'substitutions')
+            """, (sub["order_id"], json.dumps({
+                "substitution_id": sub["id"], "approved": False,
+                "customer_choice": product.get("code"), "note": (note or "")[:500],
+            })))
+            conn.commit()
+    if not changed:
+        return {"status": "already_responded", "substitution": _public_view(sub)}
+
+    fresh = get_substitution(token)
+    result = counter_apply(fresh)
+
+    verdict_lines = [
+        f"<p><strong>Substitution — customer CHOSE THEIR OWN replacement</strong> "
+        f"— Order #{sub['order_id']}</p>",
+        f"<p>Proposed {sub['original_sku']} &rarr; {sub['substitute_sku']}; customer "
+        f"picked <strong>{product.get('code')}</strong> from the suggestions instead "
+        f"(held at ${float(sub['keep_price'] or 0):,.2f}).</p>",
+        f"<p>Customer: {sub.get('customer_name')} &lt;{sub.get('customer_email')}&gt;</p>",
+    ]
+    if note:
+        verdict_lines.append(f"<p><strong>Their note:</strong> {note[:1000]}</p>")
+    if result.get("applied"):
+        verdict_lines.append("<p>Website order UPDATED automatically "
+                             "(verified by readback); customer confirmation sent.</p>")
+    else:
+        verdict_lines.append(f"<p style='color:#c00;'><strong>ACTION NEEDED:</strong> "
+                             f"not applied yet — {result.get('error', 'unknown')}. "
+                             f"Re-run POST /substitutions/{sub['id']}/counter-apply "
+                             f"once mutations are enabled.</p>")
+    _send_guarded_email(sub["order_id"], INTERNAL_ALERT_EMAIL,
+                        f"Substitution: customer chose {product.get('code')} "
+                        f"on order #{sub['order_id']}",
+                        "\n".join(verdict_lines),
+                        triggered_by="substitution_customer_choice")
+    return {"status": "ok", "chosen": product.get("code"), "apply_result": result}
+
+
 def apply_substitution(sub: Dict, substitute_sku: str = None,
                        applied_status: str = "applied",
                        pending_status: str = "approved_pending_apply") -> Dict:
@@ -514,8 +635,8 @@ def apply_substitution(sub: Dict, substitute_sku: str = None,
 
 
 def counter_apply(sub: Dict, sku_override: str = None) -> Dict:
-    """Swap to the CUSTOMER-REQUESTED item (from their decline note, or an
-    explicit admin override). On success the customer gets a confirmation
+    """Swap to the CUSTOMER-REQUESTED item (from their decline note/choice, or
+    an explicit admin override). On success the customer gets a confirmation
     email. Held at the original line price, same as any substitution.
     If the mutations guard blocks it the row STAYS 'declined' so this call
     can simply be repeated after the guard is lifted."""
