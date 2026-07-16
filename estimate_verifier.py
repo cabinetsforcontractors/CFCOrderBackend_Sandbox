@@ -10,6 +10,10 @@ against what we sent, and flips the supplier_orders state row:
     anything off      -> status 'discrepancy' + alert email to William
                          (human-readable tables, never raw JSON)
 
+ALERT THROTTLE: an identical discrepancy report (same order/supplier/hash)
+alerts AT MOST once per 6 hours, no matter how many times the verifier runs
+(periodic scan, manual force, retries). Rows still update every run.
+
 Document routing (content-marker based, NOT sender based — in the beta all
 test emails come from the safety inbox, and markers are what the documents
 actually are):
@@ -29,6 +33,7 @@ periodic scan is idempotent; the manual endpoint can force-reprocess.
 """
 
 import base64
+import hashlib
 import json
 import os
 from datetime import datetime, timezone
@@ -217,7 +222,7 @@ def verify_roc_html(order_id: str, html: str) -> Dict:
 
 
 # =============================================================================
-# DISCREPANCY ALERT (human-readable — never raw JSON)
+# DISCREPANCY ALERT (human-readable — never raw JSON; throttled)
 # =============================================================================
 
 _TD = "padding:4px 12px;border-bottom:1px solid #eee;"
@@ -307,9 +312,43 @@ def _discrepancy_email_html(order_id: str, supplier: str, doc_ref: str,
     return "".join(parts)
 
 
+def _alert_already_sent(order_id: str, supplier: str, report_hash: str) -> bool:
+    """Throttle: has this exact discrepancy already been alerted in the last
+    6 hours? (Prevents alert storms from repeated verifies.)"""
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT 1 FROM order_events
+                    WHERE order_id = %s
+                      AND event_type = 'discrepancy_alerted'
+                      AND event_data LIKE %s
+                      AND created_at > NOW() - interval '6 hours'
+                    LIMIT 1
+                """, (order_id, f'%{report_hash}%'))
+                return cur.fetchone() is not None
+    except Exception:
+        return False
+
+
+def _mark_alert_sent(order_id: str, supplier: str, report_hash: str):
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO order_events (order_id, event_type, event_data, source)
+                    VALUES (%s, 'discrepancy_alerted', %s, 'estimate_verifier')
+                """, (order_id, json.dumps({"supplier": supplier,
+                                            "hash": report_hash})))
+                conn.commit()
+    except Exception as e:
+        print(f"[VERIFY] failed to mark alert sent: {e}")
+
+
 def _apply_verdict(order_id: str, supplier: str, verdict_ok: bool,
                    doc_ref: str, report: Dict, message_id: str) -> str:
-    """Flip (or create) the supplier_orders row and alert on discrepancy."""
+    """Flip (or create) the supplier_orders row; alert on discrepancy —
+    at most once per identical report per 6 hours."""
     from supplier_orders import ensure_supplier_orders_table, _send_email
 
     status = "confirmed" if verdict_ok else "discrepancy"
@@ -349,10 +388,20 @@ def _apply_verdict(order_id: str, supplier: str, verdict_ok: bool,
             conn.commit()
 
     if not verdict_ok:
-        _send_email(order_id, INTERNAL_ALERT_EMAIL,
-                    f"DISCREPANCY: {supplier} doc for order #{order_id}",
-                    _discrepancy_email_html(order_id, supplier, doc_ref, report),
-                    triggered_by="estimate_verifier")
+        report_hash = hashlib.sha1(
+            json.dumps({"o": order_id, "s": supplier, "d": doc_ref, "r": report},
+                       sort_keys=True, default=str).encode()).hexdigest()[:16]
+        if _alert_already_sent(order_id, supplier, report_hash):
+            print(f"[VERIFY] alert throttled (already sent) order={order_id} "
+                  f"supplier={supplier} hash={report_hash}")
+        else:
+            result = _send_email(
+                order_id, INTERNAL_ALERT_EMAIL,
+                f"DISCREPANCY: {supplier} doc for order #{order_id}",
+                _discrepancy_email_html(order_id, supplier, doc_ref, report),
+                triggered_by="estimate_verifier")
+            if result.get("success"):
+                _mark_alert_sent(order_id, supplier, report_hash)
     return status
 
 
