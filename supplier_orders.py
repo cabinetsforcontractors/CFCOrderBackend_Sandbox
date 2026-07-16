@@ -26,6 +26,10 @@ ROC QUICK-ORDER DIALECT (William's live portal test 2026-07-17 + confirmation
 #000040179): the CSV needs ROC's STORE-prefixed SKUs (SNW-TK8), not bare
 tokens (TK8). ROC_STORE_PREFIX maps our website line -> their store line;
 lines without a known store prefix are BLOCKED for review, never guessed.
+COMPANION RULE (William 2026-07-17): easy-reach bases need the free
+lazy-susan tray A-BER-B (same SKU for 33"/36", any color) — auto-added.
+FINAL SANITY CHECK: CSV unit total must equal the website order's unit total
+for the warehouse (companions counted separately) or the warehouse blocks.
 
 PRIVACY RULE (William 2026-07-16): supplier order correspondence carries NO
 customer information — EXCEPT LI and GHI. Everyone else gets PO number +
@@ -44,6 +48,7 @@ in the beta everything redirects to the test inbox.
 import base64
 import json
 import os
+import re
 from datetime import datetime, timezone
 from email import encoders
 from email.mime.base import MIMEBase
@@ -90,6 +95,12 @@ SUPPLIER_CHANNELS = {
 ROC_STORE_PREFIX = {
     "LNS": "SNW",
 }
+
+# Easy-reach bases need the free lazy-susan TRAYS on ROC orders (William
+# 2026-07-17): tray SKU A-BER-B, $0 (baked into the lazy susan price), same
+# SKU for 33" and 36", fits any color. Auto-added at the base's quantity.
+ROC_TRAY_SKU = "A-BER-B"
+_ROC_EASY_REACH = re.compile(r"^B?ER(33|36)$")
 
 
 # =============================================================================
@@ -219,6 +230,7 @@ def build_po_email(order_id: str, warehouse: str, wdata: Dict,
     """Sanitized PO email body. Customer info only when the channel allows it
     (LI/GHI); everyone else gets PO + supplier SKUs + quantities only."""
     items = wdata["items"]
+    total_units = sum(int(i.get("quantity") or 0) for i in items)
     header = ""
     if include_customer:
         o = _order_header(order_id)
@@ -230,20 +242,27 @@ def build_po_email(order_id: str, warehouse: str, wdata: Dict,
             f"<p>Hello,</p><p>Please process our purchase order "
             f"<strong>PO {order_id}</strong>:</p>{header}"
             f"{_lines_table_html(items)}"
-            f"<p>{len(items)} lines. Please reply with your order "
-            f"confirmation/estimate for verification.</p>"
+            f"<p>{len(items)} lines, {total_units} total units. Please reply "
+            f"with your order confirmation/estimate for verification.</p>"
             f"<p>Thank you,<br>Cabinets For Contractors<br>(770) 990-4885</p></div>")
-    return {"html": html, "attachment": None,
+    return {"html": html, "attachment": None, "units": total_units,
             "subject": f"PO {order_id} - Cabinets For Contractors"}
 
 
 def build_roc_csv(order_id: str, wdata: Dict) -> Dict:
     """ROC quick-order CSV with THEIR store-prefixed SKUs (SNW-TK8 style —
-    proven by William's portal test 2026-07-17). Lines whose store prefix is
-    unknown block the warehouse for review rather than guessing."""
+    proven by William's portal test 2026-07-17). Easy-reach bases auto-add
+    the free lazy-susan tray A-BER-B. FINAL SANITY CHECK (William): the CSV
+    unit total must equal the website order's unit total for this warehouse
+    (trays counted separately as companions) — mismatch blocks the send."""
     rows = []
     unknown = []
+    order_units = 0
+    csv_units = 0
+    tray_qty = 0
     for i in wdata["items"]:
+        qty = int(float(i.get("quantity") or 0))
+        order_units += qty
         token = (i["supplier_sku"] or "").strip()
         our_prefix = (i["website_sku"] or "").split("-")[0].upper()
         if "-" in token and token.split("-")[0].upper() in ROC_STORE_PREFIX.values():
@@ -254,19 +273,33 @@ def build_roc_csv(order_id: str, wdata: Dict) -> Dict:
                 unknown.append(i["website_sku"])
                 continue
             store_sku = f"{store_prefix}-{token}"
-        rows.append(f"{store_sku},{i['quantity']}\n")
+        rows.append(f"{store_sku},{qty}\n")
+        csv_units += qty
+        # companion rule: easy-reach base -> free lazy-susan trays
+        if _ROC_EASY_REACH.match(token.upper()):
+            tray_qty += qty
     if unknown:
         return {"error": (f"ROC store prefix unknown for line(s) of: "
                           f"{', '.join(unknown[:10])} — add to ROC_STORE_PREFIX "
                           f"after confirming on their portal")}
+    if csv_units != order_units:
+        return {"error": (f"QUANTITY PARITY FAILED: website order has "
+                          f"{order_units} units for ROC but the CSV built "
+                          f"{csv_units} — refusing to send")}
+    if tray_qty:
+        rows.append(f"{ROC_TRAY_SKU},{tray_qty}\n")
     csv_text = "sku,qty\n" + "".join(rows)
+    tray_note = (f" Plus {tray_qty} x {ROC_TRAY_SKU} free lazy-susan trays "
+                 f"auto-added (easy-reach rule)." if tray_qty else "")
     html = (f"<div style='font-family:Arial,sans-serif;font-size:14px;'>"
             f"<p><strong>UPLOAD NEEDED - ROC quick-order CSV for PO {order_id}</strong></p>"
-            f"<p>Attached: the quick-order file ({len(rows)} lines, store-prefixed "
-            f"SKUs). Upload at roccabinetry.com/quick-order, ENTER PO {order_id} "
-            f"in their PO/reference field, then mark this supplier order as sent.</p>"
+            f"<p><strong>Quantity check:</strong> website order units = {order_units}, "
+            f"CSV units = {csv_units} &#10003;{tray_note}</p>"
+            f"<p>Attached: the quick-order file. Upload at "
+            f"roccabinetry.com/quick-order, ENTER PO {order_id} in their "
+            f"PO/reference field, then mark this supplier order as sent.</p>"
             f"{_lines_table_html(wdata['items'])}</div>")
-    return {"html": html,
+    return {"html": html, "units": order_units, "companions": tray_qty,
             "attachment": {"filename": f"ROC_order_{order_id}.csv",
                            "content": csv_text.encode(), "mime": "text/csv"},
             "subject": f"UPLOAD NEEDED: ROC quick-order CSV - PO {order_id}"}
@@ -373,6 +406,10 @@ def dispatch_order(order_id: str, auto_send: bool = True,
 
         wres["subject"] = art["subject"]
         wres["attachment"] = (art.get("attachment") or {}).get("filename")
+        if art.get("units") is not None:
+            wres["units"] = art["units"]
+        if art.get("companions"):
+            wres["companions"] = art["companions"]
 
         if dry_run:
             wres["status"] = "dry_run"
