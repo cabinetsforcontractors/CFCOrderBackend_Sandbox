@@ -13,6 +13,9 @@ Decoded formats (SUPPLIER_ORDER_CHANNELS_20260716.md is THE spec):
               Quantity|Item|Rate|Amount, no PDF). NW- = Natural Wood = our NSN.
               REVISION EMAILS (same SO# re-sent) = their mistake signal:
               SO112268 went $3,405.50 -> $1,955.50 in 40 min (B21 12 -> 2).
+  LM / C&S / LI — split cabinets into universal-box + line-front pairs; parsed
+              and folded back to cabinet bodies, diffed in body space
+              (line-code -> our-prefix maps still pending William).
 
 Accuracy bar: 99.5% send + receive. Lines this module cannot resolve are
 returned as unresolved — they need a human, never silently dropped.
@@ -662,3 +665,351 @@ def scan_durastone_emails(conn, hours_back=48):
         except Exception as e:
             out["errors"].append(f"{msg.get('id')}: {e}")
     return out
+
+
+# =============================================================================
+# BODY-SPACE VERIFICATION (LM / C&S / LI)
+# LI, LM, C&S split cabinets into universal-box + line-front combos, and their
+# line-code -> our-prefix maps are still pending William. Verification folds
+# their components back to BODY tokens (B18, W2430...) and diffs those against
+# the sent order's bodies + forward-map dialect tokens. Exact website-SKU
+# resolution stays flagged until the line codes are ruled.
+# =============================================================================
+
+def _body_candidates(sku, supplier_sku=None):
+    """Comparable body tokens for a sent order line: website body + the SOT
+    forward-map dialect token (e.g. GSP-30-VANITYCOMBO-DL -> VSD3021L)."""
+    out = set()
+    sku = norm(sku)
+    if "-" in sku:
+        out.add(norm_alnum(sku.split("-", 1)[1]))
+    out.add(norm_alnum(sku))
+    if supplier_sku:
+        for c in _token_candidates(supplier_sku):
+            out.add(norm_alnum(c))
+    return {c for c in out if c}
+
+
+def body_space_diff(sent_lines, folded):
+    """Diff folded supplier bodies vs sent lines in body space.
+
+    sent_lines: [{'website_sku','quantity','supplier_sku'(optional)}]
+    folded:     [{'body' or 'bodies' (shared alternates), 'qty', flags...}]
+    """
+    flags, unresolved = [], []
+    sent = []  # (candidates, qty, sku)
+    for ln in sent_lines:
+        cands = _body_candidates(ln.get("website_sku"), ln.get("supplier_sku"))
+        sent.append({"cands": cands, "qty": int(ln.get("quantity") or 1),
+                     "sku": ln.get("website_sku"), "matched_qty": 0})
+    recv = []
+    for f in folded:
+        bodies = f.get("bodies") or ([f["body"]] if f.get("body") else [])
+        bodies = {norm_alnum(b) for b in bodies if b}
+        if not bodies:
+            unresolved.append(f)
+            continue
+        recv.append({"bodies": bodies, "qty": int(f.get("qty") or 0),
+                     "raw": f.get("raw") or f.get("body"), "matched_qty": 0})
+        for fl in f.get("flags") or []:
+            flags.append(f"{'/'.join(sorted(bodies))}: {fl}")
+    # greedy body matching (shared alternates match any member)
+    for r in recv:
+        need = r["qty"]
+        for s in sent:
+            if need <= 0:
+                break
+            if s["cands"] & r["bodies"]:
+                take = min(need, s["qty"] - s["matched_qty"])
+                if take > 0:
+                    s["matched_qty"] += take
+                    r["matched_qty"] += take
+                    need -= take
+    missing = [{"sku": s["sku"], "sent_qty": s["qty"],
+                "unconfirmed_qty": s["qty"] - s["matched_qty"]}
+               for s in sent if s["matched_qty"] < s["qty"]]
+    unexpected = [{"body": "/".join(sorted(r["bodies"])), "supplier_qty": r["qty"],
+                   "unmatched_qty": r["qty"] - r["matched_qty"]}
+                  for r in recv if r["matched_qty"] < r["qty"]]
+    return {
+        "ok": not (missing or unexpected or unresolved or flags),
+        "mode": "body_space",
+        "matched_qty": sum(s["matched_qty"] for s in sent),
+        "missing_at_supplier": missing,
+        "unexpected_from_supplier": unexpected,
+        "unresolved_supplier_lines": unresolved,
+        "flags": flags,
+        "sent_line_total": sum(s["qty"] for s in sent),
+        "supplier_line_total": sum(r["qty"] for r in recv),
+    }
+
+
+# =============================================================================
+# LOVE-MILESTONE — NetSuite QUOFL quote PDF (UBX- box + SB-DS- door split)
+# =============================================================================
+
+_LM_MEMOS = ("VERY LOW STOCK", "DROP SHIP", "LOW STOCK", "OUT OF STOCK")
+_LM_TOKEN_PIECE = re.compile(r"^[A-Z0-9/().'\"-]+$")
+_LM_FEES = ("PALLETS-L", "PALLETS-S", "SHIPPING")
+
+
+def parse_lm_quote_pdf(data):
+    """Milestone QUOFL#####.pdf -> lines. Item tokens wrap across lines
+    ("SB- DS-3DB12/3VD\nB12"); pieces are concatenated until Ea/qty appears."""
+    from pypdf import PdfReader
+
+    txt = "\n".join(p.extract_text() or "" for p in PdfReader(io.BytesIO(data)).pages)
+    quote = re.search(r"Document\s*#\s*:\s*(QUO[A-Z]*\d+)", txt)
+    po = re.search(r"PO\s*:\s*(?:PO\s*)?(\d{3,6}[A-Z]?)", txt)
+    lines = []
+    for m in re.finditer(
+            r"\n((?:UBX|SB|Pallets|Shipping)[\s\S]*?)\$([\d,]+\.\d{2})\s*\$([\d,]+\.\d{2})",
+            txt):
+        chunk = m.group(1)
+        price, amount = _money(m.group(2)), _money(m.group(3))
+        pieces = chunk.split()
+        token_parts, qty, i = [], None, 0
+        while i < len(pieces):
+            p = pieces[i]
+            if p == "Ea":
+                i += 1
+                continue
+            if re.fullmatch(r"\d{1,4}", p):
+                qty = int(p)
+                break
+            if token_parts and not _LM_TOKEN_PIECE.match(p):
+                break
+            token_parts.append(p)
+            i += 1
+        token = "".join(token_parts)
+        if not token or qty is None:
+            continue
+        memo = [k for k in _LM_MEMOS if k in chunk.upper()]
+        is_fee = any(token.upper().startswith(f) for f in _LM_FEES)
+        lines.append({
+            "item": token, "qty": qty, "price": price, "amount": amount,
+            "memo": " / ".join(dict.fromkeys(memo)) if memo else "",
+            "is_fee": is_fee,
+            "math_ok": (price is not None and amount is not None
+                        and abs(amount - price * qty) < 0.02),
+        })
+    return {"supplier": "Love-Milestone",
+            "quote_number": quote.group(1) if quote else None,
+            "po": po.group(1) if po else None, "lines": lines}
+
+
+def fold_lm_lines(lines):
+    """Fold UBX-{body} boxes + SB-DS-{body} door sets into cabinet bodies;
+    shared door sets ("SB-DS-SB30/VS30") carry alternate bodies. Flags any
+    box/door count imbalance — William: verify BOTH components per cabinet."""
+    boxes, doors, folded = {}, {}, []
+    for ln in lines:
+        if ln.get("is_fee"):
+            folded.append({"body": ln["item"], "qty": ln["qty"], "raw": ln["item"],
+                           "flags": ["FEE LINE"], "fee": True})
+            continue
+        t = norm(ln["item"])
+        flags = []
+        if ln.get("memo"):
+            flags.append(ln["memo"])
+        if ln.get("math_ok") is False:
+            flags.append(f"PRICE MATH {ln['item']}")
+        if t.startswith("UBX-"):
+            body = t[4:]
+            boxes[body] = boxes.get(body, 0) + ln["qty"]
+            if flags:
+                folded.append({"bodies": body.split("/"), "qty": 0,
+                               "raw": ln["item"], "flags": flags})
+        elif t.startswith("SB-DS-") or re.match(r"^[A-Z]{2,4}-DS-", t):
+            body = t.split("-DS-", 1)[1]
+            doors[body] = doors.get(body, 0) + ln["qty"]
+            if flags:
+                folded.append({"bodies": body.split("/"), "qty": 0,
+                               "raw": ln["item"], "flags": flags})
+        else:
+            # standalone accessory/panel (SB-ACM8, SB-FPV4296...) = complete item
+            body = t.split("-", 1)[1] if "-" in t else t
+            folded.append({"bodies": body.split("/"), "qty": ln["qty"],
+                           "raw": ln["item"], "flags": flags})
+    # reconcile boxes vs door sets — BOTH sides can carry shared alternates
+    # (UBX-SB36/FSB36 box satisfies SB-DS-SB36/VS36 via the SB36 member)
+    box_pool = [{"members": set(b.split("/")), "left": q, "key": b}
+                for b, q in boxes.items()]
+    boxes_only = bool(boxes) and not doors
+    for dbody, dqty in doors.items():
+        members = set(dbody.split("/"))
+        pool = [bx for bx in box_pool if bx["members"] & members]
+        available = sum(bx["left"] for bx in pool)
+        use = min(available, dqty)
+        folded.append({"bodies": sorted(members), "qty": dqty,
+                       "raw": f"UBX+DS {dbody}",
+                       "flags": ([] if available == dqty else
+                                 [f"BOX/DOOR MISMATCH {dbody}: {available} boxes vs {dqty} door sets"])})
+        for bx in pool:
+            take = min(bx["left"], use)
+            bx["left"] -= take
+            use -= take
+    for bx in box_pool:
+        if bx["left"] <= 0:
+            continue
+        flags = [] if boxes_only else [f"BOX WITHOUT DOOR SET x{bx['left']}"]
+        folded.append({"bodies": sorted(bx["members"]), "qty": bx["left"],
+                       "raw": f"UBX-{bx['key']}", "flags": flags})
+    if boxes_only:
+        folded.append({"bodies": ["QUOTE-NOTE"], "qty": 0, "raw": "quote summary",
+                       "flags": ["QUOTE HAS BOXES ONLY — no door sets on this quote"]})
+    return folded
+
+
+# =============================================================================
+# CABINET & STONE — Odoo Quotation PDF (Combo groups + bracket substitutions)
+# =============================================================================
+
+_CS_COMBO = re.compile(r"\n([A-Z0-9/.\-]+)-Combo\s*\n")
+_CS_COMPONENT = re.compile(
+    r"\n(Houston|Dallas|CA)\s*\n(\d+\.\d{2})\s*\n(.+?)\n([\s\S]{0,220}?)"
+    r"([\d,]+\.\d{2})\s*\n(\d{1,2}\.\d{2})\s*\n([\d,.]+)")
+
+
+def parse_cs_quotation_pdf(data):
+    """C&S-Houston Quotation (Ref S#####) PDF -> component lines with combo
+    membership and bracketed substitutions ("[requested] supplied")."""
+    from pypdf import PdfReader
+
+    txt = "\n".join(p.extract_text() or "" for p in PdfReader(io.BytesIO(data)).pages)
+    ref = re.search(r"Quotation\s*#\s*\n?\s*(S\d{4,8})", txt)
+    po = re.search(r"PO\s*:\s*\n?\s*(\d{3,6}[A-Z]?)", txt)
+    combos = [(m.start(), m.group(1)) for m in _CS_COMBO.finditer(txt)]
+    lines = []
+    for m in _CS_COMPONENT.finditer(txt):
+        raw_item = m.group(3).strip()
+        requested = None
+        bm = re.match(r"\[([^\]]+)\]\s*(.+)$", raw_item)
+        if bm:
+            requested, raw_item = bm.group(1).strip(), bm.group(2).strip()
+        combo = None
+        for pos, name in combos:
+            if pos < m.start():
+                combo = name
+            else:
+                break
+        # only components that belong to the latest combo header keep it
+        if combo and not (norm_alnum(combo.split("-")[-1]) in norm_alnum(raw_item)
+                          or raw_item.upper().startswith("REGULAR")):
+            combo = None
+        lines.append({
+            "item": raw_item, "qty": int(float(m.group(2))),
+            "desc": m.group(4).strip()[:120],
+            "price": _money(m.group(5)), "disc": _money(m.group(6)),
+            "amount": _money(m.group(7)),
+            "combo": combo, "substituted_for": requested,
+        })
+    return {"supplier": "Cabinet & Stone",
+            "quote_number": ref.group(1) if ref else None,
+            "po": po.group(1) if po else None, "lines": lines}
+
+
+def fold_cs_lines(lines):
+    """Fold Combo groups (NB-{b}-Box + [Regular w/Shelf] + {line}-{b}-Door) to
+    one body per cabinet; verify BOTH components present (William 2026-07-16).
+    Standalone items pass through as their own body."""
+    combos, folded = {}, []
+    for ln in lines:
+        t = norm(ln["item"])
+        flags = []
+        if ln.get("substituted_for"):
+            flags.append(f"SUBSTITUTION {ln['substituted_for']} -> {ln['item']}")
+        m = re.match(r"^([A-Z0-9]+)-([A-Z0-9/.]+)-(BOX|DOOR)$", t)
+        if m:
+            body = m.group(2)
+            slot = m.group(3)
+            c = combos.setdefault(body, {"BOX": 0, "DOOR": 0, "flags": []})
+            c[slot] += ln["qty"]
+            c["flags"].extend(flags)
+        elif t.startswith("REGULAR"):
+            continue  # $0 shelf-config line inside a combo
+        else:
+            body = t.split("-", 1)[1] if "-" in t else t
+            folded.append({"bodies": body.split("/"), "qty": ln["qty"],
+                           "raw": ln["item"], "flags": flags})
+    for body, c in combos.items():
+        flags = list(dict.fromkeys(c["flags"]))
+        if c["BOX"] != c["DOOR"]:
+            flags.append(f"BOX/DOOR MISMATCH {body}: {c['BOX']} boxes vs {c['DOOR']} doors")
+        folded.append({"bodies": body.split("/"), "qty": max(c["BOX"], c["DOOR"]),
+                       "raw": f"Combo {body}", "flags": flags})
+    return folded
+
+
+# =============================================================================
+# LI (Cabinetry Distribution) — QuickBooks Estimate/Invoice PDF
+# =============================================================================
+
+_LI_LINE = re.compile(
+    r"^(\d{1,4})\s+([A-Z0-9][A-Z0-9/().'\"-]*(?:-[A-Z0-9/().'\"]+)*)"
+    r"(?:\s+(PC\d{3,6}))?\s+([\d,]+\.\d{2})\s+([\d,]+\.\d{2})T?\s*$",
+    re.MULTILINE)
+
+
+def parse_li_estimate_pdf(data):
+    """LI QuickBooks Estimate/Invoice PDF -> lines. ACTIVITY = their SKU
+    (SJ-{body}-DF door/face + {body}-BOX); composite talls = UT#####-BOX/DF
+    pairs with our PC-code in the DESCRIPTION column."""
+    from pypdf import PdfReader
+
+    txt = "\n".join(p.extract_text() or "" for p in PdfReader(io.BytesIO(data)).pages)
+    est = re.search(r"(?:ESTIMATE|INVOICE)\s*#?\s*(\d{3,6})", txt)
+    po = re.search(r"PO\s*\n?\s*(\d{3,6}[A-Z]?)", txt)
+    total = re.search(r"TOTAL\s*\$([\d,]+\.\d{2})", txt)
+    discount = re.search(r"DISCOUNT\s*(\d{1,2})%", txt)
+    lines = []
+    for m in _LI_LINE.finditer(txt):
+        lines.append({
+            "item": m.group(2), "qty": int(m.group(1)),
+            "pc_code": m.group(3) or "",
+            "price": _money(m.group(4)), "amount": _money(m.group(5)),
+        })
+    return {"supplier": "LI",
+            "estimate_number": est.group(1) if est else None,
+            "po": po.group(1) if po else None,
+            "total": _money(total.group(1)) if total else None,
+            "discount_pct": int(discount.group(1)) if discount else None,
+            "lines": lines}
+
+
+def fold_li_lines(lines):
+    """Fold {line}-{body}-DF + {body}-BOX pairs into bodies; UT component
+    pairs with a PC code fold into that PC body (our composite SKU)."""
+    dfs, boxes, pc_groups, folded = {}, {}, {}, []
+    for ln in lines:
+        t = norm(ln["item"])
+        if ln.get("pc_code"):
+            g = pc_groups.setdefault(norm(ln["pc_code"]), {"qtys": [], "items": []})
+            g["qtys"].append(ln["qty"])
+            g["items"].append(ln["item"])
+            continue
+        if t.endswith("-BOX"):
+            body = t[:-4]
+            boxes[body] = boxes.get(body, 0) + ln["qty"]
+        elif t.endswith("-DF"):
+            body = t[:-3].split("-", 1)[1] if "-" in t[:-3] else t[:-3]
+            dfs[body] = dfs.get(body, 0) + ln["qty"]
+        else:
+            body = t.split("-", 1)[1] if "-" in t else t
+            folded.append({"bodies": [body], "qty": ln["qty"], "raw": ln["item"],
+                           "flags": []})
+    for body in sorted(set(dfs) | set(boxes)):
+        d, b = dfs.get(body, 0), boxes.get(body, 0)
+        flags = []
+        if d != b:
+            flags.append(f"DF/BOX MISMATCH {body}: {d} door-faces vs {b} boxes")
+        folded.append({"bodies": [body], "qty": max(d, b),
+                       "raw": f"DF+BOX {body}", "flags": flags})
+    for pc, g in pc_groups.items():
+        qty = min(g["qtys"]) if g["qtys"] else 0
+        flags = []
+        if len(set(g["qtys"])) > 1:
+            flags.append(f"PC COMPONENT QTY MISMATCH {pc}: {g['items']} {g['qtys']}")
+        folded.append({"bodies": [pc], "qty": qty, "raw": f"composite {pc}",
+                       "flags": flags})
+    return folded
