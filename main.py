@@ -13,6 +13,7 @@ Module Map:
   bol_routes.py            — /bol/{shipment_id}/create  /bol/{shipment_id}/status
   supplier_routes.py       — /supplier/{token}/* (public) + /supplier/{id}/send-poll [admin]
   invoice_routes.py        — /invoice/scan /invoice/status /invoice/emails /invoice/flags
+  substitution_routes.py   — /substitutions/* [admin] + /substitution/{token} (public)
   routes/audit.py          — /audit/log (POST write, GET read)
   auth.py                  — require_admin Depends() — X-Admin-Token or Bearer JWT
   rate_limit.py            — shared slowapi Limiter instance
@@ -97,6 +98,13 @@ except ImportError:
     print("[STARTUP] invoice_routes module not found, Invoice Intelligence disabled")
 
 try:
+    from substitution_routes import substitution_router
+    SUBSTITUTIONS_LOADED = True
+except ImportError:
+    SUBSTITUTIONS_LOADED = False
+    print("[STARTUP] substitution_routes module not found, substitution flow disabled")
+
+try:
     from routes.audit import audit_router
     AUDIT_LOADED = True
 except ImportError:
@@ -158,6 +166,9 @@ app.include_router(supplier_router)           # Phase 9:  /supplier/{token}/* + 
 
 if INVOICE_LOADED:
     app.include_router(invoice_router)        # WS17: /invoice/scan /status /emails /flags
+
+if SUBSTITUTIONS_LOADED:
+    app.include_router(substitution_router)   # Auto-ordering: /substitutions/* + /substitution/{token}
 
 if AUDIT_LOADED:
     app.include_router(audit_router)          # Phase 5: /audit/log
@@ -249,6 +260,7 @@ def root():
         "email_engine": {"enabled": WIRING_STATUS.get("email", False)},
         "ai_configure": {"enabled": WIRING_STATUS.get("ai_configure", False)},
         "invoice_intel": {"enabled": INVOICE_LOADED},
+        "substitution_flow": {"enabled": SUBSTITUTIONS_LOADED},
         "audit_log": {"enabled": AUDIT_LOADED},
         "rate_limiting": {"enabled": True, "default_limit": "200/minute"},
         "bol_generation": {"enabled": True},
