@@ -8,6 +8,7 @@ against what we sent, and flips the supplier_orders state row:
 
     clean diff        -> status 'confirmed' (quiet — shows in the digest)
     anything off      -> status 'discrepancy' + alert email to William
+                         (human-readable tables, never raw JSON)
 
 Document routing (content-marker based, NOT sender based — in the beta all
 test emails come from the safety inbox, and markers are what the documents
@@ -215,6 +216,97 @@ def verify_roc_html(order_id: str, html: str) -> Dict:
             "line_count": len(parsed.get("lines") or []), "sent_count": len(sent)}
 
 
+# =============================================================================
+# DISCREPANCY ALERT (human-readable — never raw JSON)
+# =============================================================================
+
+_TD = "padding:4px 12px;border-bottom:1px solid #eee;"
+_TH = "padding:4px 12px;background:#f2f2f2;text-align:left;"
+
+
+def _tbl(rows, headers) -> str:
+    th = "".join(f"<th style='{_TH}'>{h}</th>" for h in headers)
+    trs = "".join(
+        "<tr>" + "".join(f"<td style='{_TD}'>{c}</td>" for c in row) + "</tr>"
+        for row in rows)
+    return (f"<table style='border-collapse:collapse;font-size:14px;"
+            f"margin:4px 0 14px 0;'><tr>{th}</tr>{trs}</table>")
+
+
+def _clean_sku(entry) -> str:
+    """Display label: unexpected body labels like 'SNWVSD42/VSD42' -> 'VSD42'."""
+    s = str(entry.get("sku") or entry.get("body") or "?")
+    if "/" in s:
+        s = min(s.split("/"), key=len)
+    return s
+
+
+def _more(vals, cap=10) -> str:
+    return (f"<p style='color:#888;margin:-8px 0 12px 0;'>"
+            f"...and {len(vals) - cap} more</p>" if len(vals) > cap else "")
+
+
+def _discrepancy_email_html(order_id: str, supplier: str, doc_ref: str,
+                            r: Dict) -> str:
+    parts = [
+        f"<div style='font-family:Arial,sans-serif;font-size:14px;max-width:640px;'>",
+        f"<h2 style='margin:0 0 2px 0;'>Discrepancy &mdash; Order #{order_id}</h2>",
+        f"<p style='margin:0 0 14px 0;color:#666;'>{supplier} &middot; "
+        f"document {doc_ref or '?'}</p>",
+    ]
+    qm = r.get("qty_mismatch") or []
+    if qm:
+        parts.append("<p style='margin:0;'><strong>Quantity mismatches</strong></p>")
+        parts.append(_tbl([(e.get("sku"), e.get("sent_qty"), e.get("supplier_qty"))
+                           for e in qm[:10]], ("SKU", "We sent", "They confirm")))
+        parts.append(_more(qm))
+    ms = r.get("missing_at_supplier") or []
+    if ms:
+        parts.append("<p style='margin:0;'><strong>We sent &mdash; they didn't confirm</strong></p>")
+        parts.append(_tbl([(e.get("sku"), e.get("sent_qty")) for e in ms[:10]],
+                          ("SKU", "Qty")))
+        parts.append(_more(ms))
+    ux = r.get("unexpected_from_supplier") or []
+    if ux:
+        parts.append("<p style='margin:0;'><strong>They list &mdash; we didn't send</strong></p>")
+        parts.append(_tbl([(_clean_sku(e), e.get("supplier_qty")) for e in ux[:10]],
+                          ("Their SKU", "Qty")))
+        parts.append(_more(ux))
+    subs = r.get("possible_substitutions") or []
+    if subs:
+        parts.append("<p style='margin:0;'><strong>Probable dialect pairs "
+                     "(matching quantities &mdash; likely the same item)</strong></p>")
+        parts.append(_tbl([(e.get("sent_sku"), e.get("supplier_sku"), e.get("sent_qty"))
+                           for e in subs[:10]], ("We sent", "They used", "Qty")))
+        parts.append(_more(subs))
+    unres = r.get("unresolved_supplier_lines") or []
+    if unres:
+        parts.append("<p style='margin:0;'><strong>Document lines we couldn't resolve</strong></p>")
+        parts.append(_tbl([((e.get("item") or e.get("desc") or "?"), e.get("qty"),
+                            (e.get("note") or "")[:70]) for e in unres[:10]],
+                          ("Line", "Qty", "Note")))
+        parts.append(_more(unres))
+    comp = r.get("companions") or []
+    if comp:
+        parts.append("<p style='margin:0;'><strong>Companion lines "
+                     "(free trays/assembly &mdash; informational)</strong></p>")
+        parts.append(_tbl([(e.get("sku"), e.get("qty")) for e in comp[:10]],
+                          ("SKU", "Qty")))
+    flags = r.get("flags") or []
+    if flags:
+        parts.append("<p style='margin:0;'><strong>Flags</strong></p><ul style='margin-top:4px;'>"
+                     + "".join(f"<li>{f}</li>" for f in flags[:10]) + "</ul>")
+    matched_n = r.get("matched_qty")
+    if matched_n is None:
+        matched_n = len(r.get("matched") or [])
+    parts.append(f"<p style='color:#666;'>Matched: {matched_n} &middot; "
+                 f"units sent {r.get('sent_line_total', '?')} vs confirmed "
+                 f"{r.get('supplier_line_total', '?')}</p>")
+    parts.append(f"<p style='color:#888;font-size:13px;'>Full detail: "
+                 f"GET /supplier-orders?order_id={order_id}</p></div>")
+    return "".join(parts)
+
+
 def _apply_verdict(order_id: str, supplier: str, verdict_ok: bool,
                    doc_ref: str, report: Dict, message_id: str) -> str:
     """Flip (or create) the supplier_orders row and alert on discrepancy."""
@@ -257,26 +349,10 @@ def _apply_verdict(order_id: str, supplier: str, verdict_ok: bool,
             conn.commit()
 
     if not verdict_ok:
-        r = report
-        parts = [f"<p><strong>DISCREPANCY</strong> — order #{order_id}, "
-                 f"{supplier}, doc {doc_ref or '?'}</p>"]
-        for key, label in (("qty_mismatch", "Qty mismatches"),
-                           ("missing_at_supplier", "We sent, they didn't confirm"),
-                           ("unexpected_from_supplier", "They list, we didn't send"),
-                           ("unresolved_supplier_lines", "Unresolved lines"),
-                           ("flags", "Flags")):
-            vals = r.get(key) or []
-            if vals:
-                shown = json.dumps(vals[:6], default=str)
-                parts.append(f"<p><strong>{label} ({len(vals)}):</strong> {shown}</p>")
-        if r.get("possible_substitutions"):
-            parts.append(f"<p><strong>Probable dialect pairs:</strong> "
-                         f"{json.dumps(r['possible_substitutions'][:6], default=str)}</p>")
-        parts.append(f"<p>Full detail: GET /supplier-orders?order_id={order_id} "
-                     f"(discrepancy_json).</p>")
         _send_email(order_id, INTERNAL_ALERT_EMAIL,
                     f"DISCREPANCY: {supplier} doc for order #{order_id}",
-                    "\n".join(parts), triggered_by="estimate_verifier")
+                    _discrepancy_email_html(order_id, supplier, doc_ref, report),
+                    triggered_by="estimate_verifier")
     return status
 
 
