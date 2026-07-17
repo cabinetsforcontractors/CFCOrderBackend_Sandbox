@@ -19,9 +19,11 @@ exception for EMAIL BODIES — the GHI xlsx sheet keeps its Ship To field):
     presku})" — door info from SUPPLIER_DOOR_INFO (unknown lines omit it)
   - footer: "Total Qty All SKUS: ##"
   - TEMPLATE v2 (William's own GHI send, 2026-07-17): greet the supplier
-    CONTACT by first name ("Hey Kathryn,"), close with "Is everything
-    in-stock?" and William's signature block. Attachment emails say "See
-    attached for our PO {id}: (door, presku)."
+    CONTACT by first name ("Hey Kathryn,"), William's signature block.
+    Attachment emails say "See attached for our PO {id}: (door, presku)."
+    v2.1: close with an ACTIVE stock ask — "Please check for any
+    out-of-stock items and let us know." (William: nudge them to check,
+    don't just ask a yes/no question.)
 
 Channels (SUPPLIER_ORDER_CHANNELS_20260716.md + William rulings):
   EMAIL-AUTO: GHI (xlsx sheet), LI, Cabinet & Stone, DuraStone, Love-Milestone
@@ -106,6 +108,10 @@ SIGNATURE_HTML = (
     "<p>--<br>William Prince<br>Cabinets For Contractors<br>"
     "<a href='https://www.CabinetsForContractors.net'>www.CabinetsForContractors.net</a><br>"
     "(770) 990-4885</p>")
+
+# v2.1 closing line (William 2026-07-17): actively ask the supplier to CHECK
+# stock — not a yes/no question
+STOCK_CHECK_ASK = "<p>Please check for any out-of-stock items and let us know.</p>"
 
 
 def supplier_greeting(warehouse: str) -> str:
@@ -279,8 +285,8 @@ def _internal_lines_table(items: List[Dict]) -> str:
 def build_po_email(order_id: str, warehouse: str, wdata: Dict) -> Dict:
     """Supplier-facing PO email: no customer info, no Our SKU column, our
     door names stripped, their door name/presku in the opening line,
-    'Total Qty All SKUS' footer (William 2026-07-17). Template v2: contact
-    first-name greeting, 'Is everything in-stock?', William's signature."""
+    'Total Qty All SKUS' footer (William 2026-07-17). Template v2.1: contact
+    first-name greeting, active stock-check ask, William's signature."""
     items = wdata["items"]
     total_units = sum(int(i.get("quantity") or 0) for i in items)
     door = door_info_for(warehouse, items)
@@ -290,7 +296,7 @@ def build_po_email(order_id: str, warehouse: str, wdata: Dict) -> Dict:
             f"<p>Please process our order <strong>PO {order_id}</strong>:{door_txt}</p>"
             f"{_supplier_lines_table(items)}"
             f"<p><strong>Total Qty All SKUS: {total_units}</strong></p>"
-            f"<p>Is everything in-stock?</p>"
+            f"{STOCK_CHECK_ASK}"
             f"{SIGNATURE_HTML}</div>")
     return {"html": html, "attachment": None, "units": total_units,
             "subject": f"PO {order_id} - Cabinets For Contractors"}
@@ -341,7 +347,10 @@ def build_roc_csv(order_id: str, wdata: Dict) -> Dict:
             f"<p><strong>Total Qty All SKUS: {order_units}</strong></p>"
             f"<p>Attached: the quick-order file. Upload at "
             f"roccabinetry.com/quick-order, ENTER PO {order_id} in their "
-            f"PO/reference field, then mark this supplier order as sent.</p>"
+            f"PO/reference field, then mark this supplier order as sent. "
+            f"AFTER upload: copy the whole cart page and POST it to "
+            f"/supplier-orders/roc-stock-paste to catch out-of-stock flags "
+            f"(the CSV export does not carry them).</p>"
             f"{_internal_lines_table(wdata['items'])}</div>")
     return {"html": html, "units": order_units, "companions": tray_qty,
             "attachment": {"filename": f"ROC_order_{order_id}.csv",
@@ -384,7 +393,7 @@ def build_ghi_xlsx(order_id: str, wdata: Dict) -> Dict:
             f"<p>{supplier_greeting('GHI')}</p>"
             f"<p>See attached for our <strong>PO {order_id}</strong>:{door_txt}</p>"
             f"<p><strong>Total Qty All SKUS: {total_units}</strong></p>"
-            f"<p>Is everything in-stock?</p>"
+            f"{STOCK_CHECK_ASK}"
             f"{SIGNATURE_HTML}</div>")
     return {"html": html, "units": total_units,
             "attachment": {"filename": f"CFC_PO_{order_id}_GHI.xlsx",
