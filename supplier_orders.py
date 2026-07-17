@@ -18,6 +18,10 @@ exception for EMAIL BODIES — the GHI xlsx sheet keeps its Ship To field):
   - wording: "Please process our order PO {id}: ({their door name}, {their
     presku})" — door info from SUPPLIER_DOOR_INFO (unknown lines omit it)
   - footer: "Total Qty All SKUS: ##"
+  - TEMPLATE v2 (William's own GHI send, 2026-07-17): greet the supplier
+    CONTACT by first name ("Hey Kathryn,"), close with "Is everything
+    in-stock?" and William's signature block. Attachment emails say "See
+    attached for our PO {id}: (door, presku)."
 
 Channels (SUPPLIER_ORDER_CHANNELS_20260716.md + William rulings):
   EMAIL-AUTO: GHI (xlsx sheet), LI, Cabinet & Stone, DuraStone, Love-Milestone
@@ -95,6 +99,23 @@ SUPPLIER_DOOR_INFO = {
     ("GHI", "SNW"):            {"door_name": "Sonona Wheat",     "presku": "SNW"},
     ("Love-Milestone", "SB"):  {"door_name": "Sage Breeze",      "presku": "SB"},
 }
+
+# William's signature block for supplier-facing emails (his own GHI send,
+# 2026-07-17, is the template)
+SIGNATURE_HTML = (
+    "<p>--<br>William Prince<br>Cabinets For Contractors<br>"
+    "<a href='https://www.CabinetsForContractors.net'>www.CabinetsForContractors.net</a><br>"
+    "(770) 990-4885</p>")
+
+
+def supplier_greeting(warehouse: str) -> str:
+    """'Hey Kathryn,' from SUPPLIER_INFO contact's first name; 'Hello,' when
+    no contact is on file."""
+    contact = (SUPPLIER_INFO.get(warehouse) or {}).get("contact", "") or ""
+    first = contact.strip().split(" ")[0].strip(",")
+    if first and first.isalpha():
+        return f"Hey {first},"
+    return "Hello,"
 
 
 def strip_our_door_name(product_name: str) -> str:
@@ -258,19 +279,19 @@ def _internal_lines_table(items: List[Dict]) -> str:
 def build_po_email(order_id: str, warehouse: str, wdata: Dict) -> Dict:
     """Supplier-facing PO email: no customer info, no Our SKU column, our
     door names stripped, their door name/presku in the opening line,
-    'Total Qty All SKUS' footer (William 2026-07-17)."""
+    'Total Qty All SKUS' footer (William 2026-07-17). Template v2: contact
+    first-name greeting, 'Is everything in-stock?', William's signature."""
     items = wdata["items"]
     total_units = sum(int(i.get("quantity") or 0) for i in items)
     door = door_info_for(warehouse, items)
     door_txt = f" ({door['door_name']}, {door['presku']})" if door else ""
     html = (f"<div style='font-family:Arial,sans-serif;font-size:14px;'>"
-            f"<p>Hello,</p><p>Please process our order "
-            f"<strong>PO {order_id}</strong>:{door_txt}</p>"
+            f"<p>{supplier_greeting(warehouse)}</p>"
+            f"<p>Please process our order <strong>PO {order_id}</strong>:{door_txt}</p>"
             f"{_supplier_lines_table(items)}"
             f"<p><strong>Total Qty All SKUS: {total_units}</strong></p>"
-            f"<p>Please reply with your order confirmation/estimate "
-            f"for verification.</p>"
-            f"<p>Thank you,<br>Cabinets For Contractors<br>(770) 990-4885</p></div>")
+            f"<p>Is everything in-stock?</p>"
+            f"{SIGNATURE_HTML}</div>")
     return {"html": html, "attachment": None, "units": total_units,
             "subject": f"PO {order_id} - Cabinets For Contractors"}
 
@@ -360,12 +381,11 @@ def build_ghi_xlsx(order_id: str, wdata: Dict) -> Dict:
     door = door_info_for("GHI", wdata["items"])
     door_txt = f" ({door['door_name']}, {door['presku']})" if door else ""
     html = (f"<div style='font-family:Arial,sans-serif;font-size:14px;'>"
-            f"<p>Hello,</p><p>Please process our order "
-            f"<strong>PO {order_id}</strong>:{door_txt} — order sheet attached "
-            f"({len(report['placed'])} lines, tabs: {', '.join(report['tabs'])}).</p>"
+            f"<p>{supplier_greeting('GHI')}</p>"
+            f"<p>See attached for our <strong>PO {order_id}</strong>:{door_txt}</p>"
             f"<p><strong>Total Qty All SKUS: {total_units}</strong></p>"
-            f"<p>Please reply with the sales order for verification.</p>"
-            f"<p>Thank you,<br>Cabinets For Contractors<br>(770) 990-4885</p></div>")
+            f"<p>Is everything in-stock?</p>"
+            f"{SIGNATURE_HTML}</div>")
     return {"html": html, "units": total_units,
             "attachment": {"filename": f"CFC_PO_{order_id}_GHI.xlsx",
                            "content": xlsx,
