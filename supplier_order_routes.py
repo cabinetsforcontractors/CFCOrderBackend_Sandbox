@@ -30,6 +30,12 @@ All admin-gated.
        guarded dispatch mailer (allowlist applies; supplier_orders row ->
        sent). For sheets built/reviewed by hand until the GHI template
        lives on the server.
+  POST /supplier-orders/roc-stock-paste {page_text, order_id?, uploaded_csv?}
+       — paste the WHOLE ROC cart page once (instead of relaying 6 pages by
+       hand): parses per-SKU "out of stock" flags, and with the uploaded CSV
+       also catches SKUs the quick-order upload silently DROPPED. Returns
+       the stock report + a customer-email starter (no suggestions — the
+       verified-options engine is a future build, William 2026-07-17).
 """
 
 from typing import Optional
@@ -50,6 +56,12 @@ class StatusUpdate(BaseModel):
 
 class B2BStatusSet(BaseModel):
     target: str  # awaiting_payment | being_prepared | sent | complete
+
+
+class RocStockPaste(BaseModel):
+    page_text: str
+    order_id: Optional[str] = None
+    uploaded_csv: Optional[str] = None  # the CSV text that was uploaded
 
 
 @supplier_order_router.post("/supplier-orders/dispatch/{order_id}")
@@ -225,3 +237,69 @@ async def send_ghi_sheet(order_id: str, sheet: UploadFile = File(...),
             "send": send,
             "note": ("allowlist redirect active — check where 'to' actually "
                      "points" if send.get("to") else None)}
+
+
+@supplier_order_router.post("/supplier-orders/roc-stock-paste")
+def roc_stock_paste(req: RocStockPaste, _: bool = Depends(require_admin)):
+    """Parse a PASTED ROC cart page into a stock report [admin].
+
+    Workflow (William 2026-07-17, learned on order 5700): upload the
+    quick-order CSV -> select-all + copy the cart page -> paste it here once.
+    The parser reads the page-level "This product is out of stock." flags
+    (the CSV export does NOT carry them). Pass uploaded_csv (the CSV text
+    you uploaded) to ALSO catch SKUs the upload silently dropped
+    (not-carried items never appear in the cart at all).
+
+    Returns the OOS/dropped lists + a customer-email starter in William's
+    voice with NO replacement suggestions (the verified-in-stock options
+    engine is the planned next layer)."""
+    from roc_parser import parse_roc_cart_page
+
+    report = parse_roc_cart_page(req.page_text or "")
+    dropped = []
+    if req.uploaded_csv:
+        cart = {s.upper() for s in report["skus"]}
+        for line in (req.uploaded_csv or "").splitlines():
+            line = line.strip()
+            if not line or line.lower().startswith("sku"):
+                continue
+            sku = line.split(",")[0].strip().strip('"').upper()
+            if sku and sku not in cart:
+                dropped.append(sku)
+    problems = report["out_of_stock"] + [f"{s} (dropped at upload — not carried?)"
+                                         for s in dropped]
+
+    email_lines = "\n".join(f"- {s}" for s in report["out_of_stock"] + dropped)
+    email_starter = (
+        "Hey {customer_first_name},\n\n"
+        "A few items on your order are out of stock:\n\n"
+        f"{email_lines}\n\n"
+        "What would you like to replace them with?\n\n"
+        "Everything else on the order is good to go.\n\n"
+        "--\nWilliam Prince\nCabinets For Contractors\n"
+        "www.CabinetsForContractors.net\n(770) 990-4885\n")
+
+    if req.order_id:
+        try:
+            import json as _json
+            from db_helpers import get_db
+            with get_db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO order_events (order_id, event_type, event_data, source)
+                        VALUES (%s, 'roc_stock_check', %s, 'supplier_orders')
+                    """, (str(req.order_id), _json.dumps({
+                        "skus_on_page": report["sku_count"],
+                        "out_of_stock": report["out_of_stock"],
+                        "dropped_at_upload": dropped})))
+                    conn.commit()
+        except Exception as e:
+            print(f"[ROC-STOCK] event log failed: {e}")
+
+    return {"status": "ok", "order_id": req.order_id,
+            "skus_on_page": report["sku_count"],
+            "in_stock": len(report["in_stock"]),
+            "out_of_stock": report["out_of_stock"],
+            "dropped_at_upload": dropped,
+            "all_problems": problems,
+            "email_starter": email_starter}
