@@ -93,7 +93,7 @@ def create_check(order_id: str, amount: float, note: str = None) -> Dict:
                 INSERT INTO ghi_checks (token, order_id, amount, note)
                 VALUES (%s, %s, %s, %s) RETURNING id
             """, (token, str(order_id), float(amount), note))
-            check_id = cur.fetchone()[0]
+            check_id = cur.fetchone()["id"]
             cur.execute("""
                 INSERT INTO order_events (order_id, event_type, event_data, source)
                 VALUES (%s, 'ghi_check_created', %s, 'ghi_checks')
