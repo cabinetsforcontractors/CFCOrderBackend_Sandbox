@@ -555,6 +555,17 @@ def update_order_payment_link_sent(conn, order_id, email):
         
         conn.commit()
         print(f"[GMAIL] Order {order_id}: payment link sent")
+
+        # Status-driven lifecycle checkpoint (William 2026-07-17): link sent
+        # -> Awaiting Payment on B2BWave. Fires once per order (already-marked
+        # orders returned False above). Guarded — never breaks the sync;
+        # mutations gate + no-downgrade ladder live inside b2bwave_status.
+        try:
+            from b2bwave_status import on_payment_link_sent
+            on_payment_link_sent(order_id)
+        except Exception as e:
+            print(f"[GMAIL] b2bwave status hook failed for {order_id}: {e}")
+
         return True
 
 def match_payment_to_order(conn, amount, customer_name, email):
@@ -605,6 +616,16 @@ def match_payment_to_order(conn, amount, customer_name, email):
                 
                 conn.commit()
                 print(f"[GMAIL] Order {order['order_id']}: payment ${amount} received from {customer_name}")
+
+                # Status-driven lifecycle checkpoint (William 2026-07-17):
+                # paid -> Being Prepared. Gmail-matched payments update the
+                # store status too (dispatch stays gated separately). Guarded.
+                try:
+                    from b2bwave_status import on_payment_received
+                    on_payment_received(order['order_id'])
+                except Exception as e:
+                    print(f"[GMAIL] b2bwave status hook failed for {order['order_id']}: {e}")
+
                 return True
         
         print(f"[GMAIL] No match for payment ${amount} from {customer_name}")
