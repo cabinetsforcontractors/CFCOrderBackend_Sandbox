@@ -517,6 +517,19 @@ def run_gmail_sync(db_conn, hours_back=2):
     except Exception as e:
         results["errors"].append(f"Reply verify error: {e}")
     
+    # 8. GHI check tracker daily pass (auto-ordering lane 2026-07-17): daily
+    # send-check reminders + 14-day uncashed nags to GHI. Self-limits to one
+    # action per check per ET day. Guarded: never breaks the main sync.
+    try:
+        from ghi_checks import run_daily_check_nags
+        gc = run_daily_check_nags()
+        results["ghi_check_reminders"] = gc.get("send_reminders", 0)
+        results["ghi_check_nags"] = gc.get("ghi_nags", 0)
+        for err in (gc.get("errors") or [])[:5]:
+            results["errors"].append(f"GHI checks: {err}")
+    except Exception as e:
+        results["errors"].append(f"GHI checks error: {e}")
+    
     print(f"[GMAIL] Sync complete: {results}")
     return results
 
