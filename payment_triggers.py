@@ -8,6 +8,10 @@ Trigger 5: Supplier-order dispatch (auto-ordering lane, William 2026-07-16:
            "100% auto send when payment is made") — gated by
            AUTO_DISPATCH_ENABLED env + exact payment-amount match; see
            supplier_orders.run_dispatch_on_payment.
+Trigger 6: B2BWave status checkpoint (status-driven lifecycle, William
+           2026-07-17) — paid order moves to Being Prepared on the store, so
+           it stops looking stale and the day-21 track never sees it.
+           Gated inside b2bwave_status by B2BWAVE_MUTATIONS_ENABLED.
 
 Entry point: run_payment_triggers(order_id, order_data, payment_amount)
 Called by square_sync.run_square_sync() after marking an order as paid.
@@ -190,6 +194,7 @@ def run_payment_triggers(order_id: str, order_data: dict, payment_amount: float)
         'email_confirmation': None,
         'bols': [],
         'supplier_dispatch': None,
+        'b2bwave_status': None,
     }
 
     # Trigger 4: Payment confirmation email
@@ -212,5 +217,17 @@ def run_payment_triggers(order_id: str, order_data: dict, payment_amount: float)
     except Exception as e:
         print(f"[PAYMENT TRIGGER] Supplier dispatch failed for order {order_id}: {e}")
         results['supplier_dispatch'] = {'status': 'error', 'message': str(e)}
+
+    # Trigger 6: B2BWave status checkpoint — paid -> Being Prepared.
+    # Guarded so a status-write failure can never break payment processing;
+    # mutations gate + ladder no-downgrade live inside b2bwave_status.
+    try:
+        from b2bwave_status import on_payment_received
+        results['b2bwave_status'] = on_payment_received(order_id)
+        print(f"[PAYMENT TRIGGER] B2BWave status order {order_id}: "
+              f"applied={(results['b2bwave_status'] or {}).get('applied')}")
+    except Exception as e:
+        print(f"[PAYMENT TRIGGER] B2BWave status failed for order {order_id}: {e}")
+        results['b2bwave_status'] = {'applied': False, 'error': str(e)}
 
     return results
