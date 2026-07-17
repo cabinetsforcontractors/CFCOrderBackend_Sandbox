@@ -35,6 +35,12 @@ our line -> their store line; unknown lines BLOCK. COMPANION RULE: easy-reach
 bases auto-add the free lazy-susan tray A-BER-B. QUANTITY PARITY: CSV units
 must equal website-order units or the warehouse blocks.
 
+TEMPLATE-IN-DB (2026-07-17): the GHI order-sheet template lives in the
+supplier_templates table (upload via POST /supplier-orders/template/GHI), so
+dispatch builds GHI sheets with no env path and no manual step.
+GHI_TEMPLATE_PATH env still wins when set. normalize_ghi_template() repairs
+GHI's annotated cells (JKFTS-Jiffy Kit-...) before the sheet filler runs.
+
 PAYMENT TRIGGER (payment_triggers.py): auto-dispatch only when
 AUTO_DISPATCH_ENABLED=true AND payment matches order total within $1.
 
@@ -43,6 +49,7 @@ in the beta everything redirects to the test inbox.
 """
 
 import base64
+import io
 import json
 import os
 import re
@@ -178,6 +185,101 @@ def ensure_supplier_orders_table(conn):
         cur.execute("ALTER TABLE supplier_orders ADD COLUMN IF NOT EXISTS followup_sent_at TIMESTAMP WITH TIME ZONE")
         cur.execute("ALTER TABLE supplier_orders ADD COLUMN IF NOT EXISTS no_response_alerted_at TIMESTAMP WITH TIME ZONE")
         conn.commit()
+
+
+# =============================================================================
+# SUPPLIER TEMPLATE STORE (template-in-DB, 2026-07-17)
+# =============================================================================
+
+def ensure_supplier_templates_table(conn):
+    with conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS supplier_templates (
+                supplier VARCHAR(50) PRIMARY KEY,
+                filename VARCHAR(200),
+                content BYTEA NOT NULL,
+                uploaded_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            )
+        """)
+        conn.commit()
+
+
+def save_supplier_template(supplier: str, filename: str, content: bytes) -> Dict:
+    import psycopg2
+    with get_db() as conn:
+        ensure_supplier_templates_table(conn)
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO supplier_templates (supplier, filename, content, uploaded_at)
+                VALUES (%s, %s, %s, NOW())
+                ON CONFLICT (supplier) DO UPDATE SET
+                    filename = EXCLUDED.filename,
+                    content = EXCLUDED.content,
+                    uploaded_at = NOW()
+            """, (supplier.upper(), filename, psycopg2.Binary(content)))
+            conn.commit()
+    return {"supplier": supplier.upper(), "filename": filename,
+            "bytes": len(content)}
+
+
+def get_supplier_template(supplier: str):
+    """-> (filename, content_bytes) or None."""
+    with get_db() as conn:
+        ensure_supplier_templates_table(conn)
+        with conn.cursor() as cur:
+            cur.execute("""SELECT filename, content FROM supplier_templates
+                           WHERE supplier = %s""", (supplier.upper(),))
+            row = cur.fetchone()
+            if not row:
+                return None
+            return row[0], bytes(row[1])
+
+
+def list_supplier_templates() -> List[Dict]:
+    from psycopg2.extras import RealDictCursor
+    with get_db() as conn:
+        ensure_supplier_templates_table(conn)
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""SELECT supplier, filename, octet_length(content) AS bytes,
+                                  uploaded_at
+                           FROM supplier_templates ORDER BY supplier""")
+            return cur.fetchall()
+
+
+def normalize_ghi_template(tpl_bytes: bytes) -> bytes:
+    """Repair GHI's annotated cells BEFORE the sheet filler scans them:
+    'JKFTS-Jiffy Kit-FTS-(M883-3369)' -> 'JKFTS'. The filler's cell matcher
+    requires labels to END with the tab code, so annotated rows (the jiffy
+    kits) were never placeable (order 5693 finding, corrections queue
+    2026-07-17). Only rewrites cabinet-column cells whose compact text is
+    token+tab+'-annotation'."""
+    import openpyxl
+    try:
+        from supplier_doc_parser import GHI_LINE_TAB
+        tabs = {t.upper() for t in GHI_LINE_TAB.values()}
+    except Exception:
+        tabs = {"FTS", "RWS", "SHG", "NTL", "SNS", "SNW"}
+    wb = openpyxl.load_workbook(io.BytesIO(tpl_bytes))
+    changed = 0
+    for name in wb.sheetnames:
+        tab = name.strip().upper()
+        if tab not in tabs:
+            continue
+        ws = wb[name]
+        for row in ws.iter_rows(min_row=1, max_row=min(ws.max_row, 200)):
+            for c in row:
+                if not isinstance(c.value, str) or c.column <= 1:
+                    continue
+                compact = re.sub(r"\s+", "", c.value).upper()
+                m = re.match(rf"^([A-Z0-9/.]+{tab})-", compact)
+                if m and not compact.endswith(tab):
+                    c.value = m.group(1)
+                    changed += 1
+    if not changed:
+        return tpl_bytes
+    out = io.BytesIO()
+    wb.save(out)
+    return out.getvalue()
 
 
 # =============================================================================
@@ -359,14 +461,25 @@ def build_roc_csv(order_id: str, wdata: Dict) -> Dict:
 
 
 def build_ghi_xlsx(order_id: str, wdata: Dict) -> Dict:
-    """GHI order sheet (the 5707.xlsx format). Needs GHI_TEMPLATE_PATH.
-    The email body is supplier-facing (no customer info); the sheet itself
-    keeps its Ship To field (William-approved artifact)."""
+    """GHI order sheet (the 5707.xlsx format). Template resolution:
+    GHI_TEMPLATE_PATH env (wins when set) -> supplier_templates DB row
+    (POST /supplier-orders/template/GHI) -> error. The email body is
+    supplier-facing (no customer info); the sheet itself keeps its Ship To
+    field (William-approved artifact)."""
+    tpl = None
     tpl_path = os.environ.get("GHI_TEMPLATE_PATH", "").strip()
-    if not (tpl_path and os.path.exists(tpl_path)):
-        return {"error": "GHI_TEMPLATE_PATH not set on this environment — "
-                         "upload the 5707.xlsx template or dispatch GHI manually "
-                         "via POST /freight/ghi-sheet/{order_id}"}
+    if tpl_path and os.path.exists(tpl_path):
+        with open(tpl_path, "rb") as f:
+            tpl = f.read()
+    if tpl is None:
+        stored = get_supplier_template("GHI")
+        if stored:
+            tpl = stored[1]
+    if tpl is None:
+        return {"error": "no GHI template on this environment — upload one via "
+                         "POST /supplier-orders/template/GHI (or set GHI_TEMPLATE_PATH)"}
+    tpl = normalize_ghi_template(tpl)
+
     import supplier_doc_parser as sdp
     with get_db() as conn:
         fwd = sdp.build_forward_map(conn)
@@ -379,8 +492,6 @@ def build_ghi_xlsx(order_id: str, wdata: Dict) -> Dict:
                         (order_id,))
             o = cur.fetchone() or {}
     ship_to = (o.get("company_name") or o.get("customer_name") or "")
-    with open(tpl_path, "rb") as f:
-        tpl = f.read()
     xlsx, report = sdp.make_ghi_sheets(items, tpl, order_id, fwd,
                                        ship_to=f"{ship_to} / PO {order_id}".strip(" /"))
     if report["unplaced"] or report["unmapped_prefix"]:
