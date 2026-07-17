@@ -25,11 +25,16 @@ All admin-gated.
        be at from local checkpoints. Never cancels, never downgrades.
   POST /supplier-orders/b2bwave-status/{order_id} {target} — manual single
        ladder write (awaiting_payment | being_prepared | sent | complete).
+  POST /supplier-orders/send-ghi-sheet/{order_id} (multipart 'sheet') —
+       email an ALREADY-FILLED GHI order-sheet xlsx to GHI through the
+       guarded dispatch mailer (allowlist applies; supplier_orders row ->
+       sent). For sheets built/reviewed by hand until the GHI template
+       lives on the server.
 """
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, File, UploadFile
 from pydantic import BaseModel
 
 from auth import require_admin
@@ -154,3 +159,68 @@ def b2bwave_status_set(order_id: str, req: B2BStatusSet,
                                 "manual_status_set")
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
+
+@supplier_order_router.post("/supplier-orders/send-ghi-sheet/{order_id}")
+async def send_ghi_sheet(order_id: str, sheet: UploadFile = File(...),
+                         _: bool = Depends(require_admin)):
+    """Email an ALREADY-FILLED GHI order sheet to GHI [admin].
+
+    Use when the sheet was built/reviewed by hand (POST /freight/ghi-sheet or
+    manual fill). Sends through the same guarded mailer as dispatch — the
+    EMAIL_ALLOWLIST redirect applies in the beta — with the William-ruled
+    supplier email format (no customer info; door name/presku; Total Qty),
+    then upserts the GHI supplier_orders row to 'sent'."""
+    from config import SUPPLIER_INFO
+    from freight_routes import get_supplier_sheet
+    from supplier_orders import (_send_email, _upsert_row, door_info_for,
+                                 SUPPLIER_CHANNELS)
+
+    xlsx_bytes = await sheet.read()
+    if not xlsx_bytes:
+        return {"status": "error", "message": "empty sheet upload"}
+
+    sheet_info = get_supplier_sheet(order_id, True)
+    if sheet_info.get("status") != "ok":
+        return {"status": "error",
+                "message": sheet_info.get("message", "supplier-sheet failed")}
+    wdata = (sheet_info.get("warehouses") or {}).get("GHI")
+    if not wdata or not wdata.get("items"):
+        return {"status": "error",
+                "message": f"order {order_id} has no GHI line items"}
+
+    total_units = sum(int(i.get("quantity") or 0) for i in wdata["items"])
+    door = door_info_for("GHI", wdata["items"])
+    door_txt = f" ({door['door_name']}, {door['presku']})" if door else ""
+    html = (f"<div style='font-family:Arial,sans-serif;font-size:14px;'>"
+            f"<p>Hello,</p><p>Please process our order "
+            f"<strong>PO {order_id}</strong>:{door_txt} — order sheet attached "
+            f"({len(wdata['items'])} lines).</p>"
+            f"<p><strong>Total Qty All SKUS: {total_units}</strong></p>"
+            f"<p>Please reply with the sales order for verification.</p>"
+            f"<p>Thank you,<br>Cabinets For Contractors<br>(770) 990-4885</p></div>")
+    subject = f"PO {order_id} - Cabinets For Contractors order sheet"
+    attachment = {"filename": f"CFC_PO_{order_id}_GHI.xlsx",
+                  "content": xlsx_bytes,
+                  "mime": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}
+
+    to_addr = (SUPPLIER_INFO.get("GHI") or {}).get("email", "")
+    if not to_addr:
+        return {"status": "error", "message": "no GHI email in SUPPLIER_INFO"}
+    send = _send_email(order_id, to_addr, subject, html,
+                       "manual_ghi_sheet_send", attachment)
+    status = "sent" if send.get("success") else "blocked"
+    ch = SUPPLIER_CHANNELS["GHI"]
+    wres = {"mode": ch["mode"], "artifact": ch["artifact"],
+            "lines": len(wdata["items"]), "untranslated": 0,
+            "units": total_units, "subject": subject,
+            "attachment": attachment["filename"], "send": send}
+    _upsert_row(order_id, "GHI", status, ch, wres,
+                note=None if send.get("success") else f"send failed: {send.get('error')}",
+                sent_to=send.get("to"))
+    return {"status": "ok" if send.get("success") else "error",
+            "order_id": order_id, "supplier": "GHI",
+            "row_status": status, "units": total_units,
+            "send": send,
+            "note": ("allowlist redirect active — check where 'to' actually "
+                     "points" if send.get("to") else None)}
