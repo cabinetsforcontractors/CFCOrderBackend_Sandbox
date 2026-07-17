@@ -8,7 +8,15 @@ Order Lifecycle Rules (William's rules, Mar 3 2026):
   - Customer response resets the clock back to day 0 (active)
   - "Cancel" keyword in customer email → immediate B2BWave cancel
 
-Timeline:
+STATUS-DRIVEN LIFECYCLE amendment (William 2026-07-17): the inactivity →
+inactive/cancel track applies ONLY to UNPAID orders. Paid orders are in
+fulfillment — their progress lives on B2BWave (b2bwave_status.py checkpoint
+writes: paid → Being Prepared, all legs out → Sent, all delivered →
+Complete) and they must never be nagged or auto-canceled here. This guard
+exists because the 7/17 dry run showed the email-silence clock would have
+canceled 5 PAID orders (~$5,845).
+
+Timeline (unpaid orders only):
   Day 7:  Move → Inactive tab + send email "order moved to inactive"
   Day 14: Send email "order will be canceled in 7 days"
   Day 21: Hit B2BWave API → cancel order, move to Done tab with canceled indicator
@@ -63,6 +71,9 @@ STATUS_CANCELED = "canceled"
 STATUS_ARCHIVED = "archived"
 
 # Cancel keyword patterns (fuzzy match)
+# NOTE (2026-07-16): UNUSED by the Gmail path — gmail_sync now routes through
+# cancel_requests.detect_cancel_phrase (strict phrases + confirm-first).
+# Kept for reference; do not wire the bare-word patterns to any auto action.
 CANCEL_PATTERNS = [
     r'\bcancel\b',
     r'\bcancell?\b',           # Common misspelling
@@ -253,6 +264,9 @@ def process_order_lifecycle(order_id: str, now: Optional[datetime] = None) -> Di
     Sends reminder emails when due.
     Cancels on B2BWave at day 21.
 
+    UNPAID ORDERS ONLY (William 2026-07-17): paid orders return immediately —
+    they are in fulfillment and B2BWave status carries their progress.
+
     Returns dict with actions taken.
     """
     if now is None:
@@ -274,7 +288,7 @@ def process_order_lifecycle(order_id: str, now: Optional[datetime] = None) -> Di
             # Fetch order with lifecycle fields
             # NOTE: current_status is on order_status table, not orders — do not select it here
             cur.execute("""
-                SELECT order_id, is_complete,
+                SELECT order_id, is_complete, payment_received,
                        last_customer_email_at, lifecycle_status,
                        lifecycle_deadline_at, lifecycle_reminders_sent,
                        email, customer_name, company_name, order_total, order_date
@@ -289,6 +303,16 @@ def process_order_lifecycle(order_id: str, now: Optional[datetime] = None) -> Di
 
             # Skip completed orders
             if order.get("is_complete"):
+                return actions
+
+            # STATUS-DRIVEN LIFECYCLE GUARD (William 2026-07-17): the
+            # inactivity nag/cancel track is for orders WAITING ON PAYMENT.
+            # A paid order in fulfillment can be email-quiet for weeks —
+            # that is normal, not stale. Never nag it, never auto-cancel it.
+            # (The 7/17 dry run showed this clock would have canceled 5 PAID
+            # orders worth ~$5,845.)
+            if order.get("payment_received"):
+                actions["skipped"] = "paid — lifecycle nag/cancel track does not apply"
                 return actions
 
             # Skip already canceled
@@ -481,6 +505,9 @@ def check_all_orders_lifecycle() -> Dict:
     """
     Check all active (non-complete, non-canceled) orders for lifecycle actions.
     Meant to be called by a daily cron job via POST /lifecycle/check-all.
+
+    Paid orders are skipped inside process_order_lifecycle (status-driven
+    lifecycle, William 2026-07-17).
 
     Returns summary of actions taken.
     """
