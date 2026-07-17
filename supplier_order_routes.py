@@ -169,11 +169,13 @@ async def send_ghi_sheet(order_id: str, sheet: UploadFile = File(...),
     Use when the sheet was built/reviewed by hand (POST /freight/ghi-sheet or
     manual fill). Sends through the same guarded mailer as dispatch — the
     EMAIL_ALLOWLIST redirect applies in the beta — with the William-ruled
-    supplier email format (no customer info; door name/presku; Total Qty),
-    then upserts the GHI supplier_orders row to 'sent'."""
+    template v2 (contact greeting, door name/presku, Total Qty, 'Is
+    everything in-stock?', signature), then upserts the GHI supplier_orders
+    row to 'sent'."""
     from config import SUPPLIER_INFO
     from freight_routes import get_supplier_sheet
     from supplier_orders import (_send_email, _upsert_row, door_info_for,
+                                 supplier_greeting, SIGNATURE_HTML,
                                  SUPPLIER_CHANNELS)
 
     xlsx_bytes = await sheet.read()
@@ -193,12 +195,11 @@ async def send_ghi_sheet(order_id: str, sheet: UploadFile = File(...),
     door = door_info_for("GHI", wdata["items"])
     door_txt = f" ({door['door_name']}, {door['presku']})" if door else ""
     html = (f"<div style='font-family:Arial,sans-serif;font-size:14px;'>"
-            f"<p>Hello,</p><p>Please process our order "
-            f"<strong>PO {order_id}</strong>:{door_txt} — order sheet attached "
-            f"({len(wdata['items'])} lines).</p>"
+            f"<p>{supplier_greeting('GHI')}</p>"
+            f"<p>See attached for our <strong>PO {order_id}</strong>:{door_txt}</p>"
             f"<p><strong>Total Qty All SKUS: {total_units}</strong></p>"
-            f"<p>Please reply with the sales order for verification.</p>"
-            f"<p>Thank you,<br>Cabinets For Contractors<br>(770) 990-4885</p></div>")
+            f"<p>Is everything in-stock?</p>"
+            f"{SIGNATURE_HTML}</div>")
     subject = f"PO {order_id} - Cabinets For Contractors order sheet"
     attachment = {"filename": f"CFC_PO_{order_id}_GHI.xlsx",
                   "content": xlsx_bytes,
