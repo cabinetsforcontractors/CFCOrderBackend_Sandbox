@@ -13,15 +13,23 @@ Format (decoded from real confirmation 2026-07-06, order #000040179):
   NOTE: ROC's store SKUs are their own codes (this order used SNW-*, which
   coincidentally collides with our SNW prefix) — verification therefore runs
   in BODY space against the sent lines' supplier tokens.
-  A-* SKUs (A-BER-B lazy-susan trays, assembly lines) are COMPANIONS — free,
-  baked into the product price (William 2026-07-17) — folded as fees so the
-  quantity diff ignores them but the report still lists them.
+
+CART-PAGE STOCK GRAMMAR (learned live 2026-07-17, order 5700): ROC's stock
+truth is PAGE-LEVEL — "This product is out of stock." appears under the SKU
+on the cart/product pages. The cart CSV export does NOT carry stock flags,
+and the quick-order upload silently DROPS not-carried SKUs entirely. So the
+workflow is: upload CSV -> copy the whole cart page -> parse_roc_cart_page.
 """
 
 import re
 from typing import Dict, List
 
 _MONEY = re.compile(r"\$([\d,]+\.\d{2})")
+
+# store SKU as it appears on cart/product pages: SNW-B18, A-BER-B,
+# "SNW-BP2496 3/4" (space + slash tokens exist)
+_CART_SKU = re.compile(r"\b([A-Z]{1,4}-[A-Z0-9][A-Z0-9\-\./]*(?:\s+\d/\d)?)\b")
+_OOS_MARKER = re.compile(r"out\s+of\s+stock", re.IGNORECASE)
 
 
 def _tokens(html: str) -> List[str]:
@@ -79,17 +87,10 @@ def parse_roc_confirmation_html(html: str) -> Dict:
 
 def fold_roc_lines(lines: List[Dict]) -> List[Dict]:
     """Fold to body space: each ROC store SKU contributes itself and its
-    after-prefix body as match candidates (SNW-B12 -> {SNWB12, B12}).
-    A-* SKUs (free trays / assembly) fold as companions (fee=True) so the
-    quantity diff skips them; they still show in the report's fee list."""
+    after-prefix body as match candidates (SNW-B12 -> {SNWB12, B12})."""
     out = []
     for ln in lines:
         sku = ln["sku"]
-        if sku.upper().startswith("A-"):
-            out.append({"body": sku, "qty": ln["qty"], "raw": sku,
-                        "flags": ["COMPANION (free tray/assembly line)"],
-                        "fee": True})
-            continue
         bodies = [sku]
         if "-" in sku:
             bodies.append(sku.split("-", 1)[1])
@@ -101,3 +102,44 @@ def looks_like_roc_confirmation(html: str) -> bool:
     h = (html or "").lower()
     return ("roc cabinetry" in h and "sku:" in h
             and ("order confirmation" in h or "po number" in h or "invoice" in h))
+
+
+def parse_roc_cart_page(page_text: str) -> Dict:
+    """Parse a PASTED ROC cart page (raw copy of the whole page — text, HTML,
+    or markdown-ish paste all work) into stock status per store SKU.
+
+    Grammar: SKUs appear as their own text runs (often twice: link text +
+    plain); the line "This product is out of stock." appears BELOW the SKU it
+    belongs to, before the next SKU. So: walk the text, remember the last SKU
+    seen, and an out-of-stock marker flags that SKU.
+
+    Returns {'skus': [in order seen], 'out_of_stock': [...], 'in_stock': [...],
+    'oos_count', 'sku_count'}.
+    """
+    text = page_text or ""
+    if "<" in text and ">" in text:  # tolerate raw HTML paste too
+        text = re.sub(r"<[^>]+>", "\n", text)
+    lines = [l.strip() for l in text.splitlines()]
+
+    seen: List[str] = []
+    oos: List[str] = []
+    last_sku = None
+    for line in lines:
+        if not line:
+            continue
+        if _OOS_MARKER.search(line):
+            if last_sku and last_sku not in oos:
+                oos.append(last_sku)
+            continue
+        m = _CART_SKU.search(line.upper())
+        if m:
+            sku = m.group(1).strip()
+            # ignore obvious non-SKU hits (URLs already stripped of scheme
+            # won't match; money won't match)
+            last_sku = sku
+            if sku not in seen:
+                seen.append(sku)
+
+    in_stock = [s for s in seen if s not in oos]
+    return {"skus": seen, "out_of_stock": oos, "in_stock": in_stock,
+            "oos_count": len(oos), "sku_count": len(seen)}
