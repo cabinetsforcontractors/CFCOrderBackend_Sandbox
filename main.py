@@ -16,6 +16,7 @@ Module Map:
   substitution_routes.py   — /substitutions/* [admin] + /substitution/{token} (public)
   supplier_order_routes.py — /supplier-orders/* [admin] (state machine + dispatch)
   cancel_requests.py       — /cancel-requests [admin] + /cancel-request/{token} (public confirm-first)
+  ghi_checks.py            — /ghi-checks [admin] + /ghi-check/{token} (public buttons)
   routes/audit.py          — /audit/log (POST write, GET read)
   auth.py                  — require_admin Depends() — X-Admin-Token or Bearer JWT
   rate_limit.py            — shared slowapi Limiter instance
@@ -121,6 +122,13 @@ except ImportError:
     print("[STARTUP] cancel_requests module not found, confirm-first cancel flow disabled")
 
 try:
+    from ghi_checks import ghi_check_router
+    GHI_CHECKS_LOADED = True
+except ImportError:
+    GHI_CHECKS_LOADED = False
+    print("[STARTUP] ghi_checks module not found, GHI check tracker disabled")
+
+try:
     from routes.audit import audit_router
     AUDIT_LOADED = True
 except ImportError:
@@ -191,6 +199,9 @@ if SUPPLIER_ORDERS_LOADED:
 
 if CANCEL_REQUESTS_LOADED:
     app.include_router(cancel_request_router) # Confirm-first customer cancels: /cancel-request/{token} + /cancel-requests
+
+if GHI_CHECKS_LOADED:
+    app.include_router(ghi_check_router)      # GHI check tracker/nagger: /ghi-checks + /ghi-check/{token}
 
 if AUDIT_LOADED:
     app.include_router(audit_router)          # Phase 5: /audit/log
@@ -286,6 +297,7 @@ def root():
         "substitution_flow": {"enabled": SUBSTITUTIONS_LOADED},
         "supplier_order_engine": {"enabled": SUPPLIER_ORDERS_LOADED},
         "cancel_confirm_first": {"enabled": CANCEL_REQUESTS_LOADED},
+        "ghi_check_tracker": {"enabled": GHI_CHECKS_LOADED},
         "audit_log": {"enabled": AUDIT_LOADED},
         "rate_limiting": {"enabled": True, "default_limit": "200/minute"},
         "bol_generation": {"enabled": True},
