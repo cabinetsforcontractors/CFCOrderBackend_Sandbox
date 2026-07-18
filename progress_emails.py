@@ -9,8 +9,9 @@ send (draft-first law — nothing customer-facing sends itself):
      update you as it progresses" + honest arrival window in real dates.
   2. DELAY — expected ship date blown with no tracking captured: apologize,
      re-promise from today.
-  3. TRACKING — tracking/PRO captured: numbers + the mandatory note that
-     tracking shows nothing until the carrier scans the pickup.
+  3. TRACKING — tracking/PRO captured: numbers + CLICK-TO-FOLLOW carrier links
+     (R+L trace page / UPS tracker) + the mandatory note that tracking shows
+     nothing until the carrier scans the pickup.
 
 Ship windows are SUPPLIER-BASED, from the 2026-07-18 email root-cause audit
 (SUPPLIER_DELAY_ROOT_CAUSE_AUDIT_20260718.md — blessed as-is): the historical
@@ -22,13 +23,19 @@ promises are keyed to each supplier's demonstrated speed. Language law: NEVER
 Runs as a sweep on every gmail-sync cycle (hooked in estimate_verifier.
 scan_replies) + manual POST /progress/run [admin]. One draft per stage per
 order (progress_promises table). Pickup orders may still get a draft — the
-draft-first review is the filter (William edits/deletes; detection heuristics
-would guess). Orders that ALREADY carry tracking when first seen (handled
-manually pre-system) are skipped entirely; POST /progress/{id}/mark silences
-an order that slipped through (sets tracking_at, killing future drafts).
+draft-first review is the filter. Orders that ALREADY carry tracking when
+first seen (handled manually pre-system) are skipped; /progress/{id}/mark
+silences an order, /progress/{id}/reset-tracking undoes a bogus capture.
+
+INCIDENT LESSON (2026-07-18): the email-detection scanner reads MAILBOX
+CONTENT for PRO patterns — an example draft containing a real order number +
+a made-up PRO stamped the real order and drafted a bogus customer email
+(draft-first caught it). NEVER put real order ids with fake tracking numbers
+into any email/draft; examples belong in chat, not in the mailbox.
 """
 
 import json
+import re
 from datetime import date, datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 
@@ -54,6 +61,10 @@ LTL_TOTAL_USD = 1500.0
 
 SIGNATURE = ("--\nWilliam Prince\nCabinets For Contractors\n"
              "www.CabinetsForContractors.net\n(770) 990-4885")
+
+RL_TRACE_URL = ("https://www2.rlcarriers.com/freight/shipping/shipment-tracing"
+                "?pro={pro}&docType=PRO&source=web")
+UPS_TRACK_URL = "https://www.ups.com/track?tracknum={num}"
 
 
 # =============================================================================
@@ -218,12 +229,26 @@ def _delay_body(order: Dict, w: Dict) -> str:
 
 
 def _tracking_body(order: Dict) -> str:
+    """One clean block per shipment number, each with its carrier's live
+    tracking link (William 2026-07-18: no duplicate lines, include the link,
+    'click here to follow')."""
+    pro = (order.get("pro_number") or "").strip()
+    trk = (order.get("tracking") or "").strip()
     lines = []
-    if order.get("tracking"):
-        lines.append(f"Tracking: {order['tracking']}")
-    if order.get("pro_number"):
-        lines.append(f"R+L Carriers PRO #: {order['pro_number']}")
-    nums = "\n".join(lines) or "Tracking: (see below)"
+    if pro:
+        lines.append(f"R+L Carriers PRO #: {pro}")
+        lines.append(f"Click here to follow your delivery any time:")
+        lines.append(RL_TRACE_URL.format(pro=pro))
+    ups_nums = re.findall(r"\b(1Z[0-9A-Z]{10,16})\b", trk.upper())
+    for u in ups_nums:
+        if lines:
+            lines.append("")
+        lines.append(f"UPS Tracking #: {u}")
+        lines.append(f"Click here to follow your delivery any time:")
+        lines.append(UPS_TRACK_URL.format(num=u))
+    if not pro and not ups_nums and trk:
+        lines.append(f"Tracking: {trk}")
+    nums = "\n".join(lines)
     return (
         f"Hey {_first_name(order)},\n\n"
         f"Your order #{order['order_id']} is on the way!\n\n"
@@ -420,3 +445,26 @@ def progress_mark(order_id: str, _: bool = Depends(require_admin)):
             """, (order_id,))
             conn.commit()
     return {"status": "ok", "order_id": order_id, "silenced": True}
+
+
+@progress_router.post("/progress/{order_id}/reset-tracking")
+def progress_reset_tracking(order_id: str, rearm: bool = True,
+                            clear_fields: bool = False,
+                            _: bool = Depends(require_admin)):
+    """Undo a bogus tracking capture. clear_fields wipes orders.tracking +
+    pro_number; rearm nulls the promise row's tracking_at so the REAL tracking
+    email can draft later. Leave rearm=false while the poisoned content is
+    still in the mailbox — the detection scanner could re-stamp it."""
+    with get_db() as conn:
+        ensure_progress_table(conn)
+        with conn.cursor() as cur:
+            if clear_fields:
+                cur.execute("""UPDATE orders SET tracking = NULL,
+                               pro_number = NULL, updated_at = NOW()
+                               WHERE order_id = %s""", (order_id,))
+            if rearm:
+                cur.execute("""UPDATE progress_promises SET tracking_at = NULL
+                               WHERE order_id = %s""", (order_id,))
+            conn.commit()
+    return {"status": "ok", "order_id": order_id, "cleared_fields": clear_fields,
+            "rearmed": rearm}
