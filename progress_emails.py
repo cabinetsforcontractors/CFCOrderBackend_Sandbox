@@ -23,7 +23,8 @@ Runs as a sweep on every gmail-sync cycle (hooked in estimate_verifier.
 scan_replies) + manual POST /progress/run [admin]. One draft per stage per
 order (progress_promises table). Pickup orders may still get a draft — the
 draft-first review is the filter (William edits/deletes; detection heuristics
-would guess).
+would guess). Orders that ALREADY carry tracking when first seen (handled
+manually pre-system) are skipped entirely.
 """
 
 import json
@@ -243,13 +244,16 @@ def run_progress_sweep(dry_run: bool = False, days_back: int = 7) -> Dict:
     with get_db() as conn:
         ensure_progress_table(conn)
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            # A) POST-PAYMENT: recently paid, no promise row yet
+            # A) POST-PAYMENT: recently paid, no promise row, NOT already
+            #    shipped (pre-system orders with tracking were handled by hand)
             cur.execute("""
                 SELECT o.* FROM orders o
                 LEFT JOIN progress_promises p ON p.order_id = o.order_id
                 WHERE o.payment_received = TRUE
                   AND o.payment_received_at > NOW() - (%s || ' days')::interval
                   AND o.email IS NOT NULL AND o.email <> ''
+                  AND (o.tracking IS NULL OR o.tracking = '')
+                  AND (o.pro_number IS NULL OR o.pro_number = '')
                   AND p.order_id IS NULL
                 ORDER BY o.payment_received_at
             """, (int(days_back),))
