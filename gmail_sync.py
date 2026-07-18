@@ -391,9 +391,9 @@ def run_gmail_sync(db_conn, hours_back=2):
     except Exception as e:
         results["errors"].append(f"Payment search error: {e}")
     
-    # 3. RL Quote Numbers
+    # 3. RL Quote Numbers (never from drafts — unsent working copies)
     try:
-        messages = search_emails(f'{time_filter} ("RL Quote" OR "quote number" OR from:{RL_CARRIERS_SENDER})')
+        messages = search_emails(f'{time_filter} -in:draft ("RL Quote" OR "quote number" OR from:{RL_CARRIERS_SENDER})')
         print(f"[GMAIL] Found {len(messages)} potential RL quote emails")
         
         for msg in messages:
@@ -422,9 +422,10 @@ def run_gmail_sync(db_conn, hours_back=2):
     except Exception as e:
         results["errors"].append(f"RL quote search error: {e}")
     
-    # 4. Tracking Numbers / PRO Numbers
+    # 4. Tracking Numbers / PRO Numbers (never from drafts — a draft is an
+    # unsent working copy; a bogus draft once re-stamped a fake PRO in a loop)
     try:
-        messages = search_emails(f'{time_filter} (PRO OR tracking OR "has shipped")')
+        messages = search_emails(f'{time_filter} -in:draft (PRO OR tracking OR "has shipped")')
         print(f"[GMAIL] Found {len(messages)} potential tracking emails")
         
         for msg in messages:
