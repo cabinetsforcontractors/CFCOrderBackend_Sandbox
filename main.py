@@ -18,6 +18,7 @@ Module Map:
   cancel_requests.py       — /cancel-requests [admin] + /cancel-request/{token} (public confirm-first)
   ghi_checks.py            — /ghi-checks [admin] + /ghi-check/{token} (public buttons)
   ghi_cogs.py              — /supplier-orders/cogs/* [admin] (COGS price fingerprint)
+  progress_emails.py       — /progress/* [admin] (customer progress drafts, draft-first)
   routes/audit.py          — /audit/log (POST write, GET read)
   auth.py                  — require_admin Depends() — X-Admin-Token or Bearer JWT
   rate_limit.py            — shared slowapi Limiter instance
@@ -137,6 +138,13 @@ except ImportError:
     print("[STARTUP] ghi_cogs module not found, GHI price fingerprint disabled")
 
 try:
+    from progress_emails import progress_router
+    PROGRESS_LOADED = True
+except ImportError:
+    PROGRESS_LOADED = False
+    print("[STARTUP] progress_emails module not found, progress drafts disabled")
+
+try:
     from routes.audit import audit_router
     AUDIT_LOADED = True
 except ImportError:
@@ -213,6 +221,9 @@ if GHI_CHECKS_LOADED:
 
 if GHI_COGS_LOADED:
     app.include_router(ghi_cogs_router)       # GHI COGS price fingerprint: /supplier-orders/cogs/*
+
+if PROGRESS_LOADED:
+    app.include_router(progress_router)       # Customer progress drafts: /progress/*
 
 if AUDIT_LOADED:
     app.include_router(audit_router)          # Phase 5: /audit/log
@@ -310,6 +321,7 @@ def root():
         "cancel_confirm_first": {"enabled": CANCEL_REQUESTS_LOADED},
         "ghi_check_tracker": {"enabled": GHI_CHECKS_LOADED},
         "ghi_price_fingerprint": {"enabled": GHI_COGS_LOADED},
+        "progress_emails": {"enabled": PROGRESS_LOADED},
         "audit_log": {"enabled": AUDIT_LOADED},
         "rate_limiting": {"enabled": True, "default_limit": "200/minute"},
         "bol_generation": {"enabled": True},
