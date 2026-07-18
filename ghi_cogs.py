@@ -120,7 +120,7 @@ def annotate_price_fingerprint(lines):
                               f"{body or '?'} (cost {expected:.2f})")
             else:
                 ln["memo"] = (f"PRICE-CHECK: billed {float(price):.2f} vs COGS "
-                              f"{expected:.2f} for {body or '?'} — price list may "
+                              f"{expected:.2f} for {body or '?'} - price list may "
                               f"have changed, reload cogs.csv")
         elif price_matches and not sku:
             ln["note"] = ((ln.get("note") + "; ") if ln.get("note") else "") + \
