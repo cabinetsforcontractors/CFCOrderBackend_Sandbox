@@ -24,7 +24,8 @@ scan_replies) + manual POST /progress/run [admin]. One draft per stage per
 order (progress_promises table). Pickup orders may still get a draft — the
 draft-first review is the filter (William edits/deletes; detection heuristics
 would guess). Orders that ALREADY carry tracking when first seen (handled
-manually pre-system) are skipped entirely.
+manually pre-system) are skipped entirely; POST /progress/{id}/mark silences
+an order that slipped through (sets tracking_at, killing future drafts).
 """
 
 import json
@@ -399,3 +400,23 @@ def progress_list(_: bool = Depends(require_admin)):
                            ORDER BY created_at DESC LIMIT 100""")
             rows = cur.fetchall()
     return {"status": "ok", "promises": [dict(r) for r in rows]}
+
+
+@progress_router.post("/progress/{order_id}/mark")
+def progress_mark(order_id: str, _: bool = Depends(require_admin)):
+    """Silence an order's progress emails (manual-era orders): upserts the
+    promise row with tracking_at set, so no further drafts are ever made."""
+    with get_db() as conn:
+        ensure_progress_table(conn)
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO progress_promises
+                    (order_id, suppliers, post_payment_at, tracking_at)
+                VALUES (%s, 'manual-skip', NOW(), NOW())
+                ON CONFLICT (order_id) DO UPDATE
+                SET tracking_at = NOW(),
+                    post_payment_at = COALESCE(progress_promises.post_payment_at,
+                                               NOW())
+            """, (order_id,))
+            conn.commit()
+    return {"status": "ok", "order_id": order_id, "silenced": True}
