@@ -34,6 +34,10 @@ New shape, exactly as William drew it:
 
   Cutover (separate beat, William's word): appliers replace the scanner
   writes; progress engine reads order_facts.
+
+  BODY READING: uses the RECURSIVE part-walker (ghi_inbox._fetch_text) — the
+  shallow reader misses bodies nested in multipart/alternative, which the
+  first shadow compare caught within minutes of going live (2026-07-18).
 """
 
 import json
@@ -41,7 +45,7 @@ import re
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Header
 from fastapi.responses import PlainTextResponse
 
 from auth import require_admin
@@ -153,11 +157,29 @@ def _parse_email_date(s: str):
         return None
 
 
+def _fetch_message(mid: str):
+    """Headers via gmail_sync + RECURSIVE body text via ghi_inbox._fetch_text
+    (the shallow single-level reader misses multipart-nested bodies)."""
+    from gmail_sync import get_email_content
+    from ghi_inbox import _fetch_text
+
+    email = get_email_content(mid)
+    if not email:
+        return None
+    try:
+        deep_body, _s, _f = _fetch_text(mid)
+        if deep_body and len(deep_body) > len(email.get("body") or ""):
+            email["body"] = deep_body
+    except Exception:
+        pass
+    return email
+
+
 def ingest_new_messages(hours_back: int = 24) -> Dict:
     """Pull each stream, insert UNSEEN messages into the ledger with their
     extracted facts. Idempotent: a message_id already in the ledger is never
     fetched again. SHADOW: touches only ledger tables."""
-    from gmail_sync import gmail_configured, search_emails, get_email_content
+    from gmail_sync import gmail_configured, search_emails
 
     out = {"status": "ok", "new_rows": 0, "seen": 0, "by_kind": {},
            "errors": []}
@@ -185,7 +207,7 @@ def ingest_new_messages(hours_back: int = 24) -> Dict:
                         if cur.fetchone():
                             out["seen"] += 1
                             continue
-                    email = get_email_content(mid)
+                    email = _fetch_message(mid)
                     if not email:
                         continue
                     subject = email.get("subject") or ""
@@ -324,7 +346,9 @@ def compare_facts_vs_orders() -> Dict:
     """Facts (ledger truth) vs live orders table. Mismatch classes:
     'orders_missing_tracking' = old scanners missed a hand-sent tracking email
     (the 5699 class); 'orders_has_unexplained_tracking' = a stamp with NO
-    source email in the ledger (the fake-PRO class — suspicious by definition)."""
+    source email in the ledger (the fake-PRO class — suspicious by definition,
+    though for ORDERS OLDER THAN THE LEDGER WINDOW it just means the source
+    email predates the ledger backfill)."""
     from psycopg2.extras import RealDictCursor
 
     out = {"status": "ok", "match": 0, "orders_missing_tracking": [],
@@ -384,6 +408,25 @@ def ledger_ingest(hours_back: int = 24, _: bool = Depends(require_admin)):
 @ledger_router.post("/ledger/rebuild")
 def ledger_rebuild(_: bool = Depends(require_admin)):
     return rebuild_order_facts()
+
+
+@ledger_router.post("/ledger/reset")
+def ledger_reset(_: bool = Depends(require_admin),
+                 x_allow_destructive: Optional[str] =
+                 Header(None, alias="X-Allow-Destructive")):
+    """SHADOW-PHASE ONLY: truncate ledger + facts so a fixed extractor can
+    re-ingest from scratch. Requires X-Allow-Destructive: yes. Shadow tables
+    hold derived data only — nothing of record lives here yet."""
+    if (x_allow_destructive or "").strip().lower() != "yes":
+        return {"status": "error",
+                "message": "X-Allow-Destructive: yes header required"}
+    with get_db() as conn:
+        ensure_ledger_tables(conn)
+        with conn.cursor() as cur:
+            cur.execute("TRUNCATE email_ledger")
+            cur.execute("TRUNCATE order_facts")
+            conn.commit()
+    return {"status": "ok", "message": "ledger + facts truncated (shadow)"}
 
 
 @ledger_router.get("/ledger/compare")
