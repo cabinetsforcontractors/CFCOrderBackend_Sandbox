@@ -23,6 +23,7 @@ out in hand-written emails. Two mechanisms:
     tracking by hand — the robot must NOT draft a second tracking email).
   - The same guard runs continuously inside the sweep for the last 48h of
     sent mail, so future hand-sent tracking emails keep the DB honest.
+    Orders already stamped are skipped entirely (idempotent, no event spam).
 
 Ship windows are SUPPLIER-BASED (SUPPLIER_DELAY_ROOT_CAUSE_AUDIT_20260718.md).
 Language law: NEVER "in production" — post-payment voice is "sent to the
@@ -403,7 +404,8 @@ _ORDER_RE = re.compile(r"#\s?(\d{4})\b")
 def stamp_manual_tracking(hours_back: int = 48, dry_run: bool = False) -> Dict:
     """Scan SENT 'TRACKING INFO' emails; stamp orders.tracking/pro_number ONLY
     when empty, and mark the promise row's tracking stage complete (the
-    customer already got tracking by hand — no robot tracking draft)."""
+    customer already got tracking by hand — no robot tracking draft).
+    Orders that already carry tracking are skipped (idempotent)."""
     from gmail_sync import gmail_configured, search_emails
     from ghi_inbox import _fetch_text
 
@@ -442,15 +444,17 @@ def stamp_manual_tracking(hours_back: int = 48, dry_run: bool = False) -> Dict:
                         out["skipped"].append(f"{oid}: no order row")
                         continue
                     cur_trk, cur_pro = row
+                    if (cur_trk or "").strip() or (cur_pro or "").strip():
+                        out["skipped"].append(f"{oid}: already stamped")
+                        continue
                     item = {"order_id": oid, "pro": pro, "ups": ups}
                     if dry_run:
                         out["stamped"].append(item)
                         continue
-                    if not (cur_trk or "").strip():
-                        cur.execute("""UPDATE orders SET tracking = %s,
-                                       updated_at = NOW() WHERE order_id = %s""",
-                                    (trk, oid))
-                    if pro and not (cur_pro or "").strip():
+                    cur.execute("""UPDATE orders SET tracking = %s,
+                                   updated_at = NOW() WHERE order_id = %s""",
+                                (trk, oid))
+                    if pro:
                         cur.execute("""UPDATE orders SET pro_number = %s,
                                        updated_at = NOW() WHERE order_id = %s""",
                                     (pro, oid))
