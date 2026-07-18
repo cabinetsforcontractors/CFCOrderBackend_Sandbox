@@ -1,43 +1,43 @@
 """
 progress_emails.py
-CUSTOMER PROGRESS EMAILS (William spec 2026-07-18; windows BLESSED 2026-07-18,
-TIGHTENED same day after the root-cause audit: suppliers are faster than the
-history suggested because the history contained OUR lag).
+CUSTOMER PROGRESS EMAILS (William spec 2026-07-18; windows BLESSED + tightened
+2026-07-18 after the root-cause audit).
 
-Three customer touches, ALL created as GMAIL DRAFTS for William to review and
-send (draft-first law — nothing customer-facing sends itself):
+Customer touches, ALL created as GMAIL DRAFTS for William to review and send
+(draft-first law — nothing customer-facing sends itself):
 
-  1. POST-PAYMENT — right after payment lands: "sent to the warehouse, we'll
-     update you as it progresses" + honest arrival window in real dates.
-  2. DELAY — expected ship date blown with no tracking captured: apologize,
-     re-promise from today.
-  3. TRACKING — tracking/PRO captured: numbers + CLICK-TO-FOLLOW carrier links
-     (R+L trace page / UPS tracker) + the mandatory note that tracking shows
-     nothing until the carrier scans the pickup.
+  1. POST-PAYMENT — arrival window in real dates, supplier-based.
+  2. DELAY — promised ship date blown with no tracking: re-promise from today.
+  3. TRACKING — tracking/PRO captured: numbers + CLICK-TO-FOLLOW carrier links.
+  4. DELIVERY DAY — R+L ShipmentTracing poll (morning, once per day per
+     shipment): when the PRO shows estimated delivery TODAY or out-for-
+     delivery, draft "your order is scheduled to be delivered today"
+     (+ inspect-before-signing note). Delivered -> recorded quietly.
+     UPS delivery-day needs a UPS API account (not available yet).
 
-Ship windows are SUPPLIER-BASED (SUPPLIER_DELAY_ROOT_CAUSE_AUDIT_20260718.md):
-Milestone states 48h processing and hits it; ROC ships small orders same/next
-day; GHI pulls next-day but their dock queue is real. Language law: NEVER
-"in production" — post-payment voice is "sent to the warehouse".
+TRACKING TRUTH REPAIR (William 2026-07-18): the DB missed tracking that went
+out in hand-written emails. Two mechanisms:
+  - POST /progress/backfill-tracking — one-time sweep of SENT "TRACKING INFO"
+    emails (default 90 days): stamps orders.tracking/pro_number ONLY when the
+    fields are empty, and marks the promise row complete (customer already got
+    tracking by hand — the robot must NOT draft a second tracking email).
+  - The same guard runs continuously inside the sweep for the last 48h of
+    sent mail, so future hand-sent tracking emails keep the DB honest.
 
-Runs as a sweep on every gmail-sync cycle (hooked in estimate_verifier.
-scan_replies) + manual POST /progress/run [admin]. One draft per stage per
-order (progress_promises table). Pickup orders may still get a draft — the
-draft-first review is the filter. Orders that ALREADY carry tracking when
-first seen (handled manually pre-system) are skipped; /progress/{id}/mark
-silences an order, /progress/{id}/reset-tracking undoes a bogus capture,
-/progress/{id}/redo-post-payment re-drafts with current windows (delete the
-old Gmail draft after).
+Ship windows are SUPPLIER-BASED (SUPPLIER_DELAY_ROOT_CAUSE_AUDIT_20260718.md).
+Language law: NEVER "in production" — post-payment voice is "sent to the
+warehouse". Runs as a sweep on every gmail-sync cycle (hooked in
+estimate_verifier.scan_replies) + manual POST /progress/run [admin].
 
 INCIDENT LESSON (2026-07-18): the email-detection scanner reads MAILBOX
-CONTENT for PRO patterns — an example draft containing a real order number +
-a made-up PRO stamped the real order and drafted a bogus customer email
-(draft-first caught it). NEVER put real order ids with fake tracking numbers
-into any email/draft; examples belong in chat, not in the mailbox.
+CONTENT for PRO patterns — never put real order ids with fake tracking
+numbers into any email/draft; examples belong in chat, not in the mailbox.
 """
 
 import json
 import re
+import urllib.parse
+import urllib.request
 from datetime import date, datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 
@@ -69,6 +69,10 @@ SIGNATURE = ("--\nWilliam Prince\nCabinets For Contractors\n"
 RL_TRACE_URL = ("https://www2.rlcarriers.com/freight/shipping/shipment-tracing"
                 "?pro={pro}&docType=PRO&source=web")
 UPS_TRACK_URL = "https://www.ups.com/track?tracknum={num}"
+
+# delivery-day poll: once per ET day per shipment, mornings (>= 10:00 UTC)
+DELIVERY_POLL_START_UTC = 10
+DELIVERY_POLL_MAX_AGE_DAYS = 45   # stop polling ancient shipments
 
 
 # =============================================================================
@@ -165,6 +169,14 @@ def ensure_progress_table(conn):
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
             )
         """)
+        for col, typ in (("delivery_notice_at", "TIMESTAMP WITH TIME ZONE"),
+                         ("delivered_at", "TIMESTAMP WITH TIME ZONE"),
+                         ("last_poll_date", "DATE")):
+            try:
+                cur.execute(f"ALTER TABLE progress_promises "
+                            f"ADD COLUMN IF NOT EXISTS {col} {typ}")
+            except Exception:
+                conn.rollback()
         conn.commit()
 
 
@@ -262,6 +274,214 @@ def _tracking_body(order: Dict) -> str:
         f"normal.\n\n{SIGNATURE}")
 
 
+def _delivery_today_body(order: Dict) -> str:
+    return (
+        f"Hey {_first_name(order)},\n\n"
+        f"Good news - your order #{order['order_id']} is scheduled to be "
+        f"delivered TODAY.\n\n"
+        f"When it arrives, please look over the pallet BEFORE signing the "
+        f"delivery receipt and note any visible damage on the receipt - that "
+        f"protects you if anything needs a claim.\n\n"
+        f"Any questions, just reply.\n\n{SIGNATURE}")
+
+
+# =============================================================================
+# R+L SHIPMENT TRACING (delivery-day layer)
+# =============================================================================
+
+def _rl_trace(pro: str) -> Optional[Dict]:
+    """First shipment record from R+L ShipmentTracing, or None."""
+    import os
+    key = os.environ.get("RL_CARRIERS_API_KEY", "")
+    if not key or not pro:
+        return None
+    url = ("https://api.rlc.com/ShipmentTracing?"
+           + urllib.parse.urlencode({"TraceNumbers": pro, "TraceType": "PRO"}))
+    try:
+        req = urllib.request.Request(url)
+        req.add_header("apiKey", key)
+        with urllib.request.urlopen(req, timeout=30) as r:
+            data = json.loads(r.read().decode(errors="replace"))
+        ships = data.get("Shipments") or []
+        return ships[0] if ships else None
+    except Exception as e:
+        print(f"[PROGRESS] RL trace failed for {pro}: {e}")
+        return None
+
+
+def run_delivery_poll(out: Dict):
+    """Morning poll (once per ET day per shipment): R+L PRO -> delivered
+    (recorded quietly) or estimated-delivery-today / out-for-delivery ->
+    'scheduled to be delivered TODAY' customer draft."""
+    from psycopg2.extras import RealDictCursor
+
+    now = datetime.now(timezone.utc)
+    if now.hour < DELIVERY_POLL_START_UTC:
+        return
+    today = date.today()
+    with get_db() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT o.*, p.last_poll_date FROM progress_promises p
+                JOIN orders o ON o.order_id = p.order_id
+                WHERE p.tracking_at IS NOT NULL
+                  AND p.delivered_at IS NULL
+                  AND p.delivery_notice_at IS NULL
+                  AND (p.last_poll_date IS NULL OR p.last_poll_date < %s)
+                  AND p.created_at > NOW() - (%s || ' days')::interval
+                  AND o.pro_number IS NOT NULL AND o.pro_number <> ''
+                LIMIT 25
+            """, (today, DELIVERY_POLL_MAX_AGE_DAYS))
+            candidates = cur.fetchall()
+
+        for o in candidates:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("""UPDATE progress_promises SET last_poll_date = %s
+                                   WHERE order_id = %s""", (today, o["order_id"]))
+                    conn.commit()
+                ship = _rl_trace(o["pro_number"])
+                if not ship:
+                    continue
+                short = (ship.get("ShortStatus") or "").lower()
+                est = (ship.get("EstimatedDelivery") or "").strip()
+                est_today = False
+                try:
+                    est_today = (datetime.strptime(est, "%m/%d/%Y").date()
+                                 == today) if est else False
+                except ValueError:
+                    pass
+                if "delivered" in short:
+                    with conn.cursor() as cur:
+                        cur.execute("""UPDATE progress_promises
+                                       SET delivered_at = NOW()
+                                       WHERE order_id = %s""", (o["order_id"],))
+                        cur.execute("""
+                            INSERT INTO order_events
+                                (order_id, event_type, event_data, source)
+                            VALUES (%s, 'customer_delivery_confirmed', %s,
+                                    'progress_emails')
+                        """, (o["order_id"], json.dumps({
+                            "pro": o["pro_number"],
+                            "delivery": ship.get("DeliveryDate"),
+                            "status": ship.get("LongStatus")})))
+                        conn.commit()
+                    out["delivered"].append(o["order_id"])
+                elif est_today or "out for delivery" in short:
+                    body = _delivery_today_body(o)
+                    draft_id = _make_draft(
+                        o["email"],
+                        f"Order #{o['order_id']} - out for delivery today",
+                        body)
+                    if draft_id:
+                        with conn.cursor() as cur:
+                            cur.execute("""UPDATE progress_promises
+                                           SET delivery_notice_at = NOW()
+                                           WHERE order_id = %s""",
+                                        (o["order_id"],))
+                            conn.commit()
+                        _notify(o["order_id"], "delivery-today", body)
+                        out["delivery_today"].append(o["order_id"])
+            except Exception as e:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                out["errors"].append(f"delivery poll {o.get('order_id')}: {e}")
+
+
+# =============================================================================
+# TRACKING TRUTH: hand-sent "TRACKING INFO" emails -> stamp the DB
+# =============================================================================
+
+_PRO_RE = re.compile(r"PRO\s*(?:#|Number)?[:\s]*([A-Z]{0,2}\d{8,10}(?:-\d)?)",
+                     re.IGNORECASE)
+_UPS_RE = re.compile(r"\b(1Z[0-9A-Z]{10,16})\b")
+_ORDER_RE = re.compile(r"#\s?(\d{4})\b")
+
+
+def stamp_manual_tracking(hours_back: int = 48, dry_run: bool = False) -> Dict:
+    """Scan SENT 'TRACKING INFO' emails; stamp orders.tracking/pro_number ONLY
+    when empty, and mark the promise row's tracking stage complete (the
+    customer already got tracking by hand — no robot tracking draft)."""
+    from gmail_sync import gmail_configured, search_emails
+    from ghi_inbox import _fetch_text
+
+    out = {"status": "ok", "checked": 0, "stamped": [], "skipped": [],
+           "errors": [], "dry_run": dry_run}
+    if not gmail_configured():
+        out["status"] = "skipped"
+        return out
+    try:
+        msgs = search_emails(
+            f'newer_than:{int(hours_back)}h in:sent subject:"TRACKING INFO"', 50)
+    except Exception as e:
+        return {"status": "error", "errors": [f"search: {e}"]}
+    with get_db() as conn:
+        ensure_progress_table(conn)
+        for m in msgs:
+            try:
+                text, subject, _sender = _fetch_text(m["id"])
+                out["checked"] += 1
+                om = _ORDER_RE.search(subject)
+                if not om:
+                    continue
+                oid = om.group(1)
+                pros = _PRO_RE.findall(text)
+                ups = _UPS_RE.findall(text.upper())
+                if not pros and not ups:
+                    out["skipped"].append(f"{oid}: no numbers parsed")
+                    continue
+                pro = pros[0] if pros else None
+                trk = " ".join(ups) if ups else (f"R+L PRO {pro}" if pro else "")
+                with conn.cursor() as cur:
+                    cur.execute("""SELECT tracking, pro_number FROM orders
+                                   WHERE order_id = %s""", (oid,))
+                    row = cur.fetchone()
+                    if not row:
+                        out["skipped"].append(f"{oid}: no order row")
+                        continue
+                    cur_trk, cur_pro = row
+                    item = {"order_id": oid, "pro": pro, "ups": ups}
+                    if dry_run:
+                        out["stamped"].append(item)
+                        continue
+                    if not (cur_trk or "").strip():
+                        cur.execute("""UPDATE orders SET tracking = %s,
+                                       updated_at = NOW() WHERE order_id = %s""",
+                                    (trk, oid))
+                    if pro and not (cur_pro or "").strip():
+                        cur.execute("""UPDATE orders SET pro_number = %s,
+                                       updated_at = NOW() WHERE order_id = %s""",
+                                    (pro, oid))
+                    # hand-sent tracking = stage complete; keep delivery poll
+                    # alive by NOT touching delivered/delivery_notice fields
+                    cur.execute("""
+                        INSERT INTO progress_promises
+                            (order_id, suppliers, post_payment_at, tracking_at)
+                        VALUES (%s, 'manual-tracking', NOW(), NOW())
+                        ON CONFLICT (order_id) DO UPDATE
+                        SET tracking_at = COALESCE(progress_promises.tracking_at,
+                                                   NOW())
+                    """, (oid,))
+                    cur.execute("""
+                        INSERT INTO order_events
+                            (order_id, event_type, event_data, source)
+                        VALUES (%s, 'manual_tracking_stamped', %s,
+                                'progress_emails')
+                    """, (oid, json.dumps({"message_id": m["id"],
+                                           "pro": pro, "ups": ups})))
+                    conn.commit()
+                    out["stamped"].append(item)
+            except Exception as e:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                out["errors"].append(f"{m.get('id')}: {e}")
+    return out
+
+
 # =============================================================================
 # THE SWEEP (rides every gmail-sync cycle; idempotent per stage per order)
 # =============================================================================
@@ -270,7 +490,17 @@ def run_progress_sweep(dry_run: bool = False, days_back: int = 7) -> Dict:
     from psycopg2.extras import RealDictCursor
 
     out = {"status": "ok", "post_payment": [], "delay": [], "tracking": [],
-           "dry_run": dry_run, "errors": []}
+           "delivery_today": [], "delivered": [], "dry_run": dry_run,
+           "errors": []}
+
+    # 0) keep the DB honest about hand-sent tracking BEFORE drafting anything
+    try:
+        guard = stamp_manual_tracking(hours_back=48, dry_run=dry_run)
+        if guard.get("stamped"):
+            out["manual_tracking_stamped"] = guard["stamped"]
+    except Exception as e:
+        out["errors"].append(f"manual tracking guard: {e}")
+
     with get_db() as conn:
         ensure_progress_table(conn)
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -406,6 +636,13 @@ def run_progress_sweep(dry_run: bool = False, days_back: int = 7) -> Dict:
                     pass
                 out["errors"].append(f"tracking {o.get('order_id')}: {e}")
 
+    # 4) delivery-day layer (R+L only; UPS needs a UPS API account)
+    if not dry_run:
+        try:
+            run_delivery_poll(out)
+        except Exception as e:
+            out["errors"].append(f"delivery poll: {e}")
+
     return out
 
 
@@ -417,6 +654,14 @@ def run_progress_sweep(dry_run: bool = False, days_back: int = 7) -> Dict:
 def progress_run(dry_run: bool = False, days_back: int = 7,
                  _: bool = Depends(require_admin)):
     return run_progress_sweep(dry_run=dry_run, days_back=days_back)
+
+
+@progress_router.post("/progress/backfill-tracking")
+def progress_backfill(days_back: int = 90, dry_run: bool = True,
+                      _: bool = Depends(require_admin)):
+    """One-time Gmail truth repair: stamp tracking from historical hand-sent
+    TRACKING INFO emails (only-if-empty; marks stage complete, no drafts)."""
+    return stamp_manual_tracking(hours_back=days_back * 24, dry_run=dry_run)
 
 
 @progress_router.get("/progress")
