@@ -17,7 +17,8 @@ Two jobs:
    stays searchable; NEVER customer info. A notification email tells us a draft
    is waiting. One draft per (order, SO doc) — re-verifies don't duplicate.
    NOTE: internal-only flags (PRICE-CHECK = our stale cogs.csv) go in the
-   notification to US, never in the draft to GHI.
+   notification to US, never in the draft to GHI — if ALL flags are internal,
+   the draft is a plain approval.
 
 2. CROSS-THREAD PO CAPTURE. GHI answers questions about one order inside
    another order's thread, or in fresh emails, with no rhyme or reason
@@ -185,7 +186,10 @@ def create_approval_draft(order_id: str, doc_ref: str, report: Dict,
     greeting = supplier_greeting("GHI").replace("Hey", "Hi")
     door = _door_text(order_id)
 
-    if clean:
+    asks = [] if clean else build_approval_asks(report)
+    if clean or not asks:
+        # clean verify, or every flag was internal-only (e.g. PRICE-CHECK =
+        # our stale cogs data): GHI has nothing to fix -> plain approval.
         n = len(report.get("matched") or [])
         units = report.get("supplier_line_total")
         body = (f"{greeting}\n\n"
@@ -193,11 +197,8 @@ def create_approval_draft(order_id: str, doc_ref: str, report: Dict,
                 f"{f' - all {n} lines match, {units} pieces' if n else ''}.\n\n"
                 f"PO {order_id} is approved for processing.\n\n"
                 f"Thank you\nWilliam")
+        drafted_clean = True
     else:
-        asks = build_approval_asks(report)
-        if not asks:
-            asks = ["Please re-send the SO - our checker flagged it but could "
-                    "not compose a specific question (a human is looking too)."]
         numbered = "\n".join(f"{i}. {a}" for i, a in enumerate(asks, 1))
         body = (f"{greeting}\n\n"
                 f"SO {doc_ref} for our PO {order_id}{door} mostly checks out - "
@@ -206,6 +207,7 @@ def create_approval_draft(order_id: str, doc_ref: str, report: Dict,
                 f"Once that is confirmed/corrected, PO {order_id} is approved "
                 f"for processing.\n\n"
                 f"Thank you\nWilliam")
+        drafted_clean = False
 
     mime = MIMEText(body)
     mime["To"] = contact_email
@@ -228,7 +230,7 @@ def create_approval_draft(order_id: str, doc_ref: str, report: Dict,
                     INSERT INTO order_events (order_id, event_type, event_data, source)
                     VALUES (%s, 'ghi_approval_draft', %s, 'ghi_inbox')
                 """, (order_id, json.dumps({
-                    "doc_ref": doc_ref, "clean": clean,
+                    "doc_ref": doc_ref, "clean": drafted_clean,
                     "draft_id": res.get("id"), "message_id": message_id})))
                 conn.commit()
     except Exception as e:
@@ -240,14 +242,14 @@ def create_approval_draft(order_id: str, doc_ref: str, report: Dict,
     _send_email(
         order_id, INTERNAL_ALERT_EMAIL,
         f"APPROVAL DRAFT READY - PO {order_id} (GHI SO {doc_ref})"
-        + ("" if clean else " - has confirm questions"),
+        + ("" if drafted_clean else " - has confirm questions"),
         f"<div style='font-family:Arial,sans-serif;font-size:14px;'>"
         f"<p>The reply draft for GHI is waiting in Gmail drafts - review and send.</p>"
         f"<pre style='background:#f5f5f5;padding:12px;white-space:pre-wrap;'>"
         f"{body}</pre>{notes_html}</div>",
         triggered_by="ghi_approval_draft")
     return {"status": "drafted", "order_id": order_id, "doc_ref": doc_ref,
-            "clean": clean, "draft_id": res.get("id")}
+            "clean": drafted_clean, "draft_id": res.get("id")}
 
 
 # =============================================================================
