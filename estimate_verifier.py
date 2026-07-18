@@ -15,6 +15,14 @@ against what we sent, and flips the supplier_orders state row:
                     Internal-table alert only as fallback when no actionable
                     revision can be composed.
 
+GHI EXCEPTION (William 2026-07-18): GHI's channel is a HUMAN reply — their
+"review and approve for processing" step. Instead of an auto revision request,
+every GHI verdict (clean or flagged) produces an approval REPLY DRAFT in the
+GHI thread via ghi_inbox.create_approval_draft; William reviews and sends
+(draft-first law). ghi_inbox.ghi_thread_capture also rides every scan: GHI
+answers about one order arrive in other orders' threads, so every GHI email
+is scanned for PO mentions and filed against the orders it names.
+
 ALERT THROTTLE: an identical discrepancy report (same order/supplier/hash)
 triggers the supplier email AT MOST once per 6 hours, no matter how many
 times the verifier runs. Rows still update every run. A NEW document with a
@@ -376,7 +384,8 @@ def _mark_alert_sent(order_id: str, supplier: str, report_hash: str):
 def _apply_verdict(order_id: str, supplier: str, verdict_ok: bool,
                    doc_ref: str, report: Dict, message_id: str) -> str:
     """Flip (or create) the supplier_orders row; on discrepancy, email the
-    SUPPLIER a revision request (CC us) and start the escalation clock."""
+    SUPPLIER a revision request (CC us) and start the escalation clock.
+    GHI instead gets an approval REPLY DRAFT (draft-first, William 2026-07-18)."""
     from config import SUPPLIER_INFO
     from supplier_orders import ensure_supplier_orders_table, _send_email
 
@@ -415,6 +424,19 @@ def _apply_verdict(order_id: str, supplier: str, verdict_ok: bool,
                                       "unresolved_supplier_lines", "flags")},
             }, default=str)))
             conn.commit()
+
+    if supplier == "GHI":
+        # GHI's channel is a HUMAN reply to their "review and approve" email:
+        # the robot writes the approval draft (clean or conditional) and
+        # notifies us — no auto revision request goes to GHI (draft-first law,
+        # William 2026-07-18).
+        try:
+            from ghi_inbox import create_approval_draft
+            create_approval_draft(order_id, doc_ref, report, message_id,
+                                  clean=verdict_ok)
+        except Exception as e:
+            print(f"[VERIFY] GHI approval draft error: {e}")
+        return status
 
     if verdict_ok:
         return status
@@ -686,4 +708,9 @@ def scan_replies(hours_back: int = 24) -> Dict:
         out["escalations"] = check_discrepancy_followups()
     except Exception as e:
         out["errors"].append(f"escalation clock: {e}")
+    try:
+        from ghi_inbox import ghi_thread_capture
+        out["ghi_inbox"] = ghi_thread_capture(hours_back)
+    except Exception as e:
+        out["errors"].append(f"ghi inbox capture: {e}")
     return out
