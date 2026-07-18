@@ -145,12 +145,25 @@ _GHI_SKIP = ("Net Order", "Discount", "Freight", "Sales Tax", "Order Total",
 
 
 def ghi_desc_to_tokens(desc):
-    """Truncated-description grammar -> candidate GHI SKU tokens."""
+    """Truncated-description grammar -> candidate GHI SKU tokens.
+
+    Width-only + 3-dim branches per William rulings 2026-07-18 (5693/SO 17118):
+    "BASE 21" / "3 DRAWER BASE 30"" / "FARM SINK BASE 36"" carry the WIDTH as
+    their only number; "REFRIGERATOR PANEL 96" is the 96" ref panel (our
+    RP2496-1.5 — 1.5" vs GHI's 1-9/16" filler width is a ruled pass); JIFFY KIT
+    appears as "JIFFFY" (their spelling) and is a match. Deep walls print THREE
+    numbers ("WALL 36X24X24") — the third is the DEPTH, and GHI sells both
+    depths as separate SKUs, so it must never be dropped (SO 17024 proof).
+    """
     d = desc.upper().replace("''", "").strip()
+    m3 = re.search(r"(\d+(?:\.\d+)?)\s*X\s*(\d+(?:\.\d+)?)\s*X\s*(\d+(?:\.\d+)?)", d)
     m = re.search(r"(\d+(?:\.\d+)?)\s*X\s*(\d+(?:\.\d+)?)", d)
     w, h = (m.group(1), m.group(2)) if m else (None, None)
     if "SAMPLE DOOR" in d:
         return ["SAMPLE"]
+    if "WALL PANTRY" in d and w:
+        # "WALL PANTRY 18X84" -> WP1884 (84s are direct rows; 90/96 = composites)
+        return [f"WP{int(float(w))}{int(float(h))}"]
     if "UTILITY BASE" in d and w:
         return [f"UCB{int(float(w)):02d}{int(float(h)):02d}"]
     if "TOE KICK" in d:
@@ -161,6 +174,13 @@ def ghi_desc_to_tokens(desc):
         return ["SCM7", "SM8"]
     if "CROWN" in d:
         return ["CM8"]
+    if "KIT" in d and re.search(r"JIF+Y", d):
+        # GHI spells it JIFFY or JIFFFY (ruled a match, 5693)
+        return ["JIFFY-KIT", "JK"]
+    if "PANEL" in d and ("REFRIGERATOR" in d or "REF" in d):
+        n = re.search(r"(\d{2,3})", d)
+        if n:
+            return [f"RP{n.group(1)}", f"RP24{n.group(1)}-1.5", f"RP24{n.group(1)}"]
     if "FILLER" in d and w:
         return [f"F{int(float(w))}{int(float(h))}"]
     if "VANITY 3 DRAWER" in d and w:
@@ -169,10 +189,31 @@ def ghi_desc_to_tokens(desc):
         return [f"V{int(float(w))}{int(float(h))}D"]
     if "VANITY" in d and w:
         return [f"V{int(float(w))}{int(float(h))}"]
+    if "WALL" in d and m3:
+        # THREE numbers = W x H x DEPTH ("WALL 36X24X24" -> W362424). No 2-dim
+        # fallback here on purpose: guessing the depth away is the exact
+        # wrong-cabinet trap this branch exists to close.
+        return [f"W{int(float(m3.group(1))):02d}{int(float(m3.group(2))):02d}"
+                f"{int(float(m3.group(3))):02d}"]
     if "WALL" in d and w:
         return [f"W{int(float(w)):02d}{int(float(h)):02d}"]
+    if "FARM SINK" in d:
+        n = re.search(r"BASE\s*(\d+)", d) or re.search(r"(\d{2})", d)
+        if n:
+            return [f"FSB{int(n.group(1))}"]
+    if "DRAWER BASE" in d:
+        dm = re.search(r"(\d)\s*DRAWER\s*BASE\s*(\d+)", d)
+        if dm:
+            return [f"DB{int(dm.group(2))}-{dm.group(1)}", f"DB{int(dm.group(2))}"]
+        n = re.search(r"BASE\s*(\d+)", d)
+        if n:
+            return [f"DB{int(n.group(1))}"]
     if ("BASE" in d or "CABINET" in d) and w:
         return [f"B{int(float(w)):02d}"]
+    if "BASE" in d:
+        n = re.search(r"BASE\s*(\d+)", d)
+        if n:
+            return [f"B{int(n.group(1)):02d}"]
     return []
 
 
@@ -260,6 +301,13 @@ def resolve_ghi_lines(parsed, rev):
             ln["note"] = "sample door line — order via Misc sheet, verify manually"
         if prefix:
             prev_prefix = prefix
+    # COGS price fingerprint (William 2026-07-18): the billed price must match
+    # the cost of the cabinet the description resolved to — belt & suspenders.
+    try:
+        from ghi_cogs import annotate_price_fingerprint
+        annotate_price_fingerprint(parsed["lines"])
+    except Exception:
+        pass  # missing table/data must never break verification
     return parsed
 
 
