@@ -79,8 +79,7 @@ def biz_add(start: date, days: int) -> date:
 
 
 def _nice(d: date) -> str:
-    return d.strftime("%A, %B %-d") if hasattr(d, "strftime") and False else \
-        d.strftime("%A, %B ") + str(d.day)
+    return d.strftime("%A, %B ") + str(d.day)
 
 
 # =============================================================================
@@ -88,12 +87,14 @@ def _nice(d: date) -> str:
 # =============================================================================
 
 def order_suppliers(conn, order_id: str) -> List[str]:
+    """Suppliers on the order: line-item warehouse column first, prefix map
+    fallback (order_line_items columns: sku, sku_prefix, warehouse)."""
     with conn.cursor() as cur:
         cur.execute("""
-            SELECT DISTINCT wm.warehouse_name
+            SELECT DISTINCT COALESCE(NULLIF(oli.warehouse, ''), wm.warehouse_name)
             FROM order_line_items oli
-            JOIN warehouse_mapping wm
-              ON UPPER(SPLIT_PART(oli.product_sku, '-', 1)) = UPPER(wm.sku_prefix)
+            LEFT JOIN warehouse_mapping wm
+              ON UPPER(oli.sku_prefix) = UPPER(wm.sku_prefix)
             WHERE oli.order_id = %s
         """, (order_id,))
         return sorted({r[0] for r in cur.fetchall() if r[0]})
@@ -305,6 +306,10 @@ def run_progress_sweep(dry_run: bool = False, days_back: int = 7) -> Dict:
                     item["draft_id"] = draft_id
                 out["post_payment"].append(item)
             except Exception as e:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
                 out["errors"].append(f"post-payment {o.get('order_id')}: {e}")
 
         for o in late:
@@ -335,6 +340,10 @@ def run_progress_sweep(dry_run: bool = False, days_back: int = 7) -> Dict:
                     item["draft_id"] = draft_id
                 out["delay"].append(item)
             except Exception as e:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
                 out["errors"].append(f"delay {o.get('order_id')}: {e}")
 
         for o in shipped:
@@ -357,6 +366,10 @@ def run_progress_sweep(dry_run: bool = False, days_back: int = 7) -> Dict:
                     item["draft_id"] = draft_id
                 out["tracking"].append(item)
             except Exception as e:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
                 out["errors"].append(f"tracking {o.get('order_id')}: {e}")
 
     return out
