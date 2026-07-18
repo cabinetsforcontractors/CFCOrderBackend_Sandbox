@@ -1,6 +1,8 @@
 """
 progress_emails.py
-CUSTOMER PROGRESS EMAILS (William spec 2026-07-18; windows BLESSED 2026-07-18).
+CUSTOMER PROGRESS EMAILS (William spec 2026-07-18; windows BLESSED 2026-07-18,
+TIGHTENED same day after the root-cause audit: suppliers are faster than the
+history suggested because the history contained OUR lag).
 
 Three customer touches, ALL created as GMAIL DRAFTS for William to review and
 send (draft-first law — nothing customer-facing sends itself):
@@ -13,11 +15,9 @@ send (draft-first law — nothing customer-facing sends itself):
      (R+L trace page / UPS tracker) + the mandatory note that tracking shows
      nothing until the carrier scans the pickup.
 
-Ship windows are SUPPLIER-BASED, from the 2026-07-18 email root-cause audit
-(SUPPLIER_DELAY_ROOT_CAUSE_AUDIT_20260718.md — blessed as-is): the historical
-3-10 day swings were mostly OUR lag (late approvals, unanswered supplier
-questions, blind pickup windows), which the platform now automates/watches, so
-promises are keyed to each supplier's demonstrated speed. Language law: NEVER
+Ship windows are SUPPLIER-BASED (SUPPLIER_DELAY_ROOT_CAUSE_AUDIT_20260718.md):
+Milestone states 48h processing and hits it; ROC ships small orders same/next
+day; GHI pulls next-day but their dock queue is real. Language law: NEVER
 "in production" — post-payment voice is "sent to the warehouse".
 
 Runs as a sweep on every gmail-sync cycle (hooked in estimate_verifier.
@@ -25,7 +25,9 @@ scan_replies) + manual POST /progress/run [admin]. One draft per stage per
 order (progress_promises table). Pickup orders may still get a draft — the
 draft-first review is the filter. Orders that ALREADY carry tracking when
 first seen (handled manually pre-system) are skipped; /progress/{id}/mark
-silences an order, /progress/{id}/reset-tracking undoes a bogus capture.
+silences an order, /progress/{id}/reset-tracking undoes a bogus capture,
+/progress/{id}/redo-post-payment re-drafts with current windows (delete the
+old Gmail draft after).
 
 INCIDENT LESSON (2026-07-18): the email-detection scanner reads MAILBOX
 CONTENT for PRO patterns — an example draft containing a real order number +
@@ -47,10 +49,12 @@ from db_helpers import get_db
 progress_router = APIRouter(tags=["progress-emails"])
 
 # BLESSED ship windows in BUSINESS DAYS (paid -> carrier pickup), per supplier
+# (William tightened 2026-07-18 PM: LM 2-3 per their stated 48h, ROC 1-2,
+# GHI 2-4)
 SHIP_WINDOWS = {
-    "ROC": (1, 3),
-    "GHI": (2, 5),
-    "Love-Milestone": (2, 5),
+    "ROC": (1, 2),
+    "GHI": (2, 4),
+    "Love-Milestone": (2, 3),
 }
 DEFAULT_SHIP_WINDOW = (3, 8)   # unmeasured suppliers — provisional, conservative
 TRANSIT_UPS = (1, 3)
@@ -468,3 +472,18 @@ def progress_reset_tracking(order_id: str, rearm: bool = True,
             conn.commit()
     return {"status": "ok", "order_id": order_id, "cleared_fields": clear_fields,
             "rearmed": rearm}
+
+
+@progress_router.post("/progress/{order_id}/redo-post-payment")
+def progress_redo_post_payment(order_id: str, _: bool = Depends(require_admin)):
+    """Delete the promise row so the next sweep re-drafts post-payment with
+    the CURRENT windows (used after William re-blesses window numbers).
+    Delete the outdated Gmail draft after the new one appears."""
+    with get_db() as conn:
+        ensure_progress_table(conn)
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM progress_promises WHERE order_id = %s",
+                        (order_id,))
+            deleted = cur.rowcount
+            conn.commit()
+    return {"status": "ok", "order_id": order_id, "row_deleted": bool(deleted)}
