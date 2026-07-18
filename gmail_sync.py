@@ -34,6 +34,23 @@ SYSTEM_EMAIL_SUBJECTS = [
     "cancellation confirmation",
 ]
 
+# OUR OWN automation notification subjects — the capture sections must NEVER
+# parse these: they echo order numbers + tracking previews, and once created a
+# self-reinfecting loop with a bogus PRO number (incident 2026-07-18: a
+# "PROGRESS DRAFT READY - tracking" notify kept re-stamping a fake PRO onto
+# the order every cycle, each re-stamp generating a fresh notify).
+AUTOMATION_SUBJECT_PREFIXES = (
+    "PROGRESS DRAFT READY",
+    "APPROVAL DRAFT READY",
+    "DISCREPANCY",
+    "ALERT!!",
+    "GHI EMAIL NEEDS A HUMAN",
+)
+
+
+def is_own_automation_email(subject: str) -> bool:
+    return (subject or "").upper().startswith(AUTOMATION_SUBJECT_PREFIXES)
+
 # Cache access token
 _access_token = None
 _token_expires = None
@@ -194,7 +211,7 @@ def is_customer_email(email_from: str, email_to: str) -> str:
     
     CFC emails: cabinetsforcontractors, william, 4wprince
     """
-    cfc_patterns = ['cabinetsforcontractors', 'william', '4wprince', 'team@cabinetcloudai']
+    cfc_patterns = ['cabinetsforcontractors', 'william', '4wprince', 'team@cabinetcloudai', 'wpjob1']
     
     from_lower = (email_from or '').lower()
     to_lower = (email_to or '').lower()
@@ -385,6 +402,10 @@ def run_gmail_sync(db_conn, hours_back=2):
                 if not email:
                     continue
                 
+                # Never parse our own automation notifications (incident 2026-07-18)
+                if is_own_automation_email(email.get('subject', '')):
+                    continue
+                
                 # Look for quote number pattern
                 quote_match = re.search(r'(?:RL\s+)?Quote\s*(?:No|#)?[:\s]*(\d{6,10})', 
                                        email['body'], re.IGNORECASE)
@@ -410,6 +431,12 @@ def run_gmail_sync(db_conn, hours_back=2):
             try:
                 email = get_email_content(msg['id'])
                 if not email:
+                    continue
+                
+                # Never capture tracking from OUR OWN automation notifications —
+                # they echo order numbers + tracking previews and once created a
+                # self-reinfecting loop with a bogus PRO (incident 2026-07-18).
+                if is_own_automation_email(email.get('subject', '')):
                     continue
                 
                 text = email['subject'] + ' ' + email['body']
@@ -452,6 +479,10 @@ def run_gmail_sync(db_conn, hours_back=2):
                 
                 # Skip system-generated emails
                 if is_system_generated_email(email.get('subject', '')):
+                    continue
+                
+                # Skip our own automation notifications
+                if is_own_automation_email(email.get('subject', '')):
                     continue
                 
                 # Determine if customer-related
