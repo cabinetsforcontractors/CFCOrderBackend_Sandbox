@@ -23,6 +23,10 @@ GHI thread via ghi_inbox.create_approval_draft; William reviews and sends
 answers about one order arrive in other orders' threads, so every GHI email
 is scanned for PO mentions and filed against the orders it names.
 
+PROGRESS SWEEP (William 2026-07-18): progress_emails.run_progress_sweep also
+rides every scan — post-payment arrival-window / delay / tracking customer
+DRAFTS (draft-first), promised windows keyed to blessed per-supplier speeds.
+
 ALERT THROTTLE: an identical discrepancy report (same order/supplier/hash)
 triggers the supplier email AT MOST once per 6 hours, no matter how many
 times the verifier runs. Rows still update every run. A NEW document with a
@@ -713,4 +717,9 @@ def scan_replies(hours_back: int = 24) -> Dict:
         out["ghi_inbox"] = ghi_thread_capture(hours_back)
     except Exception as e:
         out["errors"].append(f"ghi inbox capture: {e}")
+    try:
+        from progress_emails import run_progress_sweep
+        out["progress"] = run_progress_sweep()
+    except Exception as e:
+        out["errors"].append(f"progress sweep: {e}")
     return out
