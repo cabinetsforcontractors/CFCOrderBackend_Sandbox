@@ -17,6 +17,7 @@ Module Map:
   supplier_order_routes.py — /supplier-orders/* [admin] (state machine + dispatch)
   cancel_requests.py       — /cancel-requests [admin] + /cancel-request/{token} (public confirm-first)
   ghi_checks.py            — /ghi-checks [admin] + /ghi-check/{token} (public buttons)
+  ghi_cogs.py              — /supplier-orders/cogs/* [admin] (COGS price fingerprint)
   routes/audit.py          — /audit/log (POST write, GET read)
   auth.py                  — require_admin Depends() — X-Admin-Token or Bearer JWT
   rate_limit.py            — shared slowapi Limiter instance
@@ -129,6 +130,13 @@ except ImportError:
     print("[STARTUP] ghi_checks module not found, GHI check tracker disabled")
 
 try:
+    from ghi_cogs import ghi_cogs_router
+    GHI_COGS_LOADED = True
+except ImportError:
+    GHI_COGS_LOADED = False
+    print("[STARTUP] ghi_cogs module not found, GHI price fingerprint disabled")
+
+try:
     from routes.audit import audit_router
     AUDIT_LOADED = True
 except ImportError:
@@ -202,6 +210,9 @@ if CANCEL_REQUESTS_LOADED:
 
 if GHI_CHECKS_LOADED:
     app.include_router(ghi_check_router)      # GHI check tracker/nagger: /ghi-checks + /ghi-check/{token}
+
+if GHI_COGS_LOADED:
+    app.include_router(ghi_cogs_router)       # GHI COGS price fingerprint: /supplier-orders/cogs/*
 
 if AUDIT_LOADED:
     app.include_router(audit_router)          # Phase 5: /audit/log
@@ -298,6 +309,7 @@ def root():
         "supplier_order_engine": {"enabled": SUPPLIER_ORDERS_LOADED},
         "cancel_confirm_first": {"enabled": CANCEL_REQUESTS_LOADED},
         "ghi_check_tracker": {"enabled": GHI_CHECKS_LOADED},
+        "ghi_price_fingerprint": {"enabled": GHI_COGS_LOADED},
         "audit_log": {"enabled": AUDIT_LOADED},
         "rate_limiting": {"enabled": True, "default_limit": "200/minute"},
         "bol_generation": {"enabled": True},
