@@ -35,8 +35,13 @@ from email_templates import (
 from db_helpers import get_db, get_order_by_id
 
 
-CFC_SENDER_NAME = "William Prince — Cabinets For Contractors"
-CFC_SENDER_EMAIL = "william@cabinetsforcontractors.net"
+# Outbound identity: EMAIL_FROM_ADDRESS switch (orders@ after Gmail alias
+# verification, William 2026-07-19) wins; legacy william@ header is the
+# unset default. Same switch as email_identity.py.
+CFC_SENDER_NAME = os.environ.get(
+    "EMAIL_FROM_NAME", "William Prince — Cabinets For Contractors").strip()
+CFC_SENDER_EMAIL = (os.environ.get("EMAIL_FROM_ADDRESS", "").strip()
+                    or "william@cabinetsforcontractors.net")
 
 
 def send_order_email(
