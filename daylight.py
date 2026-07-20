@@ -20,14 +20,16 @@ Env:
   DAYLIGHT_TOKEN_URL       (default https://api.dylt.com/oauth/client_credential/accesstoken)
 
 Auth flow (Apigee OAuth2 client-credentials):
-  POST client_id+client_secret to the token endpoint -> access_token (~15 min).
-  Cache in-process until ~60s before expiry; send as 'Authorization: Bearer <token>'.
-Follows the urllib style of b2bwave_api.py (no external HTTP dependency).
+  POST to the token endpoint (grant_type=client_credentials) -> access_token (~15 min).
+  Credentials are tried as HTTP Basic auth first, then as form params (Apigee proxies
+  vary). Token cached in-process until ~60s before expiry; sent as 'Authorization:
+  Bearer <token>'. Follows the urllib style of b2bwave_api.py (no external HTTP dep).
 """
 
 import os
 import json
 import time
+import base64
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -60,10 +62,46 @@ def is_configured() -> bool:
 _token_cache: Dict[str, object] = {"token": None, "expires_at": 0.0}
 
 
+def _token_url_with_grant() -> str:
+    url = DAYLIGHT_TOKEN_URL
+    if "grant_type" not in url:
+        sep = "&" if "?" in url else "?"
+        url = f"{url}{sep}grant_type=client_credentials"
+    return url
+
+
+def _request_token(use_basic: bool) -> dict:
+    """One token attempt. use_basic=True -> creds in Authorization: Basic header;
+    else creds in the form body. Raises urllib errors to the caller."""
+    url = _token_url_with_grant()
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+    if use_basic:
+        creds = base64.b64encode(
+            f"{DAYLIGHT_CLIENT_ID}:{DAYLIGHT_CLIENT_SECRET}".encode()
+        ).decode()
+        headers["Authorization"] = f"Basic {creds}"
+        body = urllib.parse.urlencode({"grant_type": "client_credentials"}).encode()
+    else:
+        body = urllib.parse.urlencode({
+            "grant_type": "client_credentials",
+            "client_id": DAYLIGHT_CLIENT_ID,
+            "client_secret": DAYLIGHT_CLIENT_SECRET,
+        }).encode()
+
+    req = urllib.request.Request(url, data=body, method="POST")
+    for k, v in headers.items():
+        req.add_header(k, v)
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.loads(resp.read().decode())
+
+
 def _fetch_token() -> str:
     """
-    POST client_credentials -> access_token. Cached until ~60s before expiry.
-    The token value is never logged or returned to callers.
+    Obtain (and cache) an access_token. Tries Basic-auth transport first, then
+    form-body. The token value is never logged or returned to callers.
     """
     now = time.time()
     cached = _token_cache.get("token")
@@ -75,33 +113,25 @@ def _fetch_token() -> str:
             500, "Daylight not configured (set DAYLIGHT_CLIENT_ID / DAYLIGHT_CLIENT_SECRET)"
         )
 
-    # Apigee accesstoken endpoint: grant_type in the query, creds in the form body.
-    sep = "&" if "?" in DAYLIGHT_TOKEN_URL else "?"
-    url = DAYLIGHT_TOKEN_URL
-    if "grant_type" not in url:
-        url = f"{url}{sep}grant_type=client_credentials"
-
-    body = urllib.parse.urlencode({
-        "client_id": DAYLIGHT_CLIENT_ID,
-        "client_secret": DAYLIGHT_CLIENT_SECRET,
-    }).encode()
-
-    req = urllib.request.Request(url, data=body, method="POST")
-    req.add_header("Content-Type", "application/x-www-form-urlencoded")
-    req.add_header("Accept", "application/json")
-
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read().decode())
-    except urllib.error.HTTPError as e:
-        detail = ""
+    data = None
+    errors = []
+    for use_basic in (True, False):
+        label = "basic" if use_basic else "form"
         try:
-            detail = e.read().decode()[:300]
-        except Exception:
-            pass
-        raise DaylightAPIError(e.code, f"token request failed: {e.reason} {detail}")
-    except urllib.error.URLError as e:
-        raise DaylightAPIError(500, f"token connection error: {e}")
+            data = _request_token(use_basic)
+            break
+        except urllib.error.HTTPError as e:
+            detail = ""
+            try:
+                detail = e.read().decode()[:200]
+            except Exception:
+                pass
+            errors.append(f"{label}: {e.code} {e.reason} {detail}")
+        except urllib.error.URLError as e:
+            errors.append(f"{label}: connection error {e}")
+
+    if data is None:
+        raise DaylightAPIError(401, "token request failed [" + " | ".join(errors) + "]")
 
     token = data.get("access_token") or data.get("accessToken")
     if not token:
