@@ -9,11 +9,12 @@ Mount in main.py with:
     app.include_router(daylight_router)
 
 Endpoints:
-    GET /daylight/token-check                     — prove OAuth handshake (no token leaked) [admin]
-    GET /daylight/fuel-surcharge                  — current fuel surcharge rate             [admin]
-    GET /daylight/transit/{orig_zip}/{dest_zip}   — transit time between zips               [admin]
-    GET /daylight/trace/booking/{booking_number}  — trace by booking number                 [admin]
-    GET /daylight/trace/{probill}                 — trace by probill (PRO)                   [admin]
+    GET /daylight/config-check                    — credential presence + lengths (no values) [admin]
+    GET /daylight/token-check                     — prove OAuth handshake (no token leaked)    [admin]
+    GET /daylight/fuel-surcharge                  — current fuel surcharge rate                [admin]
+    GET /daylight/transit/{orig_zip}/{dest_zip}   — transit time between zips                  [admin]
+    GET /daylight/trace/booking/{booking_number}  — trace by booking number                    [admin]
+    GET /daylight/trace/{probill}                 — trace by probill (PRO)                      [admin]
 """
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -33,6 +34,26 @@ def _handle(fn, *args):
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Daylight error: {e}")
+
+
+@daylight_router.get("/config-check")
+async def daylight_config_check(_: bool = Depends(require_admin)):
+    """
+    Diagnose 'invalid_client': report whether the credentials are set and their
+    lengths — NEVER the secret value. client_id_preview shows only the first 4
+    chars of the (semi-public) consumer key to confirm it matches the portal. [admin]
+    """
+    cid = daylight.DAYLIGHT_CLIENT_ID
+    csec = daylight.DAYLIGHT_CLIENT_SECRET
+    return {
+        "client_id_set": bool(cid),
+        "client_id_length": len(cid),
+        "client_id_preview": (cid[:4] + "...") if cid else "",
+        "client_secret_set": bool(csec),
+        "client_secret_length": len(csec),
+        "base_url": daylight.DAYLIGHT_BASE_URL,
+        "token_url": daylight.DAYLIGHT_TOKEN_URL,
+    }
 
 
 @daylight_router.get("/token-check")
