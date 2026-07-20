@@ -20,6 +20,7 @@ Module Map:
   ghi_cogs.py              — /supplier-orders/cogs/* [admin] (COGS price fingerprint)
   progress_emails.py       — /progress/* [admin] (customer progress drafts, draft-first)
   email_ledger.py          — /ledger/* [admin] (clean data layer, SHADOW MODE)
+  daylight_routes.py       — /daylight/* [admin] (Daylight Transport carrier, Phase 1 read-only)
   routes/audit.py          — /audit/log (POST write, GET read)
   auth.py                  — require_admin Depends() — X-Admin-Token or Bearer JWT
   rate_limit.py            — shared slowapi Limiter instance
@@ -153,6 +154,13 @@ except ImportError:
     print("[STARTUP] email_ledger module not found, clean data layer disabled")
 
 try:
+    from daylight_routes import daylight_router
+    DAYLIGHT_LOADED = True
+except ImportError:
+    DAYLIGHT_LOADED = False
+    print("[STARTUP] daylight_routes module not found, Daylight carrier disabled")
+
+try:
     from routes.audit import audit_router
     AUDIT_LOADED = True
 except ImportError:
@@ -235,6 +243,9 @@ if PROGRESS_LOADED:
 
 if LEDGER_LOADED:
     app.include_router(ledger_router)         # Clean data layer (SHADOW): /ledger/*
+
+if DAYLIGHT_LOADED:
+    app.include_router(daylight_router)       # Daylight carrier (Phase 1 read-only): /daylight/*
 
 if AUDIT_LOADED:
     app.include_router(audit_router)          # Phase 5: /audit/log
@@ -334,6 +345,7 @@ def root():
         "ghi_price_fingerprint": {"enabled": GHI_COGS_LOADED},
         "progress_emails": {"enabled": PROGRESS_LOADED},
         "email_ledger_shadow": {"enabled": LEDGER_LOADED},
+        "daylight_carrier": {"enabled": DAYLIGHT_LOADED},
         "audit_log": {"enabled": AUDIT_LOADED},
         "rate_limiting": {"enabled": True, "default_limit": "200/minute"},
         "bol_generation": {"enabled": True},
