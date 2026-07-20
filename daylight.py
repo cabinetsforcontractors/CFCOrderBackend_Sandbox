@@ -21,9 +21,10 @@ Env:
 
 Auth flow (Apigee OAuth2 client-credentials):
   POST to the token endpoint (grant_type=client_credentials) -> access_token (~15 min).
-  Credentials are tried as HTTP Basic auth first, then as form params (Apigee proxies
-  vary). Token cached in-process until ~60s before expiry; sent as 'Authorization:
-  Bearer <token>'. Follows the urllib style of b2bwave_api.py (no external HTTP dep).
+  Robustness: several Apigee proxies differ on (a) credential transport (Basic header vs
+  form params) and (b) which host mints the token (prod api.dylt.com vs the same host as
+  the data base URL). We try each combination until one works. Token cached in-process
+  until ~60s before expiry; sent as 'Authorization: Bearer <token>'. urllib only (no dep).
 """
 
 import os
@@ -33,7 +34,7 @@ import base64
 import urllib.request
 import urllib.error
 import urllib.parse
-from typing import Dict
+from typing import Dict, List
 
 DAYLIGHT_CLIENT_ID = os.environ.get("DAYLIGHT_CLIENT_ID", "").strip()
 DAYLIGHT_CLIENT_SECRET = os.environ.get("DAYLIGHT_CLIENT_SECRET", "").strip()
@@ -60,20 +61,33 @@ def is_configured() -> bool:
 
 # In-process token cache: {"token": <str|None>, "expires_at": <epoch float>}
 _token_cache: Dict[str, object] = {"token": None, "expires_at": 0.0}
+# Records which token URL last succeeded (diagnostic; no secret).
+_last_token_url: str = ""
 
 
-def _token_url_with_grant() -> str:
-    url = DAYLIGHT_TOKEN_URL
+def _with_grant(url: str) -> str:
     if "grant_type" not in url:
         sep = "&" if "?" in url else "?"
         url = f"{url}{sep}grant_type=client_credentials"
     return url
 
 
-def _request_token(use_basic: bool) -> dict:
-    """One token attempt. use_basic=True -> creds in Authorization: Basic header;
+def _token_url_candidates() -> List[str]:
+    """Configured token URL first, then the token endpoint on the same host as the
+    data base URL (covers test-env apps whose token lives on test-api)."""
+    cands = [_with_grant(DAYLIGHT_TOKEN_URL)]
+    same_host = _with_grant(f"{DAYLIGHT_BASE_URL}/oauth/client_credential/accesstoken")
+    # dedupe, preserve order
+    out: List[str] = []
+    for c in (cands + [same_host]):
+        if c not in out:
+            out.append(c)
+    return out
+
+
+def _request_token(url: str, use_basic: bool) -> dict:
+    """One token attempt against `url`. use_basic=True -> Authorization: Basic header;
     else creds in the form body. Raises urllib errors to the caller."""
-    url = _token_url_with_grant()
     headers = {
         "Accept": "application/json",
         "Content-Type": "application/x-www-form-urlencoded",
@@ -100,9 +114,10 @@ def _request_token(use_basic: bool) -> dict:
 
 def _fetch_token() -> str:
     """
-    Obtain (and cache) an access_token. Tries Basic-auth transport first, then
-    form-body. The token value is never logged or returned to callers.
+    Obtain (and cache) an access_token, trying each (token-URL x transport) combo.
+    The token value is never logged or returned to callers.
     """
+    global _last_token_url
     now = time.time()
     cached = _token_cache.get("token")
     if cached and now < float(_token_cache.get("expires_at", 0)):
@@ -114,21 +129,27 @@ def _fetch_token() -> str:
         )
 
     data = None
+    used_url = ""
     errors = []
-    for use_basic in (True, False):
-        label = "basic" if use_basic else "form"
-        try:
-            data = _request_token(use_basic)
-            break
-        except urllib.error.HTTPError as e:
-            detail = ""
+    for url in _token_url_candidates():
+        host = urllib.parse.urlparse(url).netloc
+        for use_basic in (True, False):
+            label = f"{host}/{'basic' if use_basic else 'form'}"
             try:
-                detail = e.read().decode()[:200]
-            except Exception:
-                pass
-            errors.append(f"{label}: {e.code} {e.reason} {detail}")
-        except urllib.error.URLError as e:
-            errors.append(f"{label}: connection error {e}")
+                data = _request_token(url, use_basic)
+                used_url = url
+                break
+            except urllib.error.HTTPError as e:
+                detail = ""
+                try:
+                    detail = e.read().decode()[:160]
+                except Exception:
+                    pass
+                errors.append(f"{label}: {e.code} {detail}")
+            except urllib.error.URLError as e:
+                errors.append(f"{label}: connection error {e}")
+        if data is not None:
+            break
 
     if data is None:
         raise DaylightAPIError(401, "token request failed [" + " | ".join(errors) + "]")
@@ -144,6 +165,7 @@ def _fetch_token() -> str:
 
     _token_cache["token"] = token
     _token_cache["expires_at"] = now + max(60, expires_in - 60)
+    _last_token_url = used_url
     return str(token)
 
 
@@ -183,7 +205,7 @@ def token_check() -> Dict:
         "token_length": len(token),
         "expires_in_seconds": remaining,
         "base_url": DAYLIGHT_BASE_URL,
-        "token_url": DAYLIGHT_TOKEN_URL,
+        "token_url_used": _last_token_url,
     }
 
 
