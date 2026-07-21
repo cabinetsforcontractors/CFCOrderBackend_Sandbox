@@ -9,8 +9,9 @@ B2BWave quotes are orders with status_order_id=1 ("Temporary").
 Uses business_days_since() for all timer calculations.
 
 STOREFRONT PARALLEL RUN: .COM quotes are pushed into B2BWave as Temporary orders stamped
-"[CFC-COM]" in comments_customer. The storefront manages those itself, so this engine SKIPS
-them (single filter in fetch_b2bwave_temporary_orders) -- no double-touch.
+"[CFC-COM]" (in comments_wholesaler -- internal, never customer-visible -- or comments_customer).
+The storefront manages those itself, so this engine SKIPS them (single filter in
+fetch_b2bwave_temporary_orders) -- no double-touch.
 """
 
 import os
@@ -28,8 +29,15 @@ from config import B2BWAVE_URL, B2BWAVE_USERNAME, B2BWAVE_API_KEY
 
 CHECKOUT_BASE_URL = os.environ.get("CHECKOUT_BASE_URL", "https://cfcorderbackend-sandbox.onrender.com").strip()
 
-# Storefront (.COM) quotes carry this marker in comments_customer; skip them here.
+# Storefront (.COM) quotes carry this marker; skip them here. Checked in BOTH the internal
+# wholesaler comments (preferred -- never customer-visible) and the customer comments.
 STOREFRONT_QUOTE_MARKER = "[CFC-COM]"
+
+
+def _is_storefront_quote(order: dict) -> bool:
+    """True if this Temporary order was pushed by the storefront (.COM) and marked [CFC-COM]."""
+    blob = (order.get("comments_wholesaler") or "") + " " + (order.get("comments_customer") or "")
+    return STOREFRONT_QUOTE_MARKER in blob
 
 
 # =============================================================================
@@ -39,9 +47,8 @@ STOREFRONT_QUOTE_MARKER = "[CFC-COM]"
 def fetch_b2bwave_temporary_orders() -> List[Dict]:
     """Fetch all status 1 ('Temporary') orders from B2BWave.
 
-    Storefront-originated (.COM) quotes -- stamped [CFC-COM] in comments_customer --
-    are filtered out here so this engine never double-touches quotes the storefront
-    manages itself during the parallel run.
+    Storefront-originated (.COM) quotes -- marked [CFC-COM] -- are filtered out here so this
+    engine never double-touches quotes the storefront manages itself during the parallel run.
     """
     if not B2BWAVE_URL or not B2BWAVE_API_KEY:
         return []
@@ -58,7 +65,7 @@ def fetch_b2bwave_temporary_orders() -> List[Dict]:
         if isinstance(data, list):
             for item in data:
                 order = item.get("order", item)
-                if STOREFRONT_QUOTE_MARKER in (order.get("comments_customer") or ""):
+                if _is_storefront_quote(order):
                     skipped_storefront += 1
                     continue
                 orders.append(order)
