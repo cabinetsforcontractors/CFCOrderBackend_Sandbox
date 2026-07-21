@@ -7,6 +7,10 @@ B2BWave quotes are orders with status_order_id=1 ("Temporary").
 - Customer carts: submitted_by_class == "Customer", submitted_at is None
 
 Uses business_days_since() for all timer calculations.
+
+STOREFRONT PARALLEL RUN: .COM quotes are pushed into B2BWave as Temporary orders stamped
+"[CFC-COM]" in comments_customer. The storefront manages those itself, so this engine SKIPS
+them (single filter in fetch_b2bwave_temporary_orders) -- no double-touch.
 """
 
 import os
@@ -24,13 +28,21 @@ from config import B2BWAVE_URL, B2BWAVE_USERNAME, B2BWAVE_API_KEY
 
 CHECKOUT_BASE_URL = os.environ.get("CHECKOUT_BASE_URL", "https://cfcorderbackend-sandbox.onrender.com").strip()
 
+# Storefront (.COM) quotes carry this marker in comments_customer; skip them here.
+STOREFRONT_QUOTE_MARKER = "[CFC-COM]"
+
 
 # =============================================================================
 # B2BWAVE QUOTE FETCHING
 # =============================================================================
 
 def fetch_b2bwave_temporary_orders() -> List[Dict]:
-    """Fetch all status 1 ('Temporary') orders from B2BWave."""
+    """Fetch all status 1 ('Temporary') orders from B2BWave.
+
+    Storefront-originated (.COM) quotes -- stamped [CFC-COM] in comments_customer --
+    are filtered out here so this engine never double-touches quotes the storefront
+    manages itself during the parallel run.
+    """
     if not B2BWAVE_URL or not B2BWAVE_API_KEY:
         return []
     try:
@@ -42,10 +54,16 @@ def fetch_b2bwave_temporary_orders() -> List[Dict]:
         with urllib.request.urlopen(req, timeout=30) as resp:
             data = json.loads(resp.read().decode())
         orders = []
+        skipped_storefront = 0
         if isinstance(data, list):
             for item in data:
                 order = item.get("order", item)
+                if STOREFRONT_QUOTE_MARKER in (order.get("comments_customer") or ""):
+                    skipped_storefront += 1
+                    continue
                 orders.append(order)
+        if skipped_storefront:
+            print(f"[QUOTE] Skipped {skipped_storefront} storefront ({STOREFRONT_QUOTE_MARKER}) quote(s)")
         return orders
     except Exception as e:
         print(f"[QUOTE] Error fetching B2BWave temporary orders: {e}")
