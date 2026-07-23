@@ -7,6 +7,8 @@ All endpoints require admin token (X-Admin-Token header).
 Phase 1 (OAuth only): config-check, token-check, fuel-surcharge, transit, trace.
 Phase 2 (OAuth + MyDaylight): rate-quote, bol, pickup  (raw pass-through test endpoints;
 each takes the inner request fields as the JSON body -- account auth is merged server-side).
+Order integration (2026-07-23): order-quote, order-bol -- auto-assemble the Phase-2
+bodies straight from an order id (engine in daylight_order.py).
 
 Mount in main.py:
     from daylight_routes import daylight_router
@@ -14,6 +16,8 @@ Mount in main.py:
 """
 
 import base64
+from typing import Optional
+
 from fastapi import APIRouter, Depends, HTTPException, Body
 from auth import require_admin
 import daylight
@@ -115,4 +119,61 @@ async def daylight_bol(payload: dict = Body(...), _: bool = Depends(require_admi
             "content_type": result.get("content_type"),
             "pdf_base64": base64.b64encode(raw).decode(),
         }
+    return result
+
+
+# ---------- Order integration (daylight_order.py, 2026-07-23) ----------
+
+@daylight_router.get("/order-quote/{order_id}")
+async def daylight_order_quote(
+    order_id: str,
+    residential: Optional[bool] = None,
+    liftgate: bool = False,
+    warehouse: Optional[str] = None,
+    pickup_date: Optional[str] = None,
+    assemble_only: bool = False,
+    _: bool = Depends(require_admin),
+):
+    """
+    Auto-build a Daylight rateQuote per eligible leg of an order and (unless
+    assemble_only=true) fire it. Omit `residential` to auto-detect via Smarty.
+    Non-CA legs are refused with a note. Nothing is committed anywhere. [admin]
+    """
+    from daylight_order import order_quote
+    return _handle(lambda: order_quote(
+        order_id, residential=residential, liftgate=liftgate, warehouse=warehouse,
+        pickup_date=pickup_date, execute=not assemble_only))
+
+
+@daylight_router.post("/order-bol/{order_id}")
+async def daylight_order_bol(
+    order_id: str,
+    warehouse: Optional[str] = None,
+    bol_date: Optional[str] = None,
+    bill_terms: str = "Collect",
+    residential: Optional[bool] = None,
+    liftgate: bool = False,
+    assemble_only: bool = False,
+    _: bool = Depends(require_admin),
+):
+    """
+    Auto-build the Daylight BOL (dyltImageReq) for ONE Daylight-eligible leg of an
+    order and (unless assemble_only=true) fire it. Pass ?warehouse= when the order
+    has several eligible legs. Returns the assembled fields + the PDF (base64) in
+    the same shape as the raw /daylight/bol endpoint. Hits whatever base URL
+    daylight.py is configured with (TEST until the prod flip). [admin]
+    """
+    from daylight_order import order_bol
+    result = _handle(lambda: order_bol(
+        order_id, warehouse=warehouse, bol_date=bol_date, bill_terms=bill_terms,
+        residential=residential, liftgate=liftgate, execute=not assemble_only))
+    pdf = result.pop("pdf", None) if isinstance(result, dict) else None
+    if isinstance(pdf, dict) and pdf.get("pdf_bytes") is not None:
+        raw = pdf["pdf_bytes"]
+        result["is_pdf"] = raw[:4] == b"%PDF"
+        result["size"] = len(raw)
+        result["content_type"] = pdf.get("content_type")
+        result["pdf_base64"] = base64.b64encode(raw).decode()
+    elif pdf is not None:
+        result["bol_response"] = pdf  # JSON error body from Daylight
     return result
