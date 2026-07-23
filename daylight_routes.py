@@ -9,6 +9,8 @@ Phase 2 (OAuth + MyDaylight): rate-quote, bol, pickup  (raw pass-through test en
 each takes the inner request fields as the JSON body -- account auth is merged server-side).
 Order integration (2026-07-23): order-quote, order-bol -- auto-assemble the Phase-2
 bodies straight from an order id (engine in daylight_order.py).
+Tracking (step 2, 2026-07-23): probill registry + externalTrace delivery poller
+(engine in daylight_tracking.py; the poller also rides every progress sweep).
 
 Mount in main.py:
     from daylight_routes import daylight_router
@@ -177,3 +179,49 @@ async def daylight_order_bol(
     elif pdf is not None:
         result["bol_response"] = pdf  # JSON error body from Daylight
     return result
+
+
+# ---------- Tracking / delivery poller (daylight_tracking.py, step 2) ----------
+
+@daylight_router.post("/probill/{order_id}")
+async def daylight_register_probill(
+    order_id: str,
+    probill: str,
+    warehouse: Optional[str] = None,
+    stamp_tracking: bool = True,
+    force_stamp: bool = False,
+    _: bool = Depends(require_admin),
+):
+    """
+    Register a Daylight PRO (8-10 digits — NOT the BOL number) for an order.
+    Stamps orders.tracking only-if-empty, which arms the existing progress sweep
+    to draft the customer tracking email (draft-first). stamp_tracking=false
+    registers for polling without touching tracking. [admin]
+    """
+    from daylight_tracking import register_probill
+    return _handle(lambda: register_probill(
+        order_id, probill, warehouse=warehouse, stamp_tracking=stamp_tracking,
+        force_stamp=force_stamp))
+
+
+@daylight_router.get("/shipments")
+async def daylight_shipments(_: bool = Depends(require_admin)):
+    """Daylight shipment registry: status, poll dates, delivered flags. [admin]"""
+    from daylight_tracking import list_shipments
+    return _handle(list_shipments)
+
+
+@daylight_router.delete("/shipments/{probill}")
+async def daylight_remove_shipment(probill: str, _: bool = Depends(require_admin)):
+    """Remove a registry row (drill cleanup / mis-entered PRO). Does not touch
+    orders.tracking. [admin]"""
+    from daylight_tracking import remove_shipment
+    return _handle(lambda: remove_shipment(probill))
+
+
+@daylight_router.post("/poll")
+async def daylight_poll(force: bool = False, _: bool = Depends(require_admin)):
+    """Run the Daylight delivery poller now. force=true ignores the morning /
+    once-a-day gates (drills). Customer touches are DRAFTS only. [admin]"""
+    from daylight_tracking import poll_daylight_shipments
+    return _handle(lambda: poll_daylight_shipments(force=force))
