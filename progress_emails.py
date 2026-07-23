@@ -14,6 +14,8 @@ Customer touches, ALL created as GMAIL DRAFTS for William to review and send
      delivery, draft "your order is scheduled to be delivered today"
      (+ inspect-before-signing note). Delivered -> recorded quietly.
      UPS delivery-day needs a UPS API account (not available yet).
+     DAYLIGHT delivery-day (2026-07-23) rides the same sweep via
+     daylight_tracking.poll_daylight_shipments (externalTrace).
 
 TRACKING TRUTH REPAIR (William 2026-07-18): the DB missed tracking that went
 out in hand-written emails. Two mechanisms:
@@ -70,6 +72,9 @@ SIGNATURE = ("--\nWilliam Prince\nCabinets For Contractors\n"
 RL_TRACE_URL = ("https://www2.rlcarriers.com/freight/shipping/shipment-tracing"
                 "?pro={pro}&docType=PRO&source=web")
 UPS_TRACK_URL = "https://www.ups.com/track?tracknum={num}"
+# Daylight has no verified public deep link — customers land on Quick Track
+# and enter the PRO number themselves.
+DAYLIGHT_TRACK_URL = "https://www.dylt.com/quick-pod-track/"
 
 # delivery-day poll: once per ET day per shipment, mornings (>= 10:00 UTC)
 DELIVERY_POLL_START_UTC = 10
@@ -256,6 +261,15 @@ def _tracking_body(order: Dict) -> str:
         lines.append(f"R+L Carriers PRO #: {pro}")
         lines.append(f"Click here to follow your delivery any time:")
         lines.append(RL_TRACE_URL.format(pro=pro))
+    dl_pros = re.findall(r"DAYLIGHT(?:\s+TRANSPORT)?\s+PRO\s*#?\s*:?\s*(\d{8,10})",
+                         trk.upper())
+    for d in dl_pros:
+        if lines:
+            lines.append("")
+        lines.append(f"Daylight Transport PRO #: {d}")
+        lines.append(f"Click here and enter the PRO number to follow your "
+                     f"delivery any time:")
+        lines.append(DAYLIGHT_TRACK_URL)
     ups_nums = re.findall(r"\b(1Z[0-9A-Z]{10,16})\b", trk.upper())
     for u in ups_nums:
         if lines:
@@ -263,7 +277,7 @@ def _tracking_body(order: Dict) -> str:
         lines.append(f"UPS Tracking #: {u}")
         lines.append(f"Click here to follow your delivery any time:")
         lines.append(UPS_TRACK_URL.format(num=u))
-    if not pro and not ups_nums and trk:
+    if not pro and not ups_nums and not dl_pros and trk:
         lines.append(f"Tracking: {trk}")
     nums = "\n".join(lines)
     return (
@@ -640,12 +654,18 @@ def run_progress_sweep(dry_run: bool = False, days_back: int = 7) -> Dict:
                     pass
                 out["errors"].append(f"tracking {o.get('order_id')}: {e}")
 
-    # 4) delivery-day layer (R+L only; UPS needs a UPS API account)
+    # 4) delivery-day layer (R+L; Daylight rides the same sweep; UPS needs a
+    #    UPS API account)
     if not dry_run:
         try:
             run_delivery_poll(out)
         except Exception as e:
             out["errors"].append(f"delivery poll: {e}")
+        try:
+            from daylight_tracking import poll_daylight_shipments
+            poll_daylight_shipments(out)
+        except Exception as e:
+            out["errors"].append(f"daylight delivery poll: {e}")
 
     return out
 
