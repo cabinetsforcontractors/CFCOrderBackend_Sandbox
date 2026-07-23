@@ -66,6 +66,16 @@ def wire_all(app: FastAPI) -> dict:
     except ImportError as e:
         results["freight"] = False
         print(f"[STARTUP] freight_routes not found: {e}")
+
+    # Carrier routing (/freight/carrier-quote/{order_id}) — Daylight-vs-R+L per leg,
+    # all-in with accessorials + supplier pallet fees (freight_router.py, 2026-07-23)
+    try:
+        from carrier_routes import carrier_router
+        app.include_router(carrier_router)
+        results["carrier_quote"] = True
+    except ImportError as e:
+        results["carrier_quote"] = False
+        print(f"[STARTUP] carrier_routes not found: {e}")
     
     loaded = sum(1 for v in results.values() if v)
     print(f"[STARTUP] startup_wiring: {loaded}/{len(results)} modules loaded")
