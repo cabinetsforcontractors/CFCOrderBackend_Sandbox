@@ -3,7 +3,7 @@ freight_router.py
 Order-integrated carrier routing + all-in freight quoting engine.
 
 One call quotes a whole order's freight, leg by leg, and picks the carrier.
-The thin endpoint lives in freight_routes.py:
+The thin endpoint lives in carrier_routes.py:
     GET /freight/carrier-quote/{order_id}?residential=&liftgate=  [admin]
 
 For each warehouse shipment on the order:
@@ -26,9 +26,11 @@ quote R+L COMMERCIAL (is_residential=false) for a clean base and add the bundle 
 The R+L base already carries fuel + over-dimension ($275 8-ft) + CA compliance.
 Daylight's net is all-in (accessorials ride in the request), so nothing is added to it.
 
-`residential` and `liftgate` are inputs NOW (manual). When Smarty is reinstated,
-checkout's validate_address_full auto-fills residential; the "need a lift gate?"
-checkout tic feeds liftgate.
+RESIDENTIAL DETECTION (2026-07-23): `residential` is tri-state.
+  None  -> auto-detect via Smarty (checkout.validate_address_full on the ship-to);
+           Smarty down/unknown -> assume residential (the safe, higher-quote / CYA side).
+  True/False -> manual override (skips Smarty).
+`liftgate` stays a manual input (the "need a lift gate?" checkout tic feeds it later).
 """
 
 import json
@@ -98,6 +100,26 @@ def _accessorials(residential, liftgate):
     if liftgate:
         return LIFTGATE_FEE, {"liftgate": LIFTGATE_FEE}
     return 0.0, {}
+
+
+def _detect_residential(order, dest_zip):
+    """Auto-detect residential via Smarty. Returns (residential_bool, source_str).
+    Smarty down/unknown -> assume residential (the safe, higher-quote side)."""
+    try:
+        from checkout import validate_address_full
+        v = validate_address_full({
+            "street": order.get("street") or "",
+            "city": order.get("city") or "",
+            "state": order.get("state") or "",
+            "zip": dest_zip,
+        })
+        is_res = bool(v.get("is_residential", True))
+        if v.get("success"):
+            rdi = v.get("rdi") or ("Residential" if is_res else "Commercial")
+            return is_res, f"smarty:{rdi}"
+        return True, "smarty-unavailable:assumed-residential"
+    except Exception as e:
+        return True, f"smarty-error:assumed-residential ({str(e)[:60]})"
 
 
 def _rl_quote(origin_zip, dest_zip, weight, oversized):
@@ -203,12 +225,13 @@ def _daylight_quote(origin_zip, dest, weight, pallets, over_length, residential,
     return round(float(net), 2), resp
 
 
-def carrier_quote_order(order_id, residential=False, liftgate=False):
+def carrier_quote_order(order_id, residential=None, liftgate=False):
     """Quote every warehouse leg of an order and pick the carrier per leg.
 
-    residential/liftgate apply to the whole order (customer address). Returns
-    a per-leg breakdown + the order shipping total. Nothing is sent anywhere;
-    this is a quote for a human.
+    residential is tri-state: None -> auto-detect via Smarty (assume residential
+    if Smarty is down); True/False -> manual override. liftgate is a manual input.
+    Returns a per-leg breakdown + the order shipping total. Nothing is sent
+    anywhere; this is a quote for a human.
     """
     with get_db() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -229,6 +252,13 @@ def carrier_quote_order(order_id, residential=False, liftgate=False):
 
     dest_zip = (order.get("zip_code") or "").split("-")[0].strip()[:5]
     dest = {"zip": dest_zip, "city": order.get("city") or "", "state": order.get("state") or ""}
+
+    # Residential: auto-detect via Smarty when not explicitly set.
+    if residential is None:
+        residential, residential_source = _detect_residential(order, dest_zip)
+    else:
+        residential_source = "manual"
+    residential = bool(residential)
 
     warehouses = {}
     for r in rows:
@@ -341,6 +371,7 @@ def carrier_quote_order(order_id, residential=False, liftgate=False):
         "order_id": order_id,
         "destination": dest,
         "residential": residential,
+        "residential_source": residential_source,
         "liftgate": liftgate,
         "legs": legs,
         "order_shipping_total": order_total if all_quoted else None,
