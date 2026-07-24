@@ -45,17 +45,20 @@ from config import SUPPLIER_INFO
 CHECKOUT_BASE_URL = os.environ.get("CHECKOUT_BASE_URL", "https://cfcorderbackend-sandbox.onrender.com").strip()
 CFC_INTERNAL_EMAIL = os.environ.get("WAREHOUSE_NOTIFICATION_EMAIL", "cabinetsforcontractors@gmail.com").strip()
 
+# Mirrors the corrected book in bol_routes.WAREHOUSE_ADDRESSES (William's
+# 2026-07-24 address sweep). NOTE: this dict has no "Cabinet & Stone CA" or
+# "Artisan (fallback)" entries — pickups at those fall through to the {} default.
 WAREHOUSE_ADDRESSES = {
     "Cabinetry Distribution":  {"address": "561 Keuka Rd",              "city": "Interlachen",    "state": "FL", "zip": "32148", "phone": "(615) 410-6775"},
-    "DL Cabinetry":            {"address": "7825 Parramore Rd",         "city": "Jacksonville",   "state": "FL", "zip": "32256", "phone": "904-886-5000"},
-    "ROC Cabinetry":           {"address": "6015 Unity Dr",             "city": "Norcross",       "state": "GA", "zip": "30071", "phone": "770-263-9800"},
-    "GHI Cabinets":            {"address": "1402 10th Ave E",           "city": "Palmetto",       "state": "FL", "zip": "34221", "phone": "941-981-9994"},
-    "Go Bravura":              {"address": "6910 Fulton St",            "city": "Houston",        "state": "TX", "zip": "77066", "phone": "832-326-7003"},
+    "DL Cabinetry":            {"address": "8145 Baymeadows Way W",     "city": "Jacksonville",   "state": "FL", "zip": "32256", "phone": "904-723-1061"},
+    "ROC Cabinetry":           {"address": "505 Best Friend Ct Ste 580 & 560", "city": "Norcross", "state": "GA", "zip": "30071", "phone": "770-263-9800"},
+    "GHI Cabinets":            {"address": "1807 48th Ave E Unit 110",  "city": "Palmetto",       "state": "FL", "zip": "34221", "phone": "941-981-9994"},
+    "Go Bravura":              {"address": "14200 Hollister St Ste 200", "city": "Houston",       "state": "TX", "zip": "77066", "phone": "832-756-2766"},
     "Love-Milestone":          {"address": "10963 Florida Crown Dr STE 100", "city": "Orlando",   "state": "FL", "zip": "32824", "phone": "407-601-7090"},
-    "Cabinet & Stone":         {"address": "1760 Stebbins Dr",          "city": "Houston",        "state": "TX", "zip": "77043", "phone": "713-468-8062"},
-    "DuraStone":               {"address": "4506 Archie St",            "city": "Houston",        "state": "TX", "zip": "77037", "phone": "281-445-4700"},
-    "L&C Cabinetry":           {"address": "2157 Vista Circle",         "city": "Virginia Beach", "state": "VA", "zip": "23454", "phone": "757-425-5544"},
-    "Dealer Cabinetry":        {"address": "200 Industrial Blvd",       "city": "Bremen",         "state": "GA", "zip": "30110", "phone": "770-537-4422"},
+    "Cabinet & Stone":         {"address": "1760 Stebbins Dr",          "city": "Houston",        "state": "TX", "zip": "77043", "phone": "281-833-0980"},
+    "DuraStone":               {"address": "9815 North Fwy",            "city": "Houston",        "state": "TX", "zip": "77037", "phone": "281-447-9997"},
+    "L&C Cabinetry":           {"address": "2028 Virginia Beach Blvd",  "city": "Virginia Beach", "state": "VA", "zip": "23454", "phone": "757-425-5544"},
+    "Dealer Cabinetry":        {"address": "202 N Georgia Ave",         "city": "Bremen",         "state": "GA", "zip": "30110", "phone": "770-537-4422"},
 }
 
 
