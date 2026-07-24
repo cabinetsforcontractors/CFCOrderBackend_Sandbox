@@ -4,7 +4,7 @@ Order-integrated carrier routing + all-in freight quoting engine.
 
 One call quotes a whole order's freight, leg by leg, and picks the carrier.
 The thin endpoint lives in carrier_routes.py:
-    GET /freight/carrier-quote/{order_id}?residential=&liftgate=  [admin]
+    GET /freight/carrier-quote/{order_id}?residential=&liftgate=&origin_zip=  [admin]
 
 For each warehouse shipment on the order:
   - resolve the ORIGIN zip (config.WAREHOUSE_ZIPS + the CA-Espresso override:
@@ -31,6 +31,12 @@ RESIDENTIAL DETECTION (2026-07-23): `residential` is tri-state.
            Smarty down/unknown -> assume residential (the safe, higher-quote / CYA side).
   True/False -> manual override (skips Smarty).
 `liftgate` stays a manual input (the "need a lift gate?" checkout tic feeds it later).
+
+CA ORIGIN OVERRIDE (William-ruled 2026-07-24): BOTH Cabinet & Stone California
+warehouses are real — Paramount 90723 (default) AND Pico Rivera 90660. Pass
+`origin_zip` (must be one of the Daylight CA origins) to quote a shipment from
+the other CA warehouse; it only applies to CA-eligible legs, never to
+ROC/GHI/Houston legs.
 """
 
 import json
@@ -225,14 +231,21 @@ def _daylight_quote(origin_zip, dest, weight, pallets, over_length, residential,
     return round(float(net), 2), resp
 
 
-def carrier_quote_order(order_id, residential=None, liftgate=False):
+def carrier_quote_order(order_id, residential=None, liftgate=False, origin_zip=None):
     """Quote every warehouse leg of an order and pick the carrier per leg.
 
     residential is tri-state: None -> auto-detect via Smarty (assume residential
     if Smarty is down); True/False -> manual override. liftgate is a manual input.
+    origin_zip: optional CA-warehouse override (90723 Paramount / 90660 Pico
+    Rivera) — applies ONLY to Daylight-eligible CA legs, never to other legs.
     Returns a per-leg breakdown + the order shipping total. Nothing is sent
     anywhere; this is a quote for a human.
     """
+    if origin_zip and origin_zip not in DAYLIGHT_ORIGIN_ADDR:
+        return {"status": "error",
+                "message": (f"origin_zip '{origin_zip}' is not a known CA origin - "
+                            f"valid: {sorted(DAYLIGHT_ORIGIN_ADDR)}")}
+
     with get_db() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
@@ -274,7 +287,11 @@ def carrier_quote_order(order_id, residential=None, liftgate=False):
     for wh, items in warehouses.items():
         p = plan["shipments"][wh]
         skus = [i.get("sku") for i in items]
-        origin_zip, daylight_eligible = _resolve_origin(wh, skus)
+        leg_origin, daylight_eligible = _resolve_origin(wh, skus)
+        origin_overridden = False
+        if origin_zip and daylight_eligible and leg_origin != origin_zip:
+            leg_origin = origin_zip
+            origin_overridden = True
         supplier = p.get("supplier")
         weight = p.get("ship_weight_lb") or 0.0
         pallets = p.get("pallets") or 0
@@ -284,7 +301,7 @@ def carrier_quote_order(order_id, residential=None, liftgate=False):
         leg = {
             "warehouse": wh,
             "supplier": supplier,
-            "origin_zip": origin_zip,
+            "origin_zip": leg_origin,
             "dest_zip": dest_zip,
             "ship_weight_lb": weight,
             "pallets": pallets,
@@ -297,8 +314,12 @@ def carrier_quote_order(order_id, residential=None, liftgate=False):
             "alternatives": {},
             "notes": [],
         }
+        if origin_overridden:
+            leg["notes"].append(
+                f"origin overridden to {leg_origin} "
+                f"({DAYLIGHT_ORIGIN_ADDR[leg_origin]['city']}) per request")
 
-        if not origin_zip:
+        if not leg_origin:
             leg["notes"].append(f"no origin zip mapped for warehouse '{wh}'")
             legs.append(leg)
             all_quoted = False
@@ -317,7 +338,7 @@ def carrier_quote_order(order_id, residential=None, liftgate=False):
             continue
 
         # --- R+L (always) : commercial base + our accessorial bundle + pallet fee
-        rl_base, rl_ref = _rl_quote(origin_zip, dest_zip, weight, over_length)
+        rl_base, rl_ref = _rl_quote(leg_origin, dest_zip, weight, over_length)
         rl_total = None
         if rl_base is not None:
             rl_total = round(rl_base + acc_total + pallet_fee, 2)
@@ -335,7 +356,7 @@ def carrier_quote_order(order_id, residential=None, liftgate=False):
         dl_total = None
         if daylight_eligible:
             dl_net, dl_raw = _daylight_quote(
-                origin_zip, dest, weight, pallets, over_length, residential, liftgate)
+                leg_origin, dest, weight, pallets, over_length, residential, liftgate)
             if dl_net is not None:
                 dl_total = round(dl_net + pallet_fee, 2)
                 leg["alternatives"]["Daylight"] = {
@@ -373,6 +394,7 @@ def carrier_quote_order(order_id, residential=None, liftgate=False):
         "residential": residential,
         "residential_source": residential_source,
         "liftgate": liftgate,
+        "origin_zip_override": origin_zip,
         "legs": legs,
         "order_shipping_total": order_total if all_quoted else None,
         "all_legs_quoted": all_quoted,
