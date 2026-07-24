@@ -2,7 +2,7 @@
 carrier_routes.py
 Thin transport layer over freight_router.py (the carrier-routing engine).
 
-GET /freight/carrier-quote/{order_id}?residential=&liftgate=  [admin]
+GET /freight/carrier-quote/{order_id}?residential=&liftgate=&origin_zip=  [admin]
     All-in freight quote for a whole order, leg by leg, with carrier routing.
     Tries Daylight first on Daylight-eligible (CA) origins, falls back to R+L,
     and picks the cheaper carrier that actually serves each lane. R+L legs add the
@@ -16,7 +16,9 @@ GET /freight/carrier-quote/{order_id}?residential=&liftgate=  [admin]
       - ?residential=true  -> force residential
       - ?residential=false -> force commercial
     liftgate stays a manual input (the "need a lift gate?" checkout tic feeds it
-    later). Nothing is sent — this is a quote for a human. Logic in freight_router.py.
+    later). origin_zip picks which Cabinet & Stone CA warehouse the shipment
+    leaves from (90723 Paramount default / 90660 Pico Rivera) — CA legs only.
+    Nothing is sent — this is a quote for a human. Logic in freight_router.py.
 """
 
 from typing import Optional
@@ -31,7 +33,10 @@ carrier_router = APIRouter(tags=["freight"])
 
 @carrier_router.get("/freight/carrier-quote/{order_id}")
 def get_carrier_quote(order_id: str, residential: Optional[bool] = None,
-                      liftgate: bool = False, _: bool = Depends(require_admin)):
+                      liftgate: bool = False, origin_zip: Optional[str] = None,
+                      _: bool = Depends(require_admin)):
     """All-in per-leg freight quote + carrier pick for an order [admin].
-    Omit `residential` to auto-detect it via Smarty."""
-    return carrier_quote_order(order_id, residential=residential, liftgate=liftgate)
+    Omit `residential` to auto-detect it via Smarty. `origin_zip` picks the
+    CA warehouse (90723 Paramount / 90660 Pico Rivera) for CA legs."""
+    return carrier_quote_order(order_id, residential=residential,
+                               liftgate=liftgate, origin_zip=origin_zip)
