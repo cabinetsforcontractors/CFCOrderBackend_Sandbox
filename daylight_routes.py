@@ -140,8 +140,8 @@ async def daylight_order_quote(
     """
     Auto-build a Daylight rateQuote per eligible leg of an order and (unless
     assemble_only=true) fire it. Omit `residential` to auto-detect via Smarty.
-    `origin_zip` picks the C&S CA warehouse (90723 Paramount default / 90660
-    Pico Rivera) for CA legs. Non-CA legs are refused with a note. Nothing is
+    `origin_zip` is kept for API compatibility (90660 Pico Rivera is the only
+    CA warehouse) for CA legs. Non-CA legs are refused with a note. Nothing is
     committed anywhere. [admin]
     """
     from daylight_order import order_quote
@@ -165,8 +165,8 @@ async def daylight_order_bol(
     """
     Auto-build the Daylight BOL (dyltImageReq) for ONE Daylight-eligible leg of an
     order and (unless assemble_only=true) fire it. Pass ?warehouse= when the order
-    has several eligible legs; ?origin_zip= picks the C&S CA warehouse (90723
-    Paramount default / 90660 Pico Rivera) and the shipper street block follows.
+    has several eligible legs; ?origin_zip= is kept for API compatibility (90660
+    Pico Rivera is the only CA warehouse) and the shipper street block follows.
     Returns the assembled fields + the PDF (base64) in the same shape as the raw
     /daylight/bol endpoint. Hits whatever base URL daylight.py is configured
     with. [admin]

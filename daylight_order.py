@@ -8,13 +8,13 @@ Thin endpoints live in daylight_routes.py:
     POST /daylight/order-bol/{order_id}     [admin]
 
 For each warehouse leg of the order (same leg logic as freight_router):
-  - resolve the ORIGIN zip (WAREHOUSE_ZIPS + the ESCS -> CA 90723 override)
+  - resolve the ORIGIN zip (WAREHOUSE_ZIPS + the ESCS -> CA 90660 override)
   - pull ship weight / pallet count / over-length from freight_logic.plan_order
   - Daylight serves CA origins only: ineligible legs are REFUSED with a plain
     note, never silently quoted
   - shipper block = bol_routes.WAREHOUSE_ADDRESSES + BOL_SHIPPER_NAMES (street
     address matched by origin zip, so the ESCS override lands on Cabinet &
-    Stone CA / Paramount, not Houston); the entry's "label" (C&S-Paramount /
+    Stone CA / Pico Rivera, not Houston); the entry's "label" (C&S-Houston /
     C&S-Pico Rivera ...) prints as the shipper contact so a human instantly
     knows which warehouse
   - consignee block = the orders row (company/customer name, street, phone)
@@ -25,10 +25,10 @@ Residential is tri-state like freight_router: None -> auto-detect via Smarty
 (assume residential if Smarty is down); True/False -> manual override.
 liftgate stays a manual input.
 
-CA ORIGIN OVERRIDE (William-ruled 2026-07-24): BOTH Cabinet & Stone California
-warehouses are real — Paramount 90723 (default) AND Pico Rivera 90660. Pass
-`origin_zip` to quote/BOL a shipment from the other CA warehouse; the shipper
-street block follows the zip automatically. CA-eligible legs only.
+CA ORIGIN (William-ruled 2026-07-24 round 2): ONE Cabinet & Stone California
+warehouse — Pico Rivera 90660, 7105 Paramount Blvd. The old Paramount 90723
+entry was a phantom and was removed. `origin_zip` is kept for API
+compatibility but 90660 is the only valid CA origin.
 
 Field shapes follow the public XSDs ({base}/rateQuote/schema, /image/schema).
 billTerms on the BOL defaults to "Collect" (the proven 5695 pattern); pass
@@ -101,7 +101,7 @@ def _load_order(order_id):
 
 def _shipper_for_origin(origin_zip, warehouse):
     """(shipper_label, address_info) for a leg. Zip match first so the
-    ESCS -> 90723 override lands on Cabinet & Stone CA, not the Houston entry."""
+    ESCS -> 90660 override lands on Cabinet & Stone CA, not the Houston entry."""
     for name, info in WAREHOUSE_ADDRESSES.items():
         if info.get("zip") == origin_zip:
             return name, info

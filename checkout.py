@@ -33,7 +33,9 @@ TARIFF_RATE = 0.08
 # WAREHOUSE DEFINITIONS
 # bol_shipper_name: what appears in the Shipper field on the R+L BOL.
 # Format: "Cabinets For Contractors-{first_letter_of_name}{last_2_zip}"
-# All codes are unique across all 12 warehouses — verified 2026-04-06.
+# All codes are unique across all 12 warehouses — verified 2026-04-06;
+# addresses refreshed against each company's published warehouse 2026-07-24
+# (William's sweep: delivery + warehouse addresses had become intertwined).
 # Supplier name never appears on the BOL.
 # =============================================================================
 WAREHOUSES = {
@@ -45,8 +47,8 @@ WAREHOUSES = {
     },
     'DL': {
         'name': 'DL Cabinetry',
-        'address': '7825 Parramore Rd', 'city': 'Jacksonville', 'state': 'FL', 'zip': '32256',
-        'phone': '904-886-5000',
+        'address': '8145 Baymeadows Way W', 'city': 'Jacksonville', 'state': 'FL', 'zip': '32256',
+        'phone': '904-723-1061',
         'bol_shipper_name': 'Cabinets For Contractors-D56',
     },
     'ROC': {
@@ -57,13 +59,13 @@ WAREHOUSES = {
     },
     'GHI': {
         'name': 'GHI Cabinets',
-        'address': '1402 10th Ave E', 'city': 'Palmetto', 'state': 'FL', 'zip': '34221',
+        'address': '1807 48th Ave E Unit 110', 'city': 'Palmetto', 'state': 'FL', 'zip': '34221',
         'phone': '941-981-9994',
         'bol_shipper_name': 'Cabinets For Contractors-G21',
     },
     'Go Bravura': {
         'name': 'Go Bravura',
-        'address': '6910 Fulton St', 'city': 'Houston', 'state': 'TX', 'zip': '77066',
+        'address': '14200 Hollister St Ste 200', 'city': 'Houston', 'state': 'TX', 'zip': '77066',
         'phone': '832-326-7003',
         'bol_shipper_name': 'Cabinets For Contractors-G66',
     },
@@ -75,9 +77,9 @@ WAREHOUSES = {
     },
     'ARTISAN': {
         'name': 'Artisan (fallback)',
-        'address': '6910 Fulton St', 'city': 'Houston', 'state': 'TX', 'zip': '77066',
-        'phone': '832-326-7003',
-        'bol_shipper_name': 'Cabinets For Contractors-A66',
+        'address': '10000 W Sam Houston Pkwy N Ste 100', 'city': 'Houston', 'state': 'TX', 'zip': '77064',
+        'phone': '888-806-6688',
+        'bol_shipper_name': 'Cabinets For Contractors-A64',
     },
     'Cabinet & Stone': {
         'name': 'Cabinet & Stone',
@@ -87,14 +89,14 @@ WAREHOUSES = {
     },
     'Cabinet & Stone CA': {
         'name': 'Cabinet & Stone CA',
-        'address': '15500 Vermont Ave', 'city': 'Paramount', 'state': 'CA', 'zip': '90723',
+        'address': '7105 Paramount Blvd', 'city': 'Pico Rivera', 'state': 'CA', 'zip': '90660',
         'phone': '562-774-8522',
-        'bol_shipper_name': 'Cabinets For Contractors-C23',
+        'bol_shipper_name': 'Cabinets For Contractors-C60',
     },
     'DuraStone': {
         'name': 'DuraStone',
-        'address': '4506 Archie St', 'city': 'Houston', 'state': 'TX', 'zip': '77037',
-        'phone': '281-445-4700',
+        'address': '9815 North Fwy', 'city': 'Houston', 'state': 'TX', 'zip': '77037',
+        'phone': '281-447-9997',
         'bol_shipper_name': 'Cabinets For Contractors-D37',
     },
     'L&C': {
@@ -105,7 +107,7 @@ WAREHOUSES = {
     },
     'Linda': {
         'name': 'Dealer Cabinetry',
-        'address': '200 Industrial Blvd', 'city': 'Bremen', 'state': 'GA', 'zip': '30110',
+        'address': '202 N Georgia Ave', 'city': 'Bremen', 'state': 'GA', 'zip': '30110',
         'phone': '770-537-4422',
         'bol_shipper_name': 'Cabinets For Contractors-D10',
     },

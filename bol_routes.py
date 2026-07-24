@@ -39,37 +39,40 @@ BOL_SHIPPER_NAMES = {
     "GHI Cabinets":            "Cabinets For Contractors-G21",
     "Go Bravura":              "Cabinets For Contractors-G66",
     "Love-Milestone":          "Cabinets For Contractors-L24",
-    "Artisan (fallback)":      "Cabinets For Contractors-A66",
+    "Artisan (fallback)":      "Cabinets For Contractors-A64",
     "Cabinet & Stone":         "Cabinets For Contractors-C43",
-    "Cabinet & Stone CA":      "Cabinets For Contractors-C23",
-    "Cabinet & Stone PICO":    "Cabinets For Contractors-C60",
+    "Cabinet & Stone CA":      "Cabinets For Contractors-C60",
     "DuraStone":               "Cabinets For Contractors-D37",
     "L&C Cabinetry":           "Cabinets For Contractors-L54",
     "Dealer Cabinetry":        "Cabinets For Contractors-D10",
 }
 
-# BOTH Cabinet & Stone California warehouses are real and stay (William
-# 2026-07-24): Paramount 90723 AND Pico Rivera 90660 (street from the real
-# 5695 pickup-request 5673183 paperwork). Origin choice per shipment via the
-# origin_zip override. Every entry carries a "label" — the human-readable
-# location indicator (William's naming: C&S-Houston / C&S-Paramount /
-# C&S-Pico Rivera) printed wherever a person reads the shipper. DICT KEYS ARE
-# PLUMBING (they must keep matching warehouse names from the DB) — never
-# rename a key to relabel a warehouse; change the label field instead.
+# ONE Cabinet & Stone California warehouse (William-ruled 2026-07-24, round 2):
+# Pico Rivera 90660, 7105 Paramount Blvd — confirmed by the real 5695 pickup
+# (Daylight's own shipment record names this dock). The old "Paramount 90723 /
+# 15500 Vermont Ave" entry was a phantom (delivery + warehouse addresses had
+# become intertwined) and was removed. The DB warehouse name stays
+# "Cabinet & Stone CA" (KEYS ARE PLUMBING); only its address/label changed.
+# Addresses verified against each company's own published warehouse
+# (2026-07-24 sweep); GHI street comes from a GHI invoice (William).
+# Every entry carries a "label" — the human-readable location indicator
+# (William's naming: C&S-Houston / C&S-Pico Rivera) printed wherever a person
+# reads the shipper. DICT KEYS ARE PLUMBING (they must keep matching warehouse
+# names from the DB) — never rename a key to relabel a warehouse; change the
+# label field instead.
 WAREHOUSE_ADDRESSES = {
     "Cabinetry Distribution":  {"label": "Cabinetry Distribution-Interlachen", "address": "561 Keuka Rd",              "city": "Interlachen",    "state": "FL", "zip": "32148", "phone": "6154106775"},
-    "DL Cabinetry":            {"label": "DL-Jacksonville",                    "address": "7825 Parramore Rd",         "city": "Jacksonville",   "state": "FL", "zip": "32256", "phone": "9048865000"},
+    "DL Cabinetry":            {"label": "DL-Jacksonville",                    "address": "8145 Baymeadows Way W",     "city": "Jacksonville",   "state": "FL", "zip": "32256", "phone": "9047231061"},
     "ROC Cabinetry":           {"label": "ROC-Norcross",                       "address": "6015 Unity Dr",             "city": "Norcross",       "state": "GA", "zip": "30071", "phone": "7702639800"},
-    "GHI Cabinets":            {"label": "GHI-Palmetto",                       "address": "1402 10th Ave E",           "city": "Palmetto",       "state": "FL", "zip": "34221", "phone": "9419819994"},
-    "Go Bravura":              {"label": "Go Bravura-Houston",                 "address": "6910 Fulton St",            "city": "Houston",        "state": "TX", "zip": "77066", "phone": "8323267003"},
+    "GHI Cabinets":            {"label": "GHI-Palmetto",                       "address": "1807 48th Ave E Unit 110",  "city": "Palmetto",       "state": "FL", "zip": "34221", "phone": "9419819994"},
+    "Go Bravura":              {"label": "Go Bravura-Houston",                 "address": "14200 Hollister St Ste 200", "city": "Houston",       "state": "TX", "zip": "77066", "phone": "8323267003"},
     "Love-Milestone":          {"label": "Love-Milestone-Orlando",             "address": "10963 Florida Crown Dr STE 100", "city": "Orlando",   "state": "FL", "zip": "32824", "phone": "4076017090"},
-    "Artisan (fallback)":      {"label": "Artisan-Houston",                    "address": "6910 Fulton St",            "city": "Houston",        "state": "TX", "zip": "77066", "phone": "8323267003"},
+    "Artisan (fallback)":      {"label": "Artisan-Houston",                    "address": "10000 W Sam Houston Pkwy N Ste 100", "city": "Houston", "state": "TX", "zip": "77064", "phone": "8888066688"},
     "Cabinet & Stone":         {"label": "C&S-Houston",                        "address": "1760 Stebbins Dr",          "city": "Houston",        "state": "TX", "zip": "77043", "phone": "7134688062"},
-    "Cabinet & Stone CA":      {"label": "C&S-Paramount",                      "address": "15500 Vermont Ave",         "city": "Paramount",      "state": "CA", "zip": "90723", "phone": "5627748522"},
-    "Cabinet & Stone PICO":    {"label": "C&S-Pico Rivera",                    "address": "7105 Paramount Blvd",       "city": "Pico Rivera",    "state": "CA", "zip": "90660", "phone": "5627748522"},
-    "DuraStone":               {"label": "DuraStone-Houston",                  "address": "4506 Archie St",            "city": "Houston",        "state": "TX", "zip": "77037", "phone": "2814454700"},
+    "Cabinet & Stone CA":      {"label": "C&S-Pico Rivera",                    "address": "7105 Paramount Blvd",       "city": "Pico Rivera",    "state": "CA", "zip": "90660", "phone": "5627748522"},
+    "DuraStone":               {"label": "DuraStone-Houston",                  "address": "9815 North Fwy",            "city": "Houston",        "state": "TX", "zip": "77037", "phone": "2814479997"},
     "L&C Cabinetry":           {"label": "L&C-Virginia Beach",                 "address": "2157 Vista Circle",         "city": "Virginia Beach", "state": "VA", "zip": "23454", "phone": "7574255544"},
-    "Dealer Cabinetry":        {"label": "Dealer-Bremen",                      "address": "200 Industrial Blvd",       "city": "Bremen",         "state": "GA", "zip": "30110", "phone": "7705374422"},
+    "Dealer Cabinetry":        {"label": "Dealer-Bremen",                      "address": "202 N Georgia Ave",         "city": "Bremen",         "state": "GA", "zip": "30110", "phone": "7705374422"},
 }
 
 bol_router = APIRouter(tags=["bol"])

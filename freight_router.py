@@ -32,11 +32,11 @@ RESIDENTIAL DETECTION (2026-07-23): `residential` is tri-state.
   True/False -> manual override (skips Smarty).
 `liftgate` stays a manual input (the "need a lift gate?" checkout tic feeds it later).
 
-CA ORIGIN OVERRIDE (William-ruled 2026-07-24): BOTH Cabinet & Stone California
-warehouses are real — Paramount 90723 (default) AND Pico Rivera 90660. Pass
-`origin_zip` (must be one of the Daylight CA origins) to quote a shipment from
-the other CA warehouse; it only applies to CA-eligible legs, never to
-ROC/GHI/Houston legs.
+CA ORIGIN (William-ruled 2026-07-24 round 2): ONE Cabinet & Stone California
+warehouse — Pico Rivera 90660, 7105 Paramount Blvd. The old Paramount 90723
+entry was a phantom (delivery + warehouse addresses had become intertwined)
+and was removed. `origin_zip` is kept for API compatibility; 90660 is the only
+valid value. It only applies to CA-eligible legs, never ROC/GHI/Houston legs.
 """
 
 import json
@@ -64,9 +64,8 @@ SUPPLIER_PALLET_FEE = {
 }
 DEFAULT_PALLET_FEE = ("per_pallet", 50.0)
 
-# --- Daylight-eligible origins (CA — Cabinet & Stone Pico Rivera / Paramount) --
+# --- Daylight-eligible origins (CA — Cabinet & Stone Pico Rivera only) --------
 DAYLIGHT_ORIGIN_ADDR = {
-    "90723": {"zip": "90723", "city": "Paramount", "state": "CA"},
     "90660": {"zip": "90660", "city": "Pico Rivera", "state": "CA"},
 }
 # Cabinet & Stone Espresso ships from CA (Daylight lane), not the Houston default.
@@ -79,7 +78,7 @@ def _resolve_origin(warehouse, skus):
     wh = warehouse or ""
     if wh.lower().startswith("cabinet & stone"):
         if any((s or "").upper().startswith(CA_ORIGIN_SKU_PREFIXES) for s in skus):
-            return "90723", True
+            return "90660", True
     zip_ = WAREHOUSE_ZIPS.get(wh, "")
     if not zip_ and wh:
         wh_cmp = wh.lower().replace(" ", "").replace("&", "").replace("-", "")
@@ -236,8 +235,8 @@ def carrier_quote_order(order_id, residential=None, liftgate=False, origin_zip=N
 
     residential is tri-state: None -> auto-detect via Smarty (assume residential
     if Smarty is down); True/False -> manual override. liftgate is a manual input.
-    origin_zip: optional CA-warehouse override (90723 Paramount / 90660 Pico
-    Rivera) — applies ONLY to Daylight-eligible CA legs, never to other legs.
+    origin_zip: optional CA-warehouse override (90660 Pico Rivera is the only
+    valid value) — applies ONLY to Daylight-eligible CA legs, never to other legs.
     Returns a per-leg breakdown + the order shipping total. Nothing is sent
     anywhere; this is a quote for a human.
     """

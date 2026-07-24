@@ -46,7 +46,7 @@ WAREHOUSE_INFO = {
     "Go Bravura":       {"name": "Go Bravura",           "city": "Houston",        "state": "TX", "zip": "77066"},
     "Love":             {"name": "Love-Milestone",       "city": "Orlando",        "state": "FL", "zip": "32824"},
     "Cabinet & Stone":  {"name": "Cabinet & Stone TX",   "city": "Houston",        "state": "TX", "zip": "77043"},
-    "Cabinet & Stone CA": {"name": "Cabinet & Stone CA", "city": "Paramount",      "state": "CA", "zip": "90723"},
+    "Cabinet & Stone CA": {"name": "Cabinet & Stone CA", "city": "Pico Rivera",    "state": "CA", "zip": "90660"},
     "DuraStone":        {"name": "DuraStone",            "city": "Houston",        "state": "TX", "zip": "77037"},
     "L&C":              {"name": "L&C Cabinetry",        "city": "Virginia Beach", "state": "VA", "zip": "23454"},
     "Linda":            {"name": "Dealer Cabinetry",     "city": "Bremen",         "state": "GA", "zip": "30110"},

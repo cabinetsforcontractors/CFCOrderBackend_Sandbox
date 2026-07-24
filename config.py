@@ -126,7 +126,7 @@ WAREHOUSE_ZIPS = {
     'Go Bravura': '77066',
     'Love-Milestone': '32824',
     'Cabinet & Stone': '77043',
-    'Cabinet & Stone CA': '90723',
+    'Cabinet & Stone CA': '90660',
     'DuraStone': '77037',
     'L&C Cabinetry': '23454',
     'Linda': '30110',

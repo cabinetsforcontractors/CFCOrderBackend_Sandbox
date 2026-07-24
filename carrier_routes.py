@@ -16,8 +16,8 @@ GET /freight/carrier-quote/{order_id}?residential=&liftgate=&origin_zip=  [admin
       - ?residential=true  -> force residential
       - ?residential=false -> force commercial
     liftgate stays a manual input (the "need a lift gate?" checkout tic feeds it
-    later). origin_zip picks which Cabinet & Stone CA warehouse the shipment
-    leaves from (90723 Paramount default / 90660 Pico Rivera) — CA legs only.
+    later). origin_zip is kept for API compatibility — 90660 Pico Rivera is
+    the only Cabinet & Stone CA warehouse — CA legs only.
     Nothing is sent — this is a quote for a human. Logic in freight_router.py.
 """
 
@@ -36,7 +36,7 @@ def get_carrier_quote(order_id: str, residential: Optional[bool] = None,
                       liftgate: bool = False, origin_zip: Optional[str] = None,
                       _: bool = Depends(require_admin)):
     """All-in per-leg freight quote + carrier pick for an order [admin].
-    Omit `residential` to auto-detect it via Smarty. `origin_zip` picks the
-    CA warehouse (90723 Paramount / 90660 Pico Rivera) for CA legs."""
+    Omit `residential` to auto-detect it via Smarty. `origin_zip` is kept for
+    API compatibility (90660 Pico Rivera is the only CA warehouse)."""
     return carrier_quote_order(order_id, residential=residential,
                                liftgate=liftgate, origin_zip=origin_zip)
