@@ -133,18 +133,21 @@ async def daylight_order_quote(
     liftgate: bool = False,
     warehouse: Optional[str] = None,
     pickup_date: Optional[str] = None,
+    origin_zip: Optional[str] = None,
     assemble_only: bool = False,
     _: bool = Depends(require_admin),
 ):
     """
     Auto-build a Daylight rateQuote per eligible leg of an order and (unless
     assemble_only=true) fire it. Omit `residential` to auto-detect via Smarty.
-    Non-CA legs are refused with a note. Nothing is committed anywhere. [admin]
+    `origin_zip` picks the C&S CA warehouse (90723 Paramount default / 90660
+    Pico Rivera) for CA legs. Non-CA legs are refused with a note. Nothing is
+    committed anywhere. [admin]
     """
     from daylight_order import order_quote
     return _handle(lambda: order_quote(
         order_id, residential=residential, liftgate=liftgate, warehouse=warehouse,
-        pickup_date=pickup_date, execute=not assemble_only))
+        pickup_date=pickup_date, origin_zip=origin_zip, execute=not assemble_only))
 
 
 @daylight_router.post("/order-bol/{order_id}")
@@ -155,20 +158,24 @@ async def daylight_order_bol(
     bill_terms: str = "Collect",
     residential: Optional[bool] = None,
     liftgate: bool = False,
+    origin_zip: Optional[str] = None,
     assemble_only: bool = False,
     _: bool = Depends(require_admin),
 ):
     """
     Auto-build the Daylight BOL (dyltImageReq) for ONE Daylight-eligible leg of an
     order and (unless assemble_only=true) fire it. Pass ?warehouse= when the order
-    has several eligible legs. Returns the assembled fields + the PDF (base64) in
-    the same shape as the raw /daylight/bol endpoint. Hits whatever base URL
-    daylight.py is configured with (TEST until the prod flip). [admin]
+    has several eligible legs; ?origin_zip= picks the C&S CA warehouse (90723
+    Paramount default / 90660 Pico Rivera) and the shipper street block follows.
+    Returns the assembled fields + the PDF (base64) in the same shape as the raw
+    /daylight/bol endpoint. Hits whatever base URL daylight.py is configured
+    with. [admin]
     """
     from daylight_order import order_bol
     result = _handle(lambda: order_bol(
         order_id, warehouse=warehouse, bol_date=bol_date, bill_terms=bill_terms,
-        residential=residential, liftgate=liftgate, execute=not assemble_only))
+        residential=residential, liftgate=liftgate, origin_zip=origin_zip,
+        execute=not assemble_only))
     pdf = result.pop("pdf", None) if isinstance(result, dict) else None
     if isinstance(pdf, dict) and pdf.get("pdf_bytes") is not None:
         raw = pdf["pdf_bytes"]
