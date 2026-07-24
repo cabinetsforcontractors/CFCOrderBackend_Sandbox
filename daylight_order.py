@@ -23,6 +23,11 @@ Residential is tri-state like freight_router: None -> auto-detect via Smarty
 (assume residential if Smarty is down); True/False -> manual override.
 liftgate stays a manual input.
 
+CA ORIGIN OVERRIDE (William-ruled 2026-07-24): BOTH Cabinet & Stone California
+warehouses are real — Paramount 90723 (default) AND Pico Rivera 90660. Pass
+`origin_zip` to quote/BOL a shipment from the other CA warehouse; the shipper
+street block follows the zip automatically. CA-eligible legs only.
+
 Field shapes follow the public XSDs ({base}/rateQuote/schema, /image/schema).
 billTerms on the BOL defaults to "Collect" (the proven 5695 pattern); pass
 bill_terms="TP" for explicit third-party billing if Daylight asks for it.
@@ -128,9 +133,15 @@ def _item_block(order_id, weight, pallets):
     }]}
 
 
-def _build_legs(order_id, residential, liftgate):
+def _build_legs(order_id, residential, liftgate, origin_zip=None):
     """Shared leg assembly. Returns (order, dest, residential, source, legs) or
-    an error dict. Each leg carries everything both builders need."""
+    an error dict. Each leg carries everything both builders need. origin_zip
+    (optional) swaps CA-eligible legs to the other C&S CA warehouse."""
+    if origin_zip and origin_zip not in DAYLIGHT_ORIGIN_ADDR:
+        return {"status": "error",
+                "message": (f"origin_zip '{origin_zip}' is not a known CA origin - "
+                            f"valid: {sorted(DAYLIGHT_ORIGIN_ADDR)}")}
+
     order, warehouses = _load_order(order_id)
     if not order:
         return {"status": "error", "message": f"order {order_id} not found"}
@@ -154,11 +165,11 @@ def _build_legs(order_id, residential, liftgate):
     for wh, items in warehouses.items():
         p = plan["shipments"][wh]
         skus = [i.get("sku") for i in items]
-        origin_zip, daylight_eligible = _resolve_origin(wh, skus)
+        leg_origin, daylight_eligible = _resolve_origin(wh, skus)
         leg = {
             "warehouse": wh,
             "supplier": p.get("supplier"),
-            "origin_zip": origin_zip,
+            "origin_zip": leg_origin,
             "daylight_eligible": daylight_eligible,
             "ship_weight_lb": p.get("ship_weight_lb") or 0.0,
             "pallets": p.get("pallets") or 0,
@@ -166,6 +177,11 @@ def _build_legs(order_id, residential, liftgate):
             "missing_skus": p.get("missing_skus") or [],
             "notes": [],
         }
+        if origin_zip and daylight_eligible and leg_origin != origin_zip:
+            leg["origin_zip"] = origin_zip
+            leg["notes"].append(
+                f"origin overridden to {origin_zip} "
+                f"({DAYLIGHT_ORIGIN_ADDR[origin_zip]['city']}) per request")
         if not daylight_eligible:
             leg["notes"].append(
                 "REFUSED: origin not a Daylight lane (Daylight serves CA origins only)")
@@ -239,10 +255,10 @@ def _bol_fields(order_id, order, leg, dest, bol_date, bill_terms, residential, l
 
 
 def order_quote(order_id, residential=None, liftgate=False, warehouse=None,
-                pickup_date=None, execute=True):
+                pickup_date=None, origin_zip=None, execute=True):
     """Auto-build (and unless execute=False, fire) a Daylight rateQuote per
     eligible leg. Nothing is committed anywhere; a rate quote is just a price."""
-    built = _build_legs(order_id, residential, liftgate)
+    built = _build_legs(order_id, residential, liftgate, origin_zip=origin_zip)
     if built["status"] != "ok":
         return built
     pickup_date = pickup_date or datetime.date.today().isoformat()
@@ -281,6 +297,7 @@ def order_quote(order_id, residential=None, liftgate=False, warehouse=None,
         "residential_source": built["residential_source"],
         "liftgate": liftgate,
         "pickup_date": pickup_date,
+        "origin_zip_override": origin_zip,
         "executed": bool(execute),
         "base_url": daylight.DAYLIGHT_BASE_URL,
         "legs": legs_out,
@@ -288,12 +305,12 @@ def order_quote(order_id, residential=None, liftgate=False, warehouse=None,
 
 
 def order_bol(order_id, warehouse=None, bol_date=None, bill_terms="Collect",
-              residential=None, liftgate=False, execute=True):
+              residential=None, liftgate=False, origin_zip=None, execute=True):
     """Auto-build (and unless execute=False, fire) the Daylight BOL for ONE leg.
     If the order has several Daylight-eligible legs, `warehouse` must pick one.
     Returns the assembled fields plus (when executed) daylight.create_bol's
     result — pdf bytes ride under 'pdf' for the route layer to encode."""
-    built = _build_legs(order_id, residential, liftgate)
+    built = _build_legs(order_id, residential, liftgate, origin_zip=origin_zip)
     if built["status"] != "ok":
         return built
 
@@ -324,6 +341,8 @@ def order_bol(order_id, warehouse=None, bol_date=None, bill_terms="Collect",
         "status": "ok",
         "order_id": order_id,
         "warehouse": leg["warehouse"],
+        "origin_zip": leg["origin_zip"],
+        "origin_zip_override": origin_zip,
         "residential": built["residential"],
         "residential_source": built["residential_source"],
         "liftgate": liftgate,
