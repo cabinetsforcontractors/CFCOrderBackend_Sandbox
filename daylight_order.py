@@ -14,7 +14,9 @@ For each warehouse leg of the order (same leg logic as freight_router):
     note, never silently quoted
   - shipper block = bol_routes.WAREHOUSE_ADDRESSES + BOL_SHIPPER_NAMES (street
     address matched by origin zip, so the ESCS override lands on Cabinet &
-    Stone CA / Paramount, not Houston)
+    Stone CA / Paramount, not Houston); the entry's "label" (C&S-Paramount /
+    C&S-Pico Rivera ...) prints as the shipper contact so a human instantly
+    knows which warehouse
   - consignee block = the orders row (company/customer name, street, phone)
   - bill-to = Cabinets For Contractors (third party, same as the R+L BOL)
   - items get NMFC 79300-08, class 85 defaults
@@ -34,7 +36,7 @@ bill_terms="TP" for explicit third-party billing if Daylight asks for it.
 
 STEP 1 SCOPE: assembly + fire only. No DB writes (probill/tracking persistence
 lands with the step-2 delivery poller). Nothing here flips DAYLIGHT_BASE_URL —
-requests go wherever daylight.py points (TEST until William's word).
+requests go wherever daylight.py points.
 """
 
 import datetime
@@ -219,15 +221,17 @@ def _rate_quote_fields(order_id, leg, dest, pickup_date, residential, liftgate):
 def _bol_fields(order_id, order, leg, dest, bol_date, bill_terms, residential, liftgate):
     """dyltImageReq minus auth, for one Daylight-eligible leg. Returns
     (fields, None) or (None, error_note)."""
-    shipper_label, wh_info = _shipper_for_origin(leg["origin_zip"], leg["warehouse"])
+    shipper_key, wh_info = _shipper_for_origin(leg["origin_zip"], leg["warehouse"])
     if not wh_info:
         return None, (f"no shipper street address for origin zip {leg['origin_zip']} "
                       f"/ warehouse '{leg['warehouse']}'")
+    # The human-readable location indicator (C&S-Paramount / C&S-Pico Rivera ...)
+    shipper_label = wh_info.get("label") or shipper_key
     consignee_name = order.get("company_name") or order.get("customer_name") or "Customer"
     fields = {
         "billTerms": bill_terms,
         "serviceType": "LTL",
-        "shipperName": BOL_SHIPPER_NAMES.get(shipper_label, "Cabinets For Contractors"),
+        "shipperName": BOL_SHIPPER_NAMES.get(shipper_key, "Cabinets For Contractors"),
         "shipperAddress1": wh_info["address"],
         "shipperCity": wh_info["city"],
         "shipperState": wh_info["state"],
@@ -343,6 +347,7 @@ def order_bol(order_id, warehouse=None, bol_date=None, bill_terms="Collect",
         "warehouse": leg["warehouse"],
         "origin_zip": leg["origin_zip"],
         "origin_zip_override": origin_zip,
+        "shipper_label": fields.get("shipperContactName"),
         "residential": built["residential"],
         "residential_source": built["residential_source"],
         "liftgate": liftgate,
