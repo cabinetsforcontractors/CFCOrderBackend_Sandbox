@@ -42,11 +42,15 @@ BOL_SHIPPER_NAMES = {
     "Artisan (fallback)":      "Cabinets For Contractors-A66",
     "Cabinet & Stone":         "Cabinets For Contractors-C43",
     "Cabinet & Stone CA":      "Cabinets For Contractors-C23",
+    "Cabinet & Stone PICO":    "Cabinets For Contractors-C60",
     "DuraStone":               "Cabinets For Contractors-D37",
     "L&C Cabinetry":           "Cabinets For Contractors-L54",
     "Dealer Cabinetry":        "Cabinets For Contractors-D10",
 }
 
+# BOTH Cabinet & Stone California warehouses are real and stay (William
+# 2026-07-24): Paramount 90723 AND Pico Rivera 90660 (street from the real
+# 5695 BOL 5673183). Origin choice per shipment via the origin_zip override.
 WAREHOUSE_ADDRESSES = {
     "Cabinetry Distribution":  {"address": "561 Keuka Rd",              "city": "Interlachen",    "state": "FL", "zip": "32148", "phone": "6154106775"},
     "DL Cabinetry":            {"address": "7825 Parramore Rd",         "city": "Jacksonville",   "state": "FL", "zip": "32256", "phone": "9048865000"},
@@ -57,6 +61,7 @@ WAREHOUSE_ADDRESSES = {
     "Artisan (fallback)":      {"address": "6910 Fulton St",            "city": "Houston",        "state": "TX", "zip": "77066", "phone": "8323267003"},
     "Cabinet & Stone":         {"address": "1760 Stebbins Dr",          "city": "Houston",        "state": "TX", "zip": "77043", "phone": "7134688062"},
     "Cabinet & Stone CA":      {"address": "15500 Vermont Ave",         "city": "Paramount",      "state": "CA", "zip": "90723", "phone": "5627748522"},
+    "Cabinet & Stone PICO":    {"address": "7105 Paramount Blvd",       "city": "Pico Rivera",    "state": "CA", "zip": "90660", "phone": "5627748522"},
     "DuraStone":               {"address": "4506 Archie St",            "city": "Houston",        "state": "TX", "zip": "77037", "phone": "2814454700"},
     "L&C Cabinetry":           {"address": "2157 Vista Circle",         "city": "Virginia Beach", "state": "VA", "zip": "23454", "phone": "7574255544"},
     "Dealer Cabinetry":        {"address": "200 Industrial Blvd",       "city": "Bremen",         "state": "GA", "zip": "30110", "phone": "7705374422"},
