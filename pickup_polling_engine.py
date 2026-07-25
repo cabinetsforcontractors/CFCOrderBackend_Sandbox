@@ -46,8 +46,7 @@ CHECKOUT_BASE_URL = os.environ.get("CHECKOUT_BASE_URL", "https://cfcorderbackend
 CFC_INTERNAL_EMAIL = os.environ.get("WAREHOUSE_NOTIFICATION_EMAIL", "cabinetsforcontractors@gmail.com").strip()
 
 # Mirrors the corrected book in bol_routes.WAREHOUSE_ADDRESSES (William's
-# 2026-07-24 address sweep). NOTE: this dict has no "Cabinet & Stone CA" or
-# "Artisan (fallback)" entries — pickups at those fall through to the {} default.
+# 2026-07-24 address sweep; C&S CA + Artisan added 2026-07-25 on his word).
 WAREHOUSE_ADDRESSES = {
     "Cabinetry Distribution":  {"address": "561 Keuka Rd",              "city": "Interlachen",    "state": "FL", "zip": "32148", "phone": "(615) 410-6775"},
     "DL Cabinetry":            {"address": "8145 Baymeadows Way W",     "city": "Jacksonville",   "state": "FL", "zip": "32256", "phone": "904-723-1061"},
@@ -56,6 +55,8 @@ WAREHOUSE_ADDRESSES = {
     "Go Bravura":              {"address": "14200 Hollister St Ste 200", "city": "Houston",       "state": "TX", "zip": "77066", "phone": "832-756-2766"},
     "Love-Milestone":          {"address": "10963 Florida Crown Dr STE 100", "city": "Orlando",   "state": "FL", "zip": "32824", "phone": "407-601-7090"},
     "Cabinet & Stone":         {"address": "1760 Stebbins Dr",          "city": "Houston",        "state": "TX", "zip": "77043", "phone": "281-833-0980"},
+    "Cabinet & Stone CA":      {"address": "7105 Paramount Blvd",       "city": "Pico Rivera",    "state": "CA", "zip": "90660", "phone": "562-774-8522"},
+    "Artisan (fallback)":      {"address": "10000 W Sam Houston Pkwy N Ste 100", "city": "Houston", "state": "TX", "zip": "77064", "phone": "888-806-6688"},
     "DuraStone":               {"address": "9815 North Fwy",            "city": "Houston",        "state": "TX", "zip": "77037", "phone": "281-447-9997"},
     "L&C Cabinetry":           {"address": "2028 Virginia Beach Blvd",  "city": "Virginia Beach", "state": "VA", "zip": "23454", "phone": "757-425-5544"},
     "Dealer Cabinetry":        {"address": "202 N Georgia Ave",         "city": "Bremen",         "state": "GA", "zip": "30110", "phone": "770-537-4422"},
