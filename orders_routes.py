@@ -178,11 +178,18 @@ def list_orders(
                         ship["weight"] = float(ship["weight"])
                     shipments_by_order[oid].append(dict(ship))
 
+            try:
+                from test_registry import test_order_ids
+                test_ids = test_order_ids()
+            except Exception:
+                test_ids = set()
+
             for order in orders:
                 for key in ["order_total", "payment_amount", "shipping_cost"]:
                     if order.get(key):
                         order[key] = float(order[key])
                 order["shipments"] = shipments_by_order.get(order["order_id"], [])
+                order["is_test"] = str(order["order_id"]) in test_ids
 
             return {"status": "ok", "count": len(orders), "orders": orders}
 

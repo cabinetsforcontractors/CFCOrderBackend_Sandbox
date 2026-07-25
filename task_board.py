@@ -56,9 +56,9 @@ SUPPLIER_ADDRESSES = {
     "cabinetrydistribution@gmail.com": "Cabinetry Distribution (Li)",
 }
 
-# Known test/pollution rows (fit-state 2026-07-24 data notes) — never tasks.
-TEST_ORDER_IDS = {"1", "4859", "5706", "5710", "5716", "5717", "5718", "5719",
-                  "5720", "100001", "100002", "100003", "100004"}
+# Test/pollution rows come from the ONE registry (test_registry.py, Beat 1);
+# it falls back to its own seed list if the table can't be read.
+from test_registry import test_order_ids as _registry_ids
 
 OWN_ADDRESS = "cabinetsforcontractors@gmail.com"
 FLAG_INBOX = "wpjob1@gmail.com"
@@ -211,8 +211,9 @@ def _sweep_unpaid(cur):
         ORDER BY order_date ASC
     """)
     tasks = []
+    test_ids = _registry_ids()
     for oid, company, total, odate, days_open in cur.fetchall():
-        if str(oid) in TEST_ORDER_IDS:
+        if str(oid) in test_ids:
             continue
         tasks.append({
             "task_key": f"unpaid:{oid}",
@@ -233,8 +234,9 @@ def _sweep_supplier_orders(cur):
         ORDER BY id DESC
     """)
     tasks = []
+    test_ids = _registry_ids()
     for row_id, oid, warehouse, status in cur.fetchall():
-        if str(oid) in TEST_ORDER_IDS:
+        if str(oid) in test_ids:
             continue
         tasks.append({
             "task_key": f"supplier:{row_id}",

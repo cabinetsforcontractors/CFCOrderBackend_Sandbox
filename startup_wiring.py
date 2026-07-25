@@ -86,6 +86,15 @@ def wire_all(app: FastAPI) -> dict:
         results["task_board"] = False
         print(f"[STARTUP] task_board not found: {e}")
 
+    # Test-order registry (/test-orders) — one source of truth for test rows (2026-07-25)
+    try:
+        from test_registry import test_registry_router
+        app.include_router(test_registry_router)
+        results["test_registry"] = True
+    except ImportError as e:
+        results["test_registry"] = False
+        print(f"[STARTUP] test_registry not found: {e}")
+
     loaded = sum(1 for v in results.values() if v)
     print(f"[STARTUP] startup_wiring: {loaded}/{len(results)} modules loaded")
     
