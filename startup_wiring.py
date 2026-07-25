@@ -95,6 +95,15 @@ def wire_all(app: FastAPI) -> dict:
         results["test_registry"] = False
         print(f"[STARTUP] test_registry not found: {e}")
 
+    # New-order watcher (/new-order-watch) — cloned admin New Order email (Beat 2)
+    try:
+        from new_order_notifier import new_order_router
+        app.include_router(new_order_router)
+        results["new_order_watch"] = True
+    except ImportError as e:
+        results["new_order_watch"] = False
+        print(f"[STARTUP] new_order_notifier not found: {e}")
+
     loaded = sum(1 for v in results.values() if v)
     print(f"[STARTUP] startup_wiring: {loaded}/{len(results)} modules loaded")
     

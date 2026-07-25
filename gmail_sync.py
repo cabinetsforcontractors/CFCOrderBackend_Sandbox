@@ -561,7 +561,17 @@ def run_gmail_sync(db_conn, hours_back=2):
             results["errors"].append(f"GHI checks: {err}")
     except Exception as e:
         results["errors"].append(f"GHI checks error: {e}")
-    
+
+    # 9. New-order watcher (Beat 2, 2026-07-25): cloned "New Order" admin
+    # email for orders with no native B2BWave notification (COM- storefront
+    # pushes; mode-switchable to all after cutover). Guarded.
+    try:
+        from new_order_notifier import run_new_order_watch
+        nw = run_new_order_watch(db_conn)
+        results["new_order_notices"] = len(nw.get("notified", []))
+    except Exception as e:
+        results["errors"].append(f"New-order watch error: {e}")
+
     print(f"[GMAIL] Sync complete: {results}")
     return results
 
