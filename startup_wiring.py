@@ -76,7 +76,16 @@ def wire_all(app: FastAPI) -> dict:
     except ImportError as e:
         results["carrier_quote"] = False
         print(f"[STARTUP] carrier_routes not found: {e}")
-    
+
+    # Task board (/tasks) — Gmail-sweep needs-you board + note box (2026-07-25)
+    try:
+        from task_board import task_router
+        app.include_router(task_router)
+        results["task_board"] = True
+    except ImportError as e:
+        results["task_board"] = False
+        print(f"[STARTUP] task_board not found: {e}")
+
     loaded = sum(1 for v in results.values() if v)
     print(f"[STARTUP] startup_wiring: {loaded}/{len(results)} modules loaded")
     
