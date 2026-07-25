@@ -57,8 +57,8 @@ SUPPLIER_ADDRESSES = {
 }
 
 # Known test/pollution rows (fit-state 2026-07-24 data notes) — never tasks.
-TEST_ORDER_IDS = {"1", "4859", "5706", "5716", "5717", "5718", "5719", "5720",
-                  "100001", "100002", "100003", "100004"}
+TEST_ORDER_IDS = {"1", "4859", "5706", "5710", "5716", "5717", "5718", "5719",
+                  "5720", "100001", "100002", "100003", "100004"}
 
 OWN_ADDRESS = "cabinetsforcontractors@gmail.com"
 FLAG_INBOX = "wpjob1@gmail.com"
@@ -82,6 +82,13 @@ def _ensure_table():
             """)
         conn.commit()
     _table_ready = True
+
+
+def _valid_oid(oid, known_ids):
+    """Only surface an extracted order id when it is a REAL order —
+    extract_order_id happily grabs years and reservation fragments."""
+    oid = str(oid) if oid else ""
+    return oid if oid in known_ids else None
 
 
 def _sender_address(from_header: str) -> str:
@@ -122,7 +129,7 @@ def _order_email_map(cur) -> dict:
     return out
 
 
-def _sweep_unread(order_emails: dict, days: int):
+def _sweep_unread(order_emails: dict, days: int, known_ids: set):
     tasks = []
     for m in search_emails(f"is:unread in:inbox newer_than:{days}d", 40)[:30]:
         c = get_email_content(m["id"])
@@ -130,7 +137,8 @@ def _sweep_unread(order_emails: dict, days: int):
             continue
         addr = _sender_address(c.get("from", ""))
         kind, who = _classify_sender(addr, order_emails)
-        oid = extract_order_id((c.get("subject") or "") + " " + (c.get("body") or "")[:500])
+        oid = _valid_oid(extract_order_id(
+            (c.get("subject") or "") + " " + (c.get("body") or "")[:500]), known_ids)
         tasks.append({
             "task_key": f"email:{m['id']}",
             "type": f"unread-{kind}",
@@ -142,7 +150,7 @@ def _sweep_unread(order_emails: dict, days: int):
     return tasks
 
 
-def _sweep_robot_flags():
+def _sweep_robot_flags(known_ids: set):
     tasks = []
     for m in search_emails(f"in:sent to:{FLAG_INBOX} newer_than:3d", 20):
         c = get_email_content(m["id"])
@@ -156,13 +164,13 @@ def _sweep_robot_flags():
             "type": "robot-flag",
             "title": subject,
             "detail": "robot flagged this for a human",
-            "order_id": extract_order_id(subject),
+            "order_id": _valid_oid(extract_order_id(subject), known_ids),
             "date": c.get("date", ""),
         })
     return tasks
 
 
-def _sweep_drafts():
+def _sweep_drafts(known_ids: set):
     """Drafts waiting for review — handoff drafts excluded, never polled."""
     tasks = []
     data = gmail_api_request("drafts", {"maxResults": 50}) or {}
@@ -186,7 +194,7 @@ def _sweep_drafts():
             "type": "draft-waiting",
             "title": subject or "(no subject)",
             "detail": f"draft to {to or '(no recipient)'} — review and send",
-            "order_id": extract_order_id(subject),
+            "order_id": _valid_oid(extract_order_id(subject), known_ids),
             "date": headers.get("date", ""),
         })
     return tasks
@@ -288,6 +296,12 @@ def get_tasks(days: int = 7, _: bool = Depends(require_admin)):
                 order_emails = _order_email_map(cur)
             except Exception as e:
                 order_emails, errors["order_map"] = {}, str(e)
+            try:
+                cur.execute("SELECT order_id FROM orders")
+                known_ids = {str(r[0]) for r in cur.fetchall()}
+            except Exception as e:
+                known_ids, errors["known_ids"] = set(), str(e)
+                conn.rollback()
             for name, fn in [("unpaid", _sweep_unpaid),
                              ("supplier_orders", _sweep_supplier_orders),
                              ("daylight", _sweep_daylight)]:
@@ -309,9 +323,9 @@ def get_tasks(days: int = 7, _: bool = Depends(require_admin)):
                 notes, errors["notes"] = {}, str(e)
                 conn.rollback()
 
-    for name, fn, args in [("unread", _sweep_unread, (order_emails, days)),
-                           ("robot_flags", _sweep_robot_flags, ()),
-                           ("drafts", _sweep_drafts, ())]:
+    for name, fn, args in [("unread", _sweep_unread, (order_emails, days, known_ids)),
+                           ("robot_flags", _sweep_robot_flags, (known_ids,)),
+                           ("drafts", _sweep_drafts, (known_ids,))]:
         try:
             todo.extend(fn(*args))
         except Exception as e:
