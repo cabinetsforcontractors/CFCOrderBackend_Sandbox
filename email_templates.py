@@ -23,7 +23,7 @@ from datetime import datetime
 TEMPLATE_REGISTRY = {
     "payment_link": {
         "name": "Payment Link",
-        "subject": "Invoice for Order #{order_id} — Cabinets For Contractors",
+        "subject": "Invoice INV-{order_id} - your cabinet order - Cabinets For Contractors",
         "description": "Full invoice with line items, tariff, shipping, Pay Now button",
         "category": "manual",
         "is_lifecycle": False,
@@ -255,160 +255,100 @@ def _order_summary_block(order: Dict) -> str:
 
 def _render_payment_link(order: Dict) -> str:
     """
-    Template 1: Full QB-style invoice with line items, tariff, shipping, Pay Now button.
-    Includes residential classification notice + commercial address button on every send.
-    Expects order_data to include 'shipping_result' from calculate_order_shipping().
+    Template 1 — THE v4-LOCKED INVOICE EMAIL (William's reference: the sent
+    INV-5711 email, re-confirmed as THE template 2026-07-26). Structure:
+    greeting -> "Your Order #N" header -> Billing/Shipping blocks ->
+    Items|Qty|Item Cost|Item Total table -> Subtotal (in-stock) / Tariff /
+    Shipping / Grand Total -> SHIPPING TO verify box -> centered CLICK HERE
+    pay sentence -> signature. Expects shipping_result; fetches line items
+    itself when not supplied.
     """
-    customer = order.get("customer_name", "Valued Customer")
-    first_name = customer.split()[0] if customer else "there"
-    company = order.get("company_name", "")
+    customer = order.get("customer_name") or "Valued Customer"
+    first_name = customer.split()[0] if customer.strip() else "there"
+    company = order.get("company_name") or ""
     order_id = str(order.get("order_id", order.get("id", "")))
-    order_date = order.get("order_date", "")
     payment_link = order.get("payment_link", "#")
-    line_items = order.get("line_items", [])
+
+    od = order.get("order_date")
+    try:
+        placed = od.strftime("%b %d, %Y") if hasattr(od, "strftime") else str(od or "")[:10]
+    except Exception:
+        placed = str(od or "")
+
+    items = order.get("line_items") or []
+    if not items:
+        try:
+            from db_helpers import get_order_line_items
+            items = get_order_line_items(order_id) or []
+        except Exception:
+            items = []
 
     sr = order.get("shipping_result", {})
-    total_items = sr.get("total_items", order.get("order_total", 0))
+    total_items = float(sr.get("total_items", order.get("order_total", 0)) or 0)
     tariff_rate = sr.get("tariff_rate", 0.08)
-    tariff_amount = sr.get("tariff_amount", round(float(total_items) * tariff_rate, 2))
-    total_shipping = sr.get("total_shipping", 0)
-    grand_total = sr.get("grand_total", round(float(total_items) + tariff_amount + total_shipping, 2))
+    tariff_amount = float(sr.get("tariff_amount", round(total_items * tariff_rate, 2)))
+    total_shipping = float(sr.get("total_shipping", 0) or 0)
+    grand_total = float(sr.get("grand_total",
+                        round(total_items + tariff_amount + total_shipping, 2)))
+    ship_label = (order.get("shipping_label") or "Shipping").strip()
 
-    addr = order.get("shipping_address", {})
-    street = addr.get("address", "")
-    street2 = addr.get("address2", "")
-    city = addr.get("city", "")
-    state = addr.get("state", "")
-    zip_code = addr.get("zip", "")
+    street = order.get("street") or ""
+    street2 = order.get("street2") or ""
+    city = order.get("city") or ""
+    state = order.get("state") or ""
+    zip_code = order.get("zip_code") or ""
+    phone = order.get("phone") or ""
+    email = order.get("email") or ""
+    csz = f"{city}, {state} {zip_code}".replace(" ,", ",").strip(", ")
+    ship_line = ", ".join(x for x in [f"{street} {street2}".strip(), csz] if x)
 
-    addr_html = f"<strong>{street}</strong>"
-    if street2:
-        addr_html += f"<br/>{street2}"
-    city_state_zip = f"{city}, {state} {zip_code}".strip(", ")
-    if city_state_zip.strip():
-        addr_html += f"<br/>{city_state_zip}"
+    rows = ""
+    for it in items:
+        sku = it.get("sku") or ""
+        name = it.get("product_name") or ""
+        qty = int(float(it.get("quantity") or 0))
+        price = float(it.get("price") or 0)
+        line_total = float(it.get("line_total") or (qty * price))
+        rows += (
+            "<tr><td style='padding:8px 6px;border-bottom:1px solid #eee'>"
+            f"<strong>{sku}</strong><br>"
+            f"<span style='color:#888;font-size:12px'>{name}</span></td>"
+            f"<td style='padding:8px 6px;border-bottom:1px solid #eee;text-align:center'>{qty}</td>"
+            f"<td style='padding:8px 6px;border-bottom:1px solid #eee;text-align:right'>${price:,.2f}</td>"
+            f"<td style='padding:8px 6px;border-bottom:1px solid #eee;text-align:right'>${line_total:,.2f}</td></tr>"
+        )
+    if not rows:
+        rows = "<tr><td colspan='4' style='padding:8px 6px;color:#888'>(line items pending sync)</td></tr>"
 
-    bill_name = f"<strong>{company or customer}</strong>"
-    bill_contact = f"<br/>{customer}" if company else ""
+    return f"""<div style="font-family:'Open Sans',Helvetica,Arial,sans-serif;font-size:14px;padding:20px">
+<div style="max-width:660px;margin:0px auto;padding:28px;border:1px solid rgb(229,229,229)">
+<p style="color:rgb(51,51,51)">Hey {first_name},</p>
+<p style="color:rgb(51,51,51)">Thank you for your order! Your invoice is below (a PDF copy is attached).</p>
+<h1 style="color:rgb(51,51,51);font-weight:300;font-size:26px;border-bottom:1px solid rgb(221,221,221);padding-bottom:8px;margin-bottom:4px">Your Order #{order_id}</h1>
+<div style="color:rgb(136,136,136);font-size:13px;margin-bottom:18px">Placed {placed}</div>
+<table style="color:rgb(51,51,51);width:100%;margin-bottom:20px"><tbody><tr>
+<td style="vertical-align:top;width:50%"><strong>Billing Info</strong><br>{company}<br>{customer}<br>{street}{('<br>' + street2) if street2 else ''}<br>{csz}<br>{phone}<br>{email}</td>
+<td style="vertical-align:top;width:50%"><strong>Shipping Info</strong><br>{company}<br>{street}{('<br>' + street2) if street2 else ''}<br>{csz}</td>
+</tr></tbody></table>
+<table style="color:rgb(51,51,51);width:100%;border-collapse:collapse">
+<thead><tr style="border-bottom:2px solid #ddd"><th style="text-align:left;padding:8px 6px">Items</th><th style="text-align:center;padding:8px 6px">Qty</th><th style="text-align:right;padding:8px 6px">Item Cost</th><th style="text-align:right;padding:8px 6px">Item Total</th></tr></thead>
+<tbody>{rows}</tbody>
+<tfoot>
+<tr><td colspan="2"></td><td style="padding:6px;text-align:right">Subtotal (in-stock)</td><td style="padding:6px;text-align:right">${total_items:,.2f}</td></tr>
+<tr><td colspan="2"></td><td style="padding:6px;text-align:right">Tariff Surcharge ({int(tariff_rate * 100)}%)</td><td style="padding:6px;text-align:right">${tariff_amount:,.2f}</td></tr>
+<tr><td colspan="2"></td><td style="padding:6px;text-align:right">{ship_label}</td><td style="padding:6px;text-align:right">${total_shipping:,.2f}</td></tr>
+<tr><td colspan="2"></td><td style="padding:6px;text-align:right;font-weight:700">Grand Total</td><td style="padding:6px;text-align:right;font-weight:700">${grand_total:,.2f}</td></tr>
+</tfoot></table>
+<div style="color:rgb(51,51,51);border:2px solid rgb(29,201,183);border-radius:6px;padding:14px;margin:18px 0px">
+<div style="font-weight:700">&#128666; SHIPPING TO:</div>
+<div style="font-weight:700;margin:6px 0">{company}, {ship_line}</div>
+<div style="color:#c0392b;font-weight:700">Please verify this address BEFORE paying. If your ship-to address has changed, reply to this email first &mdash; shipping cost may change with a different address.</div>
+</div>
+<p style="text-align:center"><font color="#6fa8dc"><b><a href="{payment_link}">If everything looks in order (CLICK HERE) to make payment</a></b></font></p>
+<p style="color:rgb(51,51,51)">Any questions, just reply or call.</p>
+<p style="color:rgb(51,51,51);margin-top:18px">William Prince<br>Cabinets For Contractors<br>www.CabinetsForContractors.net<br>(770) 990-4885</p>
+</div></div>"""
 
-    if line_items:
-        rows = ""
-        for item in line_items:
-            sku = item.get("sku", "")
-            name = item.get("name", "")
-            qty = item.get("quantity", 1)
-            price = float(item.get("price", 0))
-            line_total = float(item.get("line_total", price * qty))
-            rows += f"""
-            <tr>
-                <td class="sku">{sku}</td>
-                <td>{name}</td>
-                <td class="num">{qty}</td>
-                <td class="num">${price:,.2f}</td>
-                <td class="num">${line_total:,.2f}</td>
-            </tr>"""
-
-        items_html = f"""
-        <table class="invoice-table">
-            <thead>
-                <tr>
-                    <th style="width:110px;">SKU</th>
-                    <th>Description</th>
-                    <th class="num" style="width:40px;">Qty</th>
-                    <th class="num" style="width:90px;">Unit Price</th>
-                    <th class="num" style="width:90px;">Total</th>
-                </tr>
-            </thead>
-            <tbody>{rows}</tbody>
-        </table>"""
-    else:
-        items_html = '<p style="color:#718096;font-size:13px;">No line items available.</p>'
-
-    tariff_pct = int(tariff_rate * 100)
-
-    # Residential classification notice — on every payment_link email.
-    # Catches the case where Smarty confirmed residential but customer is a contractor
-    # delivering to a job site. Commercial address button fires CFC alert, stops payment.
-    confirm_commercial_url = order.get("confirm_commercial_url", "#")
-    residential_notice = f"""
-    <div style="background:#EFF6FF;border:1px solid #BFDBFE;border-radius:8px;
-                padding:16px 18px;margin:20px 0;">
-        <p style="margin:0 0 8px;font-weight:700;color:#1E40AF;font-size:14px;">
-            &#128205; Delivery Address Classification
-        </p>
-        <p style="margin:0 0 8px;font-size:13px;color:#1E40AF;line-height:1.6;">
-            Your delivery address has been classified as a
-            <strong>residential address</strong>.
-            Residential deliveries include liftgate service at delivery.
-        </p>
-        <p style="margin:0 0 14px;font-size:13px;color:#1E40AF;line-height:1.6;">
-            If this is actually a <strong>commercial address</strong>
-            (business with a loading dock or forklift),
-            <strong>do not pay this invoice</strong>.
-        </p>
-        <p style="margin:0;text-align:center;">
-            <a href="{confirm_commercial_url}"
-               style="display:inline-block;background:#DC2626;color:#ffffff;
-                      text-decoration:none;padding:10px 24px;border-radius:6px;
-                      font-weight:700;font-size:13px;letter-spacing:0.3px;">
-                This is a commercial address &rarr;
-            </a>
-        </p>
-    </div>"""
-
-    body = f"""
-    <p>Hi {first_name},</p>
-    <p>Thank you for your order. Please find your invoice below. A PDF copy is attached for your records.</p>
-
-    <div class="meta-row">
-        <div class="meta-box">
-            <div class="meta-label">Bill To</div>
-            <div class="meta-value">{bill_name}{bill_contact}</div>
-            <div class="meta-label" style="margin-top:10px;">Ship To</div>
-            <div class="meta-value">{addr_html if street else "Same as above"}</div>
-        </div>
-        <div class="meta-box" style="flex:0 0 180px;">
-            <div class="meta-label">Invoice #</div>
-            <div class="meta-value"><strong>CFC-{order_id}</strong></div>
-            <div class="meta-label" style="margin-top:8px;">Date</div>
-            <div class="meta-value">{order_date or "\u2014"}</div>
-            <div class="meta-label" style="margin-top:8px;">Due</div>
-            <div class="meta-value">Upon Receipt</div>
-        </div>
-    </div>
-
-    {items_html}
-
-    <table class="totals-table">
-        <tr><td class="label">Subtotal</td><td class="amount">${float(total_items):,.2f}</td></tr>
-        <tr><td class="label">Tariff ({tariff_pct}%)</td><td class="amount">${tariff_amount:,.2f}</td></tr>
-        <tr><td class="label">Shipping</td><td class="amount">${total_shipping:,.2f}</td></tr>
-        <tr class="grand"><td class="label">Total Due</td><td class="amount">${grand_total:,.2f}</td></tr>
-    </table>
-
-    {residential_notice}
-
-    <div class="cta-wrap">
-        <a href="{payment_link}" class="cta-button">Pay Now &mdash; ${grand_total:,.2f}</a>
-    </div>
-
-    <div class="policy-box">
-        <strong>&#9888;&#65039; Please read before completing payment</strong>
-        By clicking Pay Now you agree to the following policies:
-        <ul>
-            <li>No returns on assembled or installed cabinets.</li>
-            <li>20% restocking fee on returned undamaged items in original packaging.</li>
-            <li>Damaged items must be noted on the delivery receipt and reported within 48 hours of delivery.</li>
-            <li>Buyer is responsible for verifying all measurements before ordering &mdash; we cannot accept returns for incorrect sizing.</li>
-            <li>Minor color variation between door samples and production run is normal and not grounds for return.</li>
-            <li>Shipping quotes are estimates; final shipping cost may vary for remote locations.</li>
-        </ul>
-    </div>
-
-    <p style="margin-top:20px;font-size:13px;">Questions? Reply to <a href="mailto:orders@cabinetsforcontractors.com">orders@cabinetsforcontractors.com</a> or call <strong>(770) 990-4885</strong>.</p>
-    <p style="font-size:13px;">Thanks,<br><strong>William Prince</strong><br>Cabinets For Contractors</p>
-    """
-    return _wrap_email(_header("Invoice", show_invoice_label=True), body)
 
 
 def _render_payment_confirmation(order: Dict) -> str:
