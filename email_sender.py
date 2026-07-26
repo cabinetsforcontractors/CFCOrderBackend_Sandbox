@@ -40,8 +40,10 @@ from db_helpers import get_db, get_order_by_id
 # unset default. Same switch as email_identity.py.
 CFC_SENDER_NAME = os.environ.get(
     "EMAIL_FROM_NAME", "William Prince — Cabinets For Contractors").strip()
+# Fallback re-homed 2026-07-26: ALL @cabinetsforcontractors.NET mailboxes were
+# DELETED (GoDaddy M365 cleanup, marketing-lane note) — mail to them bounces.
 CFC_SENDER_EMAIL = (os.environ.get("EMAIL_FROM_ADDRESS", "").strip()
-                    or "william@cabinetsforcontractors.net")
+                    or "orders@cabinetsforcontractors.com")
 
 
 def send_order_email(
