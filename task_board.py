@@ -419,7 +419,7 @@ def run_task_sweep(conn) -> dict:
         cur.execute("""
             UPDATE task_board_items
             SET status = 'gone', updated_at = NOW()
-            WHERE type NOT IN ('manual', 'plaud') AND status = 'open'
+            WHERE type NOT IN ('manual', 'plaud', 'follow-up') AND status = 'open'
               AND last_seen < %s
         """, (sweep_start,))
         gone = cur.rowcount
@@ -430,30 +430,38 @@ def run_task_sweep(conn) -> dict:
 
 
 # =============================================================================
-# SMART NOTES
+# DROPDOWN ACTIONS (William's failsafe ruling 2026-07-26: typed words NEVER
+# fire anything — an order action fires only from an explicit dropdown pick)
 # =============================================================================
 
-_INTENTS = [
-    (re.compile(r"invoice sent|payment link sent|link sent", re.I), "payment_link_sent"),
-    (re.compile(r"payment received|customer paid|\bpaid\b", re.I), "payment_received"),
-    (re.compile(r"picked up|delivered|\bcomplete(d)?\b", re.I), "is_complete"),
-]
+DROPDOWN_ACTIONS = {
+    "payment_link_sent": "Invoice / payment link sent",
+    "payment_received":  "Payment received",
+    "is_complete":       "Picked up / delivered / complete",
+}
 
 
-def _apply_smart_note(order_id: str, note: str) -> list:
-    actions = []
-    for rx, checkpoint in _INTENTS:
-        if rx.search(note):
-            try:
-                from orders_routes import update_checkpoint, CheckpointUpdate
-                update_checkpoint(order_id,
-                                  CheckpointUpdate(checkpoint=checkpoint,
-                                                   source="smart_note"), True)
-                actions.append(checkpoint)
-            except Exception as e:
-                actions.append(f"{checkpoint} FAILED: {e}")
-            break        # first matching intent only — no chain reactions
-    return actions
+def _fire_checkpoint(order_id: str, checkpoint: str) -> str:
+    from orders_routes import update_checkpoint, CheckpointUpdate
+    update_checkpoint(order_id,
+                      CheckpointUpdate(checkpoint=checkpoint,
+                                       source="task_board_dropdown"), True)
+    return checkpoint
+
+
+def _parse_due(s):
+    """ISO date, or the words today/tomorrow. None when blank/unparseable."""
+    from datetime import date, timedelta
+    s = (s or "").strip().lower()
+    if not s:
+        return None
+    if s == "today":
+        return date.today().isoformat()
+    if s == "tomorrow":
+        return (date.today() + timedelta(days=1)).isoformat()
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", s):
+        return s
+    return None
 
 
 # =============================================================================
@@ -540,31 +548,115 @@ def save_note(payload: dict = Body(...), _: bool = Depends(require_admin)):
                     WHERE task_key = %s
                 """, (task_key,))
         conn.commit()
-    if note and order_id:
-        actions = _apply_smart_note(str(order_id), note)
+    # NOTES ARE PURE (failsafe ruling): typed words never fire actions.
     return {"status": "ok", "task_key": task_key,
             "action": "saved" if note else "reopened",
             "smart_actions": actions}
 
 
+@task_router.post("/tasks/action")
+def dropdown_action(payload: dict = Body(...), _: bool = Depends(require_admin)):
+    """Fire an order checkpoint from the EXPLICIT dropdown pick. The only
+    door through which a task can change an order."""
+    task_key = (payload.get("task_key") or "").strip()
+    action = (payload.get("action") or "").strip()
+    if action not in DROPDOWN_ACTIONS:
+        return {"status": "error",
+                "message": f"action must be one of {sorted(DROPDOWN_ACTIONS)}"}
+    with get_db() as conn:
+        _ensure_tables(conn)
+        with conn.cursor() as cur:
+            cur.execute("SELECT order_id FROM task_board_items WHERE task_key = %s",
+                        (task_key,))
+            row = cur.fetchone()
+    if not row or not row[0]:
+        return {"status": "error", "message": "task is not linked to an order"}
+    order_id = str(row[0])
+    try:
+        _fire_checkpoint(order_id, action)
+    except Exception as e:
+        return {"status": "error", "message": f"checkpoint failed: {e}"}
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE task_board_items
+                SET status = 'handled', note = %s, note_at = NOW(), updated_at = NOW()
+                WHERE task_key = %s
+            """, (f"[{DROPDOWN_ACTIONS[action]}] via dropdown", task_key))
+        conn.commit()
+    return {"status": "ok", "order_id": order_id, "fired": action,
+            "label": DROPDOWN_ACTIONS[action]}
+
+
+@task_router.post("/tasks/done")
+def task_done(payload: dict = Body(...), _: bool = Depends(require_admin)):
+    """Done button — the task leaves the board (kept in HANDLED history)."""
+    task_key = (payload.get("task_key") or "").strip()
+    with get_db() as conn:
+        _ensure_tables(conn)
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE task_board_items
+                SET status = 'handled',
+                    note = COALESCE(note, '[done]'), note_at = NOW(), updated_at = NOW()
+                WHERE task_key = %s
+            """, (task_key,))
+            hit = cur.rowcount
+        conn.commit()
+    return {"status": "ok" if hit else "error", "task_key": task_key}
+
+
+@task_router.post("/tasks/due")
+def change_due(payload: dict = Body(...), _: bool = Depends(require_admin)):
+    """Change a task's follow-up date ('2026-07-28', 'tomorrow', 'today')."""
+    task_key = (payload.get("task_key") or "").strip()
+    due = _parse_due(payload.get("due_date"))
+    if not due:
+        return {"status": "error", "message": "due_date must be YYYY-MM-DD, today, or tomorrow"}
+    with get_db() as conn:
+        _ensure_tables(conn)
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE task_board_items
+                SET due_date = %s, updated_at = NOW() WHERE task_key = %s
+            """, (due, task_key))
+            hit = cur.rowcount
+        conn.commit()
+    return {"status": "ok" if hit else "error", "task_key": task_key, "due_date": due}
+
+
 @task_router.post("/tasks/manual")
 def add_manual(payload: dict = Body(...), _: bool = Depends(require_admin)):
+    """Add a task. With order_id -> a FOLLOW-UP on the ORDER board
+    ("call them tomorrow" on 5695); without -> a plain task on OTHER.
+    due_date accepts YYYY-MM-DD, 'today', or 'tomorrow'."""
     text = (payload.get("text") or "").strip()
-    due = (payload.get("due_date") or "").strip() or None
+    due = _parse_due(payload.get("due_date"))
+    order_id = str(payload.get("order_id") or "").strip() or None
     if not text:
         return {"status": "error", "message": "text required"}
-    key = f"manual:{int(datetime.now(timezone.utc).timestamp() * 1000)}"
+    if order_id:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1 FROM orders WHERE order_id = %s", (order_id,))
+                if not cur.fetchone():
+                    return {"status": "error", "message": f"order {order_id} not found"}
+    board = "order" if order_id else "other"
+    ttype = "follow-up" if order_id else "manual"
+    key = f"{ttype}:{int(datetime.now(timezone.utc).timestamp() * 1000)}"
     with get_db() as conn:
         _ensure_tables(conn)
         with conn.cursor() as cur:
             cur.execute("""
                 INSERT INTO task_board_items
-                    (task_key, board, type, title, detail, due_date, date_str, status)
-                VALUES (%s, 'other', 'manual', %s, %s, %s, %s, 'open')
-            """, (key, text, f"added by William" + (f", follow up {due}" if due else ""),
-                  due, datetime.now(timezone.utc).isoformat()))
+                    (task_key, board, type, title, detail, order_id, due_date,
+                     date_str, status)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'open')
+            """, (key, board, ttype, text,
+                  "added by William" + (f", follow up {due}" if due else ""),
+                  order_id, due, datetime.now(timezone.utc).isoformat()))
         conn.commit()
-    return {"status": "ok", "task_key": key}
+    return {"status": "ok", "task_key": key, "due_date": due, "board": board}
 
 
 @task_router.post("/tasks/plaud")
