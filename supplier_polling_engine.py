@@ -418,7 +418,7 @@ def _send_customer_pickup_scheduled_email(
     <p style="color:#4a5568;">Questions? Reply to <a href="mailto:cabinetsforcontractors@gmail.com">cabinetsforcontractors@gmail.com</a> or call <strong>(770) 990-4885</strong>.</p>
     <p style="color:#4a5568;">Thanks,<br><strong>William Prince</strong><br>Cabinets For Contractors</p>
     <hr style="border:none;border-top:1px solid #e2e8f0;margin:20px 0;">
-    <p style="font-size:12px;color:#999;text-align:center;">Cabinets For Contractors &bull; (770) 990-4885 &bull; orders@cabinetsforcontractors.net</p>
+    <p style="font-size:12px;color:#999;text-align:center;">Cabinets For Contractors &bull; (770) 990-4885 &bull; orders@cabinetsforcontractors.com</p>
 </div>
 </body></html>"""
 
@@ -578,7 +578,7 @@ def _send_customer_tracking_email(
     <p style="color:#4a5568;">Questions? Reply to <a href="mailto:cabinetsforcontractors@gmail.com">cabinetsforcontractors@gmail.com</a> or call <strong>(770) 990-4885</strong>.</p>
     <p style="color:#4a5568;">Thanks,<br><strong>William Prince</strong><br>Cabinets For Contractors</p>
     <hr style="border:none;border-top:1px solid #e2e8f0;margin:20px 0;">
-    <p style="font-size:12px;color:#999;text-align:center;">Cabinets For Contractors &bull; (770) 990-4885 &bull; orders@cabinetsforcontractors.net</p>
+    <p style="font-size:12px;color:#999;text-align:center;">Cabinets For Contractors &bull; (770) 990-4885 &bull; orders@cabinetsforcontractors.com</p>
 </div>
 </body></html>"""
 
@@ -1065,7 +1065,7 @@ def _send_raw_email(to_email: str, subject: str, html_body: str,
             msg.attach(MIMEText("Please view in HTML email client.", "plain"))
             msg.attach(MIMEText(html_body, "html"))
 
-        msg["From"] = "william@cabinetsforcontractors.net"
+        msg["From"] = "orders@cabinetsforcontractors.com"
         msg["To"] = to_email
         msg["Subject"] = subject
 
@@ -1099,7 +1099,7 @@ def _bol_email_html(warehouse_name, order_id, pro_number, pickup_date, pickup_ti
         <tr><td style="padding:8px 0;color:#666;">Pickup Date:</td><td style="font-weight:600;">{pickup_date}</td></tr>
         <tr><td style="padding:8px 0;color:#666;">Pickup Time:</td><td style="font-weight:600;">{pickup_time}</td></tr>
     </table>
-    <p style="font-size:12px;color:#999;margin-top:24px;">Questions? Email <a href="mailto:orders@cabinetsforcontractors.net">orders@cabinetsforcontractors.net</a></p>
+    <p style="font-size:12px;color:#999;margin-top:24px;">Questions? Email <a href="mailto:orders@cabinetsforcontractors.com">orders@cabinetsforcontractors.com</a></p>
 </div>
 </body></html>"""
 
@@ -1127,7 +1127,7 @@ def _send_supplier_poll_email(
     <a href="{form_url}" style="display:inline-block;background:#1a365d;color:white;padding:14px 28px;border-radius:6px;text-decoration:none;font-weight:700;font-size:16px;margin:16px 0;">
         Enter Ship Date &amp; Time \u2192
     </a>
-    <p style="font-size:12px;color:#999;margin-top:24px;">Questions? Email <a href="mailto:orders@cabinetsforcontractors.net" style="color:#1a365d;">orders@cabinetsforcontractors.net</a></p>
+    <p style="font-size:12px;color:#999;margin-top:24px;">Questions? Email <a href="mailto:orders@cabinetsforcontractors.com" style="color:#1a365d;">orders@cabinetsforcontractors.com</a></p>
 </div></body></html>"""
     success = _send_raw_email(to_email=to_email, subject=subject, html_body=html)
     return {"success": success}
@@ -1149,7 +1149,7 @@ def _render_day_before_email(order_id, date_str, yes_url, no_url,
             \u274c No — Enter New Date \u2192
         </a>
     </div>
-    <p style="font-size:12px;color:#999;">Questions? Email <a href="mailto:orders@cabinetsforcontractors.net" style="color:#1a365d;">orders@cabinetsforcontractors.net</a></p>
+    <p style="font-size:12px;color:#999;">Questions? Email <a href="mailto:orders@cabinetsforcontractors.com" style="color:#1a365d;">orders@cabinetsforcontractors.com</a></p>
 </div></body></html>"""
 
 

@@ -138,7 +138,7 @@ def _send_gmail_message(token: str, to: str, subject: str, body: str):
     from email.mime.text import MIMEText
     from email.mime.multipart import MIMEMultipart
     msg = MIMEMultipart("alternative")
-    msg["From"] = "william@cabinetsforcontractors.net"
+    msg["From"] = "orders@cabinetsforcontractors.com"
     msg["To"] = to
     msg["Subject"] = subject
     msg.attach(MIMEText(body, "plain"))
@@ -1100,7 +1100,7 @@ def confirm_commercial(order_id: str, token: str):
         <p>We appreciate you letting us know — this ensures you receive the correct shipping quote.</p>
         <div class="contact">
             Questions? Call <a href="tel:7709904885">(770) 990-4885</a> or email
-            <a href="mailto:william@cabinetsforcontractors.net">william@cabinetsforcontractors.net</a>
+            <a href="mailto:orders@cabinetsforcontractors.com">orders@cabinetsforcontractors.com</a>
         </div>
     </div>
 </body>

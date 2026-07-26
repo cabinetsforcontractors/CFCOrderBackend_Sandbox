@@ -153,7 +153,7 @@ def _send_raw_email(to_email: str, subject: str, html_body: str) -> bool:
         msg = MIMEMultipart("alternative")
         msg.attach(MIMEText("Please view in an HTML-capable email client.", "plain"))
         msg.attach(MIMEText(html_body, "html"))
-        msg["From"] = "william@cabinetsforcontractors.net"
+        msg["From"] = "orders@cabinetsforcontractors.com"
         msg["To"] = to_email
         msg["Subject"] = subject
 
@@ -235,7 +235,7 @@ def send_pickup_ready_poll(shipment_id: str) -> dict:
         Enter Pickup-Ready Date &amp; Time →
     </a>
     <p style="font-size:12px;color:#999;margin-top:24px;">
-        Questions? Email <a href="mailto:orders@cabinetsforcontractors.net" style="color:#1a365d;">orders@cabinetsforcontractors.net</a>
+        Questions? Email <a href="mailto:orders@cabinetsforcontractors.com" style="color:#1a365d;">orders@cabinetsforcontractors.com</a>
     </p>
 </div></body></html>"""
 
@@ -377,7 +377,7 @@ def _send_customer_order_ready_email(
     <p style="color:#4a5568;">Questions? Reply to <a href="mailto:cabinetsforcontractors@gmail.com">cabinetsforcontractors@gmail.com</a> or call <strong>(770) 990-4885</strong>.</p>
     <p style="color:#4a5568;">Thanks,<br><strong>William Prince</strong><br>Cabinets For Contractors</p>
     <hr style="border:none;border-top:1px solid #e2e8f0;margin:20px 0;">
-    <p style="font-size:12px;color:#999;text-align:center;">Cabinets For Contractors &bull; (770) 990-4885 &bull; orders@cabinetsforcontractors.net</p>
+    <p style="font-size:12px;color:#999;text-align:center;">Cabinets For Contractors &bull; (770) 990-4885 &bull; orders@cabinetsforcontractors.com</p>
 </div>
 </body></html>"""
 
@@ -468,7 +468,7 @@ def _send_pickup_confirm_poll(shipment: dict) -> dict:
             ❌ No — Not Yet Collected
         </a>
     </div>
-    <p style="font-size:12px;color:#999;">Questions? Email <a href="mailto:orders@cabinetsforcontractors.net" style="color:#1a365d;">orders@cabinetsforcontractors.net</a></p>
+    <p style="font-size:12px;color:#999;">Questions? Email <a href="mailto:orders@cabinetsforcontractors.com" style="color:#1a365d;">orders@cabinetsforcontractors.com</a></p>
 </div></body></html>"""
 
     success = _send_raw_email(

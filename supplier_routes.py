@@ -44,7 +44,7 @@ from pickup_polling_engine import (
 
 supplier_router = APIRouter(tags=["supplier"])
 
-CFC_EMAIL = "orders@cabinetsforcontractors.net"
+CFC_EMAIL = "orders@cabinetsforcontractors.com"
 
 
 # =============================================================================

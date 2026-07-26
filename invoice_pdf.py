@@ -152,7 +152,7 @@ def generate_invoice_pdf(order_data: dict, shipping_result: dict) -> Optional[by
         ('RIGHTPADDING', (0, 0), (-1, -1), 0),
     ]))
     elements.append(header_table)
-    elements.append(Paragraph("Wholesale RTA Cabinets · (770) 990-4885 · william@cabinetsforcontractors.net", subheader_style))
+    elements.append(Paragraph("Wholesale RTA Cabinets · (770) 990-4885 · orders@cabinetsforcontractors.com", subheader_style))
     elements.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor('#e2e8f0'), spaceAfter=10))
 
     # ==========================================================================

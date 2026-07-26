@@ -322,7 +322,7 @@ def _send_email(order_id: str, to_email: str, subject: str, html: str,
         msg["To"] = to_email
         if cc:
             msg["Cc"] = cc
-        msg["From"] = "William Prince — Cabinets For Contractors <william@cabinetsforcontractors.net>"
+        msg["From"] = "William Prince — Cabinets For Contractors <orders@cabinetsforcontractors.com>"
         # EMAIL_FROM_ADDRESS switch (orders@ after Gmail alias verification)
         # replaces the legacy header above when set; no-op otherwise.
         from email_identity import apply_from

@@ -441,7 +441,7 @@ def _send_guarded_email(order_id: str, to_email: str, subject: str, html: str,
             return {"success": False, "error": "no Gmail access token"}
         msg = MIMEText(html, "html")
         msg["To"] = to_email
-        msg["From"] = "William Prince — Cabinets For Contractors <william@cabinetsforcontractors.net>"
+        msg["From"] = "William Prince — Cabinets For Contractors <orders@cabinetsforcontractors.com>"
         msg["Subject"] = subject
         payload = {}
         if thread_headers:

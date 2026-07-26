@@ -194,7 +194,7 @@ def _footer() -> str:
     return """
     <div class="footer">
         <p><strong>Cabinets For Contractors</strong></p>
-        <p>(770) 990-4885 &bull; <a href="mailto:william@cabinetsforcontractors.net">william@cabinetsforcontractors.net</a></p>
+        <p>(770) 990-4885 &bull; <a href="mailto:orders@cabinetsforcontractors.com">orders@cabinetsforcontractors.com</a></p>
         <p style="margin-top: 8px; font-size: 11px; color: #7eb3e8;">
             Questions? Just reply — a real person reads every email.
         </p>
