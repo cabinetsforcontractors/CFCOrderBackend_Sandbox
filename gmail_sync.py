@@ -572,6 +572,15 @@ def run_gmail_sync(db_conn, hours_back=2):
     except Exception as e:
         results["errors"].append(f"New-order watch error: {e}")
 
+    # 10. Task board v2 sweep (2026-07-26): materialize the board every cycle
+    # so GET /tasks is instant. Guarded — never breaks the main sync.
+    try:
+        from task_board import run_task_sweep
+        ts = run_task_sweep(db_conn)
+        results["task_sweep"] = ts.get("swept", 0)
+    except Exception as e:
+        results["errors"].append(f"Task sweep error: {e}")
+
     print(f"[GMAIL] Sync complete: {results}")
     return results
 
