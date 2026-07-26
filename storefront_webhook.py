@@ -46,7 +46,13 @@ def _authorized(request: Request, x_admin_token: str) -> bool:
 @storefront_router.post("/storefront/order-submitted")
 def order_submitted(request: Request, payload: dict = Body(...),
                     x_admin_token: str = Header(None, alias="X-Admin-Token")):
+    # Log EVERY hit — authorized or not — so "ping never arrived" and
+    # "ping rejected" are distinguishable (the 5732 lesson, 2026-07-26).
+    print(f"[DOORBELL] hit: id={payload.get('id')!r} "
+          f"token_qs={'yes' if request.query_params.get('token') else 'NO'} "
+          f"admin_hdr={'yes' if x_admin_token else 'no'}")
     if not _authorized(request, x_admin_token or ""):
+        print(f"[DOORBELL] REJECTED (bad/missing token) id={payload.get('id')!r}")
         return {"status": "error", "message": "bad or missing token"}
 
     order_id = str(payload.get("id") or "").strip()
