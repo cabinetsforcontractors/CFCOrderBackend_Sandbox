@@ -271,6 +271,100 @@ def _gmail_send(
         raise
 
 
+def create_invoice_draft(
+    order_id: str,
+    to_email: str = "",
+    shipping_amount: float = 0.0,
+    square_link: str = "",
+    tariff_rate: float = 0.08,
+) -> dict:
+    """BEAT 3 (William 2026-07-26): render the v4 invoice (template + PDF)
+    from the order row and land it as a GMAIL DRAFT with the PDF attached —
+    the repo makes the draft, nobody hand-builds invoices. DRAFT-FIRST: this
+    never sends; William reviews, adds/replaces the Square link, sends.
+
+    square_link empty -> the Pay Now button carries '#' and the subject is
+    prefixed [ADD SQUARE LINK] so an unfinished draft can't slip out quietly.
+    """
+    token = get_gmail_access_token()
+    if not token:
+        return {"success": False, "error": "Gmail OAuth not configured"}
+
+    order_data = get_order_by_id(order_id)
+    if not order_data:
+        return {"success": False, "error": f"Order {order_id} not found"}
+    order_data["order_id"] = order_id
+
+    subtotal = float(order_data.get("order_total") or 0)
+    tariff = round(subtotal * tariff_rate, 2)
+    shipping = round(float(shipping_amount or 0), 2)
+    grand = round(subtotal + tariff + shipping, 2)
+    order_data["shipping_result"] = {
+        "total_items": subtotal,
+        "tariff_amount": tariff,
+        "tariff_rate": tariff_rate,
+        "total_shipping": shipping,
+        "grand_total": grand,
+    }
+    order_data["payment_link"] = (square_link or "").strip() or "#"
+
+    html_body = render_template("payment_link", order_data)
+    if not html_body:
+        return {"success": False, "error": "template render failed"}
+    subject = get_template_subject("payment_link", order_data)
+    if not (square_link or "").strip():
+        subject = f"[ADD SQUARE LINK] {subject}"
+
+    pdf_bytes = None
+    try:
+        from invoice_pdf import generate_invoice_pdf
+        pdf_bytes = generate_invoice_pdf(order_data, order_data["shipping_result"])
+    except Exception as e:
+        print(f"[EMAIL] draft-invoice PDF failed for {order_id}: {e}")
+
+    to_email = (to_email or "").strip() or (order_data.get("email") or "").strip()
+    if not to_email:
+        return {"success": False, "error": "no recipient (order has no email)"}
+
+    msg = MIMEMultipart("mixed")
+    from email_identity import apply_from
+    apply_from(msg)
+    msg["To"] = to_email
+    msg["Subject"] = subject
+    alt = MIMEMultipart("alternative")
+    alt.attach(MIMEText("View this email in an HTML-capable client.", "plain"))
+    alt.attach(MIMEText(html_body, "html"))
+    msg.attach(alt)
+    if pdf_bytes:
+        part = MIMEBase("application", "pdf")
+        part.set_payload(pdf_bytes)
+        encoders.encode_base64(part)
+        part.add_header("Content-Disposition", "attachment",
+                        filename=f"CFC-Invoice-{order_id}.pdf")
+        msg.attach(part)
+
+    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("utf-8")
+    req = urllib.request.Request(
+        "https://gmail.googleapis.com/gmail/v1/users/me/drafts",
+        data=json.dumps({"message": {"raw": raw}}).encode("utf-8"), method="POST")
+    req.add_header("Authorization", f"Bearer {token}")
+    req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as response:
+            draft_id = json.loads(response.read().decode()).get("id")
+    except urllib.error.HTTPError as e:
+        return {"success": False, "error": f"Gmail API {e.code}: {e.read().decode()[:300]}"}
+
+    _log_email_event(order_id=order_id, template_id="payment_link",
+                     to_email=to_email, subject=subject, message_id=draft_id,
+                     triggered_by="draft_invoice", source="invoice_draft")
+    print(f"[EMAIL] invoice DRAFT created for {order_id} -> {to_email} "
+          f"(draft={draft_id}, pdf={pdf_bytes is not None})")
+    return {"success": True, "draft_id": draft_id, "to": to_email,
+            "subject": subject, "pdf_attached": pdf_bytes is not None,
+            "totals": order_data["shipping_result"]}
+
+
 # =============================================================================
 # EVENT LOGGING
 # =============================================================================

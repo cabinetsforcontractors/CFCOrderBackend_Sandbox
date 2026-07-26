@@ -103,6 +103,23 @@ async def preview_template(template_id: str):
 # SEND ENDPOINTS
 # =============================================================================
 
+@email_router.post("/orders/{order_id}/draft-invoice")
+async def draft_invoice(order_id: str, to: str = "", shipping: float = 0.0,
+                        square_link: str = "", tariff_rate: float = 0.08):
+    """BEAT 3: render the v4 invoice (template + PDF) into a Gmail DRAFT with
+    the PDF attached. Never sends. Empty square_link -> subject prefixed
+    [ADD SQUARE LINK]. `to` defaults to the order's customer email —
+    pass to=homesupplyplus@gmail.com for test orders (William's convention)."""
+    from email_sender import create_invoice_draft
+    result = create_invoice_draft(order_id, to_email=to,
+                                  shipping_amount=shipping,
+                                  square_link=square_link,
+                                  tariff_rate=tariff_rate)
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error"))
+    return result
+
+
 @email_router.post("/orders/{order_id}/send-email")
 async def send_email(order_id: str, req: SendEmailRequest):
     """
