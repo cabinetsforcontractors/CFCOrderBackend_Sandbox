@@ -104,6 +104,15 @@ def wire_all(app: FastAPI) -> dict:
         results["new_order_watch"] = False
         print(f"[STARTUP] new_order_notifier not found: {e}")
 
+    # Storefront doorbell (/storefront/order-submitted) — ping + read-back (2026-07-26)
+    try:
+        from storefront_webhook import storefront_router
+        app.include_router(storefront_router)
+        results["storefront_webhook"] = True
+    except ImportError as e:
+        results["storefront_webhook"] = False
+        print(f"[STARTUP] storefront_webhook not found: {e}")
+
     loaded = sum(1 for v in results.values() if v)
     print(f"[STARTUP] startup_wiring: {loaded}/{len(results)} modules loaded")
     
