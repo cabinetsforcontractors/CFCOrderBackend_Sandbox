@@ -180,8 +180,10 @@ ALLOWED_ORIGINS = [
     "https://cfcorderbackend-sandbox.onrender.com",
     "https://brain-backend-6uhk.onrender.com",
     "http://localhost:3000",
+    "http://localhost:3010",
     "http://localhost:5173",
     "http://127.0.0.1:3000",
+    "http://127.0.0.1:3010",
     "http://127.0.0.1:5173",
 ] + _extra_origins
 
