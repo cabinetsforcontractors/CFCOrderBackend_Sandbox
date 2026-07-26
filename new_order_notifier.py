@@ -37,7 +37,7 @@ from db_helpers import get_db
 new_order_router = APIRouter(tags=["new-order-watch"])
 
 NOTIFY_TO = os.environ.get("NEW_ORDER_NOTIFY_TO",
-                           "cabinetsforcontractors@gmail.com").strip()
+                           "orders@cabinetsforcontractors.com").strip()
 DASHBOARD_URL = os.environ.get(
     "DASHBOARD_URL", "https://cfcordersfrontend-sandbox.vercel.app").strip()
 MAX_AGE_DAYS = 7

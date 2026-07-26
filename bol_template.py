@@ -233,7 +233,7 @@ def generate_bol_pdf(
             _p("1472 Ocean Shore Blvd", VAL_S),
             _p("CITY", LABEL_S),
             _p("ORMOND BEACH   FL   32176", VAL_S),
-            _p("PHONE: (770) 990-4885   EMAIL: cabinetsforcontractors@gmail.com", SMALL_S),
+            _p("PHONE: (770) 990-4885   EMAIL: orders@cabinetsforcontractors.com", SMALL_S),
         ]
         ref_block = [
             [_p("SHIPPER / BOL #", LABEL_S), _p(f"Order # {order_id}", VAL_B_S)],

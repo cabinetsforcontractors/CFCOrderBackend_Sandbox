@@ -405,7 +405,7 @@ def _render_payment_link(order: Dict) -> str:
         </ul>
     </div>
 
-    <p style="margin-top:20px;font-size:13px;">Questions? Reply to <a href="mailto:cabinetsforcontractors@gmail.com">cabinetsforcontractors@gmail.com</a> or call <strong>(770) 990-4885</strong>.</p>
+    <p style="margin-top:20px;font-size:13px;">Questions? Reply to <a href="mailto:orders@cabinetsforcontractors.com">orders@cabinetsforcontractors.com</a> or call <strong>(770) 990-4885</strong>.</p>
     <p style="font-size:13px;">Thanks,<br><strong>William Prince</strong><br>Cabinets For Contractors</p>
     """
     return _wrap_email(_header("Invoice", show_invoice_label=True), body)
@@ -643,7 +643,7 @@ def _render_quote_email(order: Dict) -> str:
         When you're ready, simply view this quote online or call us and we'll take care of it.
     </p>
 
-    <p style="margin-top:20px;font-size:13px;">Questions? Reply to <a href="mailto:cabinetsforcontractors@gmail.com">cabinetsforcontractors@gmail.com</a> or call <strong>(770) 990-4885</strong>.</p>
+    <p style="margin-top:20px;font-size:13px;">Questions? Reply to <a href="mailto:orders@cabinetsforcontractors.com">orders@cabinetsforcontractors.com</a> or call <strong>(770) 990-4885</strong>.</p>
     <p style="font-size:13px;">Thanks,<br><strong>William Prince</strong><br>Cabinets For Contractors</p>
     """
     return _wrap_email(_header("Your Cabinet Quote", f"Order #{order_id}"), body)
@@ -705,7 +705,7 @@ def _render_abandoned_cart_nudge(order: Dict) -> str:
     </div>
 
     <p style="font-size:13px;color:#718096;">Shipping will be calculated once your order is submitted.</p>
-    <p style="margin-top:16px;font-size:13px;">Questions? Call <strong>(770) 990-4885</strong> or reply to <a href="mailto:cabinetsforcontractors@gmail.com">cabinetsforcontractors@gmail.com</a>.</p>
+    <p style="margin-top:16px;font-size:13px;">Questions? Call <strong>(770) 990-4885</strong> or reply to <a href="mailto:orders@cabinetsforcontractors.com">orders@cabinetsforcontractors.com</a>.</p>
     <p style="font-size:13px;">Thanks,<br><strong>William Prince</strong><br>Cabinets For Contractors</p>
     """
     return _wrap_email(_header("You Left Something Behind", f"Order #{order_id}"), body)

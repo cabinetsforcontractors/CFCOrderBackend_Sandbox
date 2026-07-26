@@ -22,6 +22,7 @@ Endpoints [admin]:
 READ-ONLY against Gmail — never sends, never drafts, never marks read.
 """
 
+import os
 import re
 from datetime import datetime, timezone
 
@@ -60,8 +61,13 @@ SUPPLIER_ADDRESSES = {
 # it falls back to its own seed list if the table can't be read.
 from test_registry import test_order_ids as _registry_ids
 
-OWN_ADDRESS = "cabinetsforcontractors@gmail.com"
-FLAG_INBOX = "wpjob1@gmail.com"
+# Our own mailboxes (permanent move to orders@ Workspace, William 2026-07-26).
+# Env override OWN_EMAIL_ADDRESSES (comma-separated) wins.
+OWN_ADDRESSES = {a.strip().lower() for a in os.environ.get(
+    "OWN_EMAIL_ADDRESSES",
+    "orders@cabinetsforcontractors.com,cabinetsforcontractors@gmail.com"
+).split(",") if a.strip()}
+FLAG_INBOX = os.environ.get("FLAG_INBOX_EMAIL", "wpjob1@gmail.com").strip()
 
 _table_ready = False
 
@@ -187,7 +193,7 @@ def _sweep_drafts(known_ids: set):
         to = (headers.get("to") or "").lower()
         if HANDOFF_RE.search(subject):
             continue                      # lane handoffs — off the board, always
-        if OWN_ADDRESS in to and FLAG_INBOX not in to:
+        if any(own in to for own in OWN_ADDRESSES) and FLAG_INBOX not in to:
             continue                      # self-notes, not actionable
         tasks.append({
             "task_key": f"draft:{d.get('id')}",

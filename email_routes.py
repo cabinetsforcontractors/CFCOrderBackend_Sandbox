@@ -38,6 +38,30 @@ class SendEmailRequest(BaseModel):
 
 
 # =============================================================================
+# IDENTITY
+# =============================================================================
+
+@email_router.get("/email/whoami")
+async def email_whoami():
+    """Which Gmail account does the robot's token belong to, and what From
+    is configured? THE verification door for mailbox moves (orders@
+    permanent switch, William 2026-07-26)."""
+    import os
+    from gmail_sync import gmail_api_request
+    profile = gmail_api_request("profile") or {}
+    return {
+        "success": bool(profile.get("emailAddress")),
+        "token_account": profile.get("emailAddress", "TOKEN NOT WORKING"),
+        "messages_total": profile.get("messagesTotal"),
+        "from_address_env": os.environ.get("EMAIL_FROM_ADDRESS", "(unset — Gmail stamps the token account)"),
+        "from_name_env": os.environ.get("EMAIL_FROM_NAME", "(unset)"),
+        "allowlist_env": os.environ.get("EMAIL_ALLOWLIST", "(unset — no redirect guard)"),
+        "internal_notices_env": os.environ.get("WAREHOUSE_NOTIFICATION_EMAIL", "(unset — default cabinetsforcontractors@gmail.com)"),
+        "new_order_notify_to": os.environ.get("NEW_ORDER_NOTIFY_TO", "(unset — default orders@cabinetsforcontractors.com)"),
+    }
+
+
+# =============================================================================
 # TEMPLATE ENDPOINTS
 # =============================================================================
 

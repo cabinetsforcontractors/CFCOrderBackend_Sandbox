@@ -247,7 +247,7 @@ SUPPLIER_FULL_ADDRESSES = {
     "Love-Milestone": ["lovetoucheskitchen@gmail.com"],
 }
 
-OWN_EMAILS = {"cabinetsforcontractors@gmail.com"}
+OWN_EMAILS = {"cabinetsforcontractors@gmail.com", "orders@cabinetsforcontractors.com"}
 OWN_EMAIL_NEVER = {"cfcinvoices42@gmail.com", "cabinetrydistribution@gmail.com", "lovetoucheskitchen@gmail.com"}
 OWN_EMAIL_PATTERNS = ["cabinetsforcontractors.net", "4wprince", "cabinetcloudai"]
 
