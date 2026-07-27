@@ -126,6 +126,26 @@ def scan_replies_now(hours_back: int = 24, _: bool = Depends(require_admin)):
         return {"status": "error", "message": str(e)}
 
 
+@supplier_order_router.post("/supplier-orders/confirm-dispatch-drill/{order_id}")
+def confirm_dispatch_drill(order_id: str, _: bool = Depends(require_admin)):
+    """Stage 2 drill [admin]: run the GATED payment-dispatch path on demand —
+    builds every warehouse's would-be artifact and emails the enriched
+    CONFIRM DISPATCH (artifacts attached) to the internal inbox. Sends
+    NOTHING to suppliers, writes NO supplier rows (dry-run path)."""
+    from db_helpers import get_order_by_id
+    from supplier_orders import run_dispatch_on_payment
+    order = get_order_by_id(order_id)
+    if not order:
+        return {"status": "error", "message": f"order {order_id} not found"}
+    total = float(order.get("order_total") or 0)
+    res = run_dispatch_on_payment(order_id, order, payment_amount=total,
+                                  force_gate=True)
+    # strip anything non-serializable defensively
+    if isinstance(res.get("preview"), dict):
+        res["preview"].pop("_artifacts", None)
+    return res
+
+
 @supplier_order_router.get("/supplier-orders/map-report")
 def map_report(_: bool = Depends(require_admin)):
     """AUTO-DISPATCH Stage 1 [admin, READ-ONLY]: is the supplier-SKU map

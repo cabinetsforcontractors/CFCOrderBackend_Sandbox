@@ -287,9 +287,11 @@ def normalize_ghi_template(tpl_bytes: bytes) -> bytes:
 # =============================================================================
 
 def _send_email(order_id: str, to_email: str, subject: str, html: str,
-                triggered_by: str, attachment: Optional[Dict] = None,
+                triggered_by: str, attachment=None,
                 cc: Optional[str] = None) -> Dict:
-    """Guarded Gmail send. attachment = {'filename','content'(bytes),'mime'}."""
+    """Guarded Gmail send. attachment = {'filename','content'(bytes),'mime'}
+    or a LIST of those (Stage 2, 2026-07-27: the CONFIRM DISPATCH email
+    carries every warehouse's would-be artifact)."""
     from config import GMAIL_SEND_ENABLED
     from email_sender import _log_email_event
     from gmail_sync import get_gmail_access_token
@@ -329,13 +331,17 @@ def _send_email(order_id: str, to_email: str, subject: str, html: str,
         apply_from(msg)
         msg["Subject"] = subject
         msg.attach(MIMEText(html, "html"))
-        if attachment and attachment.get("content"):
-            main, _, sub = (attachment.get("mime") or "application/octet-stream").partition("/")
+        atts = attachment if isinstance(attachment, list) else \
+            ([attachment] if attachment else [])
+        for att in atts:
+            if not (att and att.get("content")):
+                continue
+            main, _, sub = (att.get("mime") or "application/octet-stream").partition("/")
             part = MIMEBase(main, sub or "octet-stream")
-            part.set_payload(attachment["content"])
+            part.set_payload(att["content"])
             encoders.encode_base64(part)
             part.add_header("Content-Disposition", "attachment",
-                            filename=attachment.get("filename", "attachment"))
+                            filename=att.get("filename", "attachment"))
             msg.attach(part)
         import urllib.request
         req = urllib.request.Request(
@@ -544,7 +550,8 @@ def build_ghi_xlsx(order_id: str, wdata: Dict) -> Dict:
 # =============================================================================
 
 def dispatch_order(order_id: str, auto_send: bool = True,
-                   dry_run: bool = False, triggered_by: str = "manual") -> Dict:
+                   dry_run: bool = False, triggered_by: str = "manual",
+                   collect_artifacts: bool = False) -> Dict:
     """Generate every warehouse's artifact for an order and (unless dry_run)
     send email-auto channels to the supplier and portal-prepared channels to
     us. Rows land in supplier_orders with the resulting status. Untranslated
@@ -606,6 +613,13 @@ def dispatch_order(order_id: str, auto_send: bool = True,
         if dry_run:
             wres["status"] = "dry_run"
             wres["preview"] = art["html"][:1500]
+            if collect_artifacts:
+                # Stage 2: full artifacts for the CONFIRM DISPATCH email.
+                # Internal-only — callers must pop "_artifacts" before
+                # serializing (attachment content is raw bytes).
+                results.setdefault("_artifacts", {})[wh] = {
+                    "art": art, "mode": ch["mode"],
+                    "supplier_to": sinfo.get("email", "")}
             results["warehouses"][wh] = wres
             continue
 
@@ -680,13 +694,17 @@ def _upsert_row(order_id: str, warehouse: str, status: str, ch: Dict,
 # =============================================================================
 
 def run_dispatch_on_payment(order_id: str, order_data: dict,
-                            payment_amount: float) -> Dict:
+                            payment_amount: float,
+                            force_gate: bool = False) -> Dict:
     """Trigger 5 (William: 100% auto-send when payment is made) with two gates:
       - AUTO_DISPATCH_ENABLED=true (env; default OFF for the beta)
       - exact payment: |payment - order_total| <= $1.00. Fuzzy Gmail-matched
         payments must NEVER place supplier orders — those get a
-        confirm-dispatch alert to William instead."""
-    enabled = os.environ.get("AUTO_DISPATCH_ENABLED", "false").lower() == "true"
+        confirm-dispatch alert to William instead.
+    force_gate=True (the Stage-2 drill door) ALWAYS takes the gated path —
+    a drill must never really dispatch, even after the flip."""
+    enabled = (os.environ.get("AUTO_DISPATCH_ENABLED", "false").lower() == "true"
+               and not force_gate)
     order_total = float(order_data.get("order_total") or 0)
     exact = order_total > 0 and abs(float(payment_amount) - order_total) <= 1.00
 
@@ -694,24 +712,58 @@ def run_dispatch_on_payment(order_id: str, order_data: dict,
         return dispatch_order(order_id, auto_send=True, dry_run=False,
                               triggered_by="payment_trigger")
 
-    # gate closed -> create rows as pending + alert William
+    # gate closed -> alert William WITH the would-be artifacts (Stage 2,
+    # 2026-07-27: every gated payment is a silent auto-dispatch drill — the
+    # email shows exactly what the robot WOULD have sent, byte-identical,
+    # built by the same builders; William compares in ten seconds)
     reason = ("AUTO_DISPATCH_ENABLED=false" if not enabled else
               f"payment ${payment_amount:,.2f} does not exactly match order "
               f"total ${order_total:,.2f} (fuzzy match — human confirm required)")
     try:
         preview = dispatch_order(order_id, auto_send=False, dry_run=True,
-                                 triggered_by="payment_trigger_gated")
+                                 triggered_by="payment_trigger_gated",
+                                 collect_artifacts=True)
     except Exception as e:
         preview = {"status": "error", "message": str(e)}
+    artifacts = preview.pop("_artifacts", {}) if isinstance(preview, dict) else {}
+
+    sections = []
+    attachments = []
+    for wh, info in artifacts.items():
+        art = info["art"]
+        dest = (f"supplier ({info['supplier_to'] or 'no address on file'})"
+                if info["mode"] == "email_auto"
+                else "YOU — portal upload")
+        att = art.get("attachment")
+        if att:
+            attachments.append(att)
+        sections.append(
+            f"<h3 style='margin:18px 0 4px'>{wh}</h3>"
+            f"<p style='margin:2px 0;color:#555'>Would go to: <strong>{dest}</strong>"
+            f" &middot; subject: <strong>{art['subject']}</strong>"
+            + (f" &middot; units: {art['units']}" if art.get("units") is not None else "")
+            + (f" &middot; attachment: {att['filename']} (attached below)" if att else "")
+            + "</p>"
+            f"<div style='border:1px solid #ccc;border-radius:6px;padding:10px;"
+            f"margin:6px 0;background:#fafafa'>{art['html']}</div>")
+    for wh, wres in (preview.get("warehouses") or {}).items():
+        if wh not in artifacts:
+            sections.append(
+                f"<h3 style='margin:18px 0 4px'>{wh}</h3>"
+                f"<p style='margin:2px 0;color:#b00'>BLOCKED — "
+                f"{wres.get('note', 'see dispatch note')}</p>")
+
     _send_email(order_id, INTERNAL_ALERT_EMAIL,
                 f"CONFIRM DISPATCH: order #{order_id} paid - supplier orders ready",
                 f"<p>Payment received for order <strong>#{order_id}</strong> "
                 f"(${payment_amount:,.2f}).</p>"
                 f"<p><strong>Not auto-dispatched:</strong> {reason}</p>"
-                f"<p>To send: POST /supplier-orders/dispatch/{order_id}</p>"
-                f"<p>Warehouses: "
-                f"{', '.join((preview.get('warehouses') or {}).keys()) or 'n/a'}</p>",
-                triggered_by="payment_trigger_gated")
+                f"<p>Below is EXACTLY what auto-dispatch would have sent "
+                f"(same builders, same data). To fire it for real: "
+                f"POST /supplier-orders/dispatch/{order_id}</p>"
+                + "".join(sections),
+                triggered_by="payment_trigger_gated",
+                attachment=attachments or None)
     return {"status": "gated", "reason": reason, "preview": preview}
 
 
