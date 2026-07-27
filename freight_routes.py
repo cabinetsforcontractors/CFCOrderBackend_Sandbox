@@ -188,13 +188,26 @@ def supplier_sku_load(req: SupplierSkuRows, _: bool = Depends(require_admin)):
             for row in req.rows:
                 sku = (row.get("product_sku") or "").strip()
                 tok = (row.get("supplier_sku") or "").strip()
+                sup = (row.get("supplier") or "").strip()
                 if not sku or not tok:
                     continue
-                cur.execute(
-                    """UPDATE rta_products SET supplier_sku = %s, updated_at = NOW()
-                       WHERE product_sku = %s""",
-                    (tok, sku),
-                )
+                # optional supplier refresh (2026-07-27, the NBLK lesson:
+                # routing moved LI-ward on 7/14 but rta_products.supplier
+                # still said Love-Milestone — stale supplier fields mis-slice
+                # multi-supplier verification)
+                if sup:
+                    cur.execute(
+                        """UPDATE rta_products SET supplier_sku = %s,
+                           supplier = %s, updated_at = NOW()
+                           WHERE product_sku = %s""",
+                        (tok, sup, sku),
+                    )
+                else:
+                    cur.execute(
+                        """UPDATE rta_products SET supplier_sku = %s,
+                           updated_at = NOW() WHERE product_sku = %s""",
+                        (tok, sku),
+                    )
                 if cur.rowcount:
                     updated += 1
                 else:
