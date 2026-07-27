@@ -277,16 +277,19 @@ def create_invoice_draft(
     shipping_amount: float = 0.0,
     square_link: str = "",
     tariff_rate: float = 0.08,
+    auto_link: bool = True,
 ) -> dict:
     """BEAT 3 (William 2026-07-26): render the v4 invoice (template + PDF)
     from the order row and land it as a GMAIL DRAFT with the PDF attached —
     the repo makes the draft, nobody hand-builds invoices. DRAFT-FIRST: this
-    never sends; William reviews, adds/replaces the Square link, sends.
+    never sends; William reviews and sends.
 
-    square_link empty -> the pay line carries '#' until William pastes the
-    Square link in. (William 2026-07-27: never prefix the subject with
-    [ADD SQUARE LINK] — the subject a customer sees must be the real one.)
-    """
+    PAYMENT LINK (William 2026-07-27, "we need to build a Payment Links
+    API for square"): when square_link is empty and auto_link is true, the
+    robot CREATES the Square link itself (amount = grand total, name =
+    INV-{order_id} so square_sync matches exactly) — the draft lands
+    COMPLETE. Manual square_link still wins when passed. If creation fails
+    the pay line falls back to '#' and the failure rides the response."""
     token = get_gmail_access_token()
     if not token:
         return {"success": False, "error": "Gmail OAuth not configured"}
@@ -307,6 +310,16 @@ def create_invoice_draft(
         "total_shipping": shipping,
         "grand_total": grand,
     }
+    link_info = None
+    link_error = None
+    if not (square_link or "").strip() and auto_link:
+        try:
+            from square_links import create_payment_link
+            link_info = create_payment_link(order_id, grand)
+            square_link = link_info["url"]
+        except Exception as e:
+            link_error = str(e)
+            print(f"[EMAIL] draft-invoice auto-link failed for {order_id}: {e}")
     order_data["payment_link"] = (square_link or "").strip() or "#"
 
     # Fold-in ruling 2026-07-27: the residential box rides every invoice; its
@@ -370,9 +383,17 @@ def create_invoice_draft(
                      triggered_by="draft_invoice", source="invoice_draft")
     print(f"[EMAIL] invoice DRAFT created for {order_id} -> {to_email} "
           f"(draft={draft_id}, pdf={pdf_bytes is not None})")
-    return {"success": True, "draft_id": draft_id, "to": to_email,
-            "subject": subject, "pdf_attached": pdf_bytes is not None,
-            "totals": order_data["shipping_result"]}
+    out = {"success": True, "draft_id": draft_id, "to": to_email,
+           "subject": subject, "pdf_attached": pdf_bytes is not None,
+           "totals": order_data["shipping_result"],
+           "payment_link": order_data["payment_link"]
+           if order_data["payment_link"] != "#" else None}
+    if link_info:
+        out["payment_link_id"] = link_info.get("id")
+        out["payment_link_auto"] = True
+    if link_error:
+        out["payment_link_error"] = link_error
+    return out
 
 
 # =============================================================================

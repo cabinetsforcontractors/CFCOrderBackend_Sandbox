@@ -186,6 +186,40 @@ def sync_from_square(hours_back: int = 24, _: bool = Depends(require_admin)):
         raise HTTPException(status_code=500, detail=f"Square sync error: {str(e)}")
 
 
+@sync_router.post("/square/payment-link-probe")
+def square_payment_link_probe(_: bool = Depends(require_admin)):
+    """One-time scope probe [admin]: create a $1.00 quick-pay link named
+    SCOPE-PROBE (no order number — can never match a payment), then DELETE
+    it in the same call. Proves the token carries checkout write scopes.
+    Nothing payable survives, nobody is charged."""
+    from square_links import create_payment_link, delete_payment_link
+    try:
+        link = create_payment_link("PROBE", 1.00,
+                                   name="SCOPE-PROBE ignore",
+                                   note="orders-backend capability probe")
+    except Exception as e:
+        return {"status": "error", "stage": "create", "message": str(e)}
+    try:
+        deleted = delete_payment_link(link["id"])
+    except Exception as e:
+        return {"status": "partial", "stage": "delete", "created": link,
+                "message": f"link created but delete failed: {e} — "
+                           f"deactivate id {link['id']} in the dashboard"}
+    return {"status": "ok", "created_url": link["url"],
+            "link_id": link["id"], "deleted": deleted["status"] == "ok"}
+
+
+@sync_router.delete("/square/payment-link/{link_id}")
+def square_payment_link_delete(link_id: str, _: bool = Depends(require_admin)):
+    """Delete/deactivate a Square payment link [admin] — e.g. when an order
+    is canceled after its invoice went out."""
+    from square_links import delete_payment_link
+    try:
+        return delete_payment_link(link_id)
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
 @sync_router.get("/square/status")
 def square_status():
     """Check Square API configuration status (public — no sensitive data)."""
