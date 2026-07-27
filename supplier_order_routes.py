@@ -128,13 +128,15 @@ def scan_replies_now(hours_back: int = 24, _: bool = Depends(require_admin)):
 
 @supplier_order_router.post("/supplier-orders/verify-email/{message_id}")
 def verify_email_now(message_id: str, force: bool = False,
+                     dry_run: bool = False,
                      _: bool = Depends(require_admin)):
     """Process ONE Gmail message through the reply verifier [admin].
     Content markers route it regardless of sender — built for beta testing
-    where documents arrive from the safety inbox."""
+    where documents arrive from the safety inbox. dry_run=true = detect +
+    parse + diff with ZERO writes (the safe grammar drill, 2026-07-27)."""
     from estimate_verifier import process_message
     try:
-        return process_message(message_id, force=force)
+        return process_message(message_id, force=force, dry_run=dry_run)
     except Exception as e:
         return {"status": "error", "message": str(e)}
 

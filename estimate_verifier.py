@@ -53,7 +53,8 @@ CANDIDATE_QUERY_PDF = ('has:attachment filename:pdf '
                        '(ghicabinets OR QUOFL OR "Quotation_S" OR Estimate_ OR '
                        'Invoice_ OR milestonecabinetry OR cabinetstone OR '
                        '"Cabinetry Distribution" OR "Sales Order")')
-CANDIDATE_QUERY_HTML = ('(from:roccabinetry.com OR from:sent-via.netsuite.com) '
+CANDIDATE_QUERY_HTML = ('(from:roccabinetry.com OR from:sent-via.netsuite.com '
+                        'OR from:dlcabinetry.com) '
                         '("order confirmation" OR "Invoice" OR "Sales Order")')
 
 # business window approx 9a-5p ET expressed in UTC
@@ -200,6 +201,28 @@ def verify_ds_html(order_id: str, html: str) -> Dict:
     return {"supplier": "DuraStone", "doc_ref": parsed.get("so_number"),
             "po": parsed.get("po"), "report": report,
             "line_count": len(parsed.get("lines") or []), "sent_count": len(sent)}
+
+
+def verify_dl_html(order_id: str, html: str, subject: str = "") -> Dict:
+    """DL Cabinetry confirmation email (grammar decoded 2026-07-27 from the
+    real JOB #5517 email). DL SKUs = their line code + space + our form
+    token -> body-space diff, same family as ROC."""
+    import supplier_doc_parser as sdp
+    from freight_routes import _order_lines_for_supplier
+    from dl_parser import fold_dl_lines, parse_dl_confirmation_html
+    from psycopg2.extras import RealDictCursor
+
+    parsed = parse_dl_confirmation_html(html, subject)
+    folded = fold_dl_lines(parsed["lines"])
+    with get_db() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            sent = _order_lines_for_supplier(cur, order_id, (),
+                                             ("DL", "DL Cabinetry"))
+        report = sdp.body_space_diff(sent, folded)
+    return {"supplier": "DL", "doc_ref": parsed.get("dl_order_number"),
+            "po": parsed.get("po"), "report": report,
+            "line_count": len(parsed.get("lines") or []),
+            "sent_count": len(sent)}
 
 
 def verify_roc_html(order_id: str, html: str) -> Dict:
@@ -575,8 +598,12 @@ def check_discrepancy_followups() -> Dict:
 # MESSAGE PROCESSING
 # =============================================================================
 
-def process_message(message_id: str, force: bool = False) -> Dict:
-    """Detect + parse + verify one Gmail message. Idempotent unless force."""
+def process_message(message_id: str, force: bool = False,
+                    dry_run: bool = False) -> Dict:
+    """Detect + parse + verify one Gmail message. Idempotent unless force.
+    dry_run=True (2026-07-27): full detect + parse + diff but NO writes —
+    no supplier_orders row, no revision request, no scan record. The safe
+    drill mode for proving grammars on real messages."""
     if not force and _already_scanned(message_id):
         return {"status": "already_scanned", "message_id": message_id}
 
@@ -626,6 +653,35 @@ def process_message(message_id: str, force: bool = False) -> Dict:
                     results.append(v)
         except Exception as e:
             results.append({"supplier": "ROC", "error": str(e)})
+
+    if html:
+        try:
+            from dl_parser import looks_like_dl_confirmation, parse_dl_confirmation_html
+            subject = msg.get("subject") or ""
+            if looks_like_dl_confirmation(html, subject):
+                pre = parse_dl_confirmation_html(html, subject)
+                if pre.get("po") and pre.get("lines"):
+                    order_key = "".join(c for c in str(pre["po"]) if c.isdigit())
+                    v = verify_dl_html(order_key, html, subject)
+                    results.append(v)
+        except Exception as e:
+            results.append({"supplier": "DL", "error": str(e)})
+
+    if dry_run:
+        return {"status": "dry_run", "message_id": message_id,
+                "subject": msg["subject"],
+                "attachments": [a["filename"] for a in msg["attachments"]],
+                "results": [
+                    {k: v.get(k) for k in
+                     ("supplier", "doc_ref", "po", "line_count", "sent_count",
+                      "error")} | {"report_summary": {
+                          k: len((v.get("report") or {}).get(k) or [])
+                          for k in ("matched", "qty_mismatch",
+                                    "missing_at_supplier",
+                                    "unexpected_from_supplier")}
+                          if v.get("report") else None,
+                          "report_ok": (v.get("report") or {}).get("ok")}
+                    for v in results]}
 
     processed = []
     for v in results:
