@@ -172,6 +172,17 @@ def supplier_sku_stats(_: bool = Depends(require_admin)):
         {"supplier": r[0], "with_token": r[1], "total": r[2]} for r in rows]}
 
 
+@freight_router.get("/freight/rta-skus", response_class=PlainTextResponse)
+def rta_skus(_: bool = Depends(require_admin)):
+    """All rta_products product_skus, one per line [admin, READ-ONLY] —
+    the reconciliation instrument (2026-07-27: which live-site skus have
+    no product row at all)."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT product_sku FROM rta_products ORDER BY 1")
+            return "\n".join(r[0] for r in cur.fetchall() if r[0])
+
+
 @freight_router.post("/freight/supplier-sku-load")
 def supplier_sku_load(req: SupplierSkuRows, _: bool = Depends(require_admin)):
     """
