@@ -182,7 +182,9 @@ def create_bol_for_shipment(
         "order_id": shipment["order_id"],
         "pieces": 1,
         "description": "RTA Cabinetry",
-        "pickup_date": pickup_date,
+        # WILLIAM'S PICKUP LAW 2026-07-27: no raw "today" defaults —
+        # Mon-Thu 9-4 / Fri 9-3 Eastern, 2h same-day cutoff, no weekends
+        "pickup_date": pickup_date or __import__("pickup_window").next_pickup_date_mmddyyyy(),
         "special_instructions": f"CFC Order #{shipment['order_id']}",
     }
 

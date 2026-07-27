@@ -66,10 +66,13 @@ def _call_rl_sandbox(
     method: str = "GET",
     data: dict = None,
     params: dict = None,
-    timeout: int = 30
+    timeout: int = 100
 ) -> dict:
     """
     Make request to rl-quote-sandbox service.
+    TIMEOUT LESSON (2026-07-27, orders 5707/5714): the microservice retries
+    R+L up to 3 x 30s internally (~94s worst case) — our read timeout must
+    OUTLAST that budget or slow-R+L evenings look like dead lanes. 100s.
     """
     url = f"{RL_QUOTE_SANDBOX_URL.rstrip('/')}/{endpoint.lstrip('/')}"
 

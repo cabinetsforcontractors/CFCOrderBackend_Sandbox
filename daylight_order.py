@@ -265,7 +265,10 @@ def order_quote(order_id, residential=None, liftgate=False, warehouse=None,
     built = _build_legs(order_id, residential, liftgate, origin_zip=origin_zip)
     if built["status"] != "ok":
         return built
-    pickup_date = pickup_date or datetime.date.today().isoformat()
+    # WILLIAM'S PICKUP LAW 2026-07-27: never default to a raw "today" —
+    # Mon-Thu 9-4 / Fri 9-3 Eastern, 2h same-day cutoff, no weekends.
+    from pickup_window import next_pickup_date
+    pickup_date = pickup_date or next_pickup_date()
 
     legs_out = []
     for leg in built["legs"]:
@@ -335,7 +338,9 @@ def order_bol(order_id, warehouse=None, bol_date=None, bill_terms="Collect",
                 "warehouses": [l["warehouse"] for l in eligible]}
 
     leg = eligible[0]
-    bol_date = bol_date or datetime.date.today().isoformat()
+    # WILLIAM'S PICKUP LAW 2026-07-27 (same rule as pickups)
+    from pickup_window import next_pickup_date
+    bol_date = bol_date or next_pickup_date()
     fields, err = _bol_fields(order_id, built["order"], leg, built["dest"],
                               bol_date, bill_terms, built["residential"], liftgate)
     if err:
