@@ -638,6 +638,15 @@ def cancel_order(order_id: str, reason: str = "manual") -> Dict:
     # Cancel on B2BWave
     b2b_result = cancel_order_on_b2bwave(order_id)
 
+    # Canceled order -> the payment link dies too (William 2026-07-27):
+    # a stale Square link must never collect money on a dead order.
+    links_result = {"killed": []}
+    try:
+        from auto_invoice import kill_order_links
+        links_result = kill_order_links(order_id)
+    except Exception as e:
+        links_result = {"error": str(e)}
+
     return {
         "success": True,
         "order_id": order_id,
@@ -645,6 +654,7 @@ def cancel_order(order_id: str, reason: str = "manual") -> Dict:
         "reason": reason,
         "b2bwave_canceled": b2b_result.get("success", False),
         "b2bwave_result": b2b_result,
+        "payment_links_killed": links_result,
     }
 
 

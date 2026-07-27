@@ -203,6 +203,17 @@ def run_new_order_watch(conn) -> dict:
                 out["recorded"].append({oid: "native-covered"})
                 continue
         out["notified"].append(_notify_order(conn, oid))
+        # BEAT C (William 2026-07-27, "lets make it real"): a first-seen
+        # order invoices ITSELF — quote + Square link + v4 invoice email.
+        # Guarded inside run_auto_invoice (env gate, test registry, already
+        # invoiced/paid, quote-complete; failures alert orders@, never block
+        # the watcher).
+        try:
+            from auto_invoice import run_auto_invoice
+            out.setdefault("auto_invoiced", []).append(
+                run_auto_invoice(oid, triggered_by="new_order_watch"))
+        except Exception as e:
+            print(f"[NEW-ORDER] auto-invoice hook failed {oid}: {e}")
     return out
 
 

@@ -123,6 +123,17 @@ async def draft_invoice(order_id: str, to: str = "", shipping: float = 0.0,
     return result
 
 
+@email_router.post("/orders/{order_id}/auto-invoice")
+async def auto_invoice_now(order_id: str, dry_run: bool = True):
+    """BEAT C door [admin]: run the auto-invoice pipeline for one order.
+    dry_run=true (default) computes gates + quote + totals, creates nothing,
+    sends nothing. dry_run=false = the real thing (link + SEND, allowlist
+    governs delivery)."""
+    from auto_invoice import run_auto_invoice
+    return run_auto_invoice(order_id, triggered_by="manual_door",
+                            dry_run=dry_run)
+
+
 @email_router.post("/orders/{order_id}/send-email")
 async def send_email(order_id: str, req: SendEmailRequest):
     """

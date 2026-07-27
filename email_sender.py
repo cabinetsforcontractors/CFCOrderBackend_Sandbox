@@ -317,6 +317,19 @@ def create_invoice_draft(
             from square_links import create_payment_link
             link_info = create_payment_link(order_id, grand)
             square_link = link_info["url"]
+            # event = the kill-switch registry: cancel deletes every link
+            # recorded here (William 2026-07-27)
+            with get_db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""INSERT INTO order_events
+                                   (order_id, event_type, event_data, source)
+                                   VALUES (%s, 'payment_link_created', %s,
+                                           'invoice_draft')""",
+                                (order_id, json.dumps(
+                                    {"link_id": link_info["id"],
+                                     "url": link_info["url"],
+                                     "amount": grand, "auto": True})))
+                    conn.commit()
         except Exception as e:
             link_error = str(e)
             print(f"[EMAIL] draft-invoice auto-link failed for {order_id}: {e}")
