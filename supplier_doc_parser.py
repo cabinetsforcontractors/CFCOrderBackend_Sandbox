@@ -1092,6 +1092,23 @@ def fold_li_lines(lines):
 # (lnccabinetryvab@gmail.com) — identify suppliers by vanity DOMAIN when
 # they have one, by the exact ADDRESS when they ride gmail.
 
+# L&C door codes (public pages lnccabinetry.com/pages/cabinetry|e-series|
+# g-series|l-series|m-series|s-series — William's site read, 2026-07-27,
+# LNC_CABINET_DOOR_NAMES_2026-07-27.csv). THE D5/D6 LESSON: the order said
+# "D5-DoveGrey" but D5 = Cyberspace and Dove Grey = D6 — with this table the
+# robot catches code-vs-color disagreements instead of shrugging.
+LC_DOOR_CODES = {
+    "D1": "NATURAL", "D2": "WHITE", "D3": "SHALLOW GREEN", "D4": "NAVY",
+    "D5": "CYBERSPACE", "D6": "DOVE GREY", "D7": "FOREST GREEN",
+    "D8": "BLACK SWAN", "D9": "PEARL WHITE",
+    "E1": "GLOSSY WHITE", "E2": "GLOSSY DARK GREY", "E3": "MIELE OAK",
+    "E4": "DUSK WOOD",
+    "G2": "ALABASTER WHITE", "G4": "GREY",
+    "L2": "AVELEY",
+    "M1": "PURE IVORY", "M2": "SANDSTONE",
+    "S1": "ASH GREY", "S2": "HONEY",
+}
+
 _LC_FEE = ("SURCHARGE", "HANDLE FEE", "TARIFF", "DELIVERY", "FREIGHT",
            "ASSEMBLY", "RESTOCKING")
 # row end = LOOKAHEAD (never consumes the newline — consuming it starves the
@@ -1157,6 +1174,19 @@ def fold_lc_lines(lines):
             toks = toks[:half]
         squash = re.sub(r"[^A-Z0-9]", "", d)
         bodies = [d, squash] + ([toks[0]] if toks else [])
+        flags = []
+        m = re.match(r"([A-Z]\d{1,2})\b", d)
+        if m:
+            code = m.group(1)
+            name = LC_DOOR_CODES.get(code)
+            if name:
+                bodies.append(re.sub(r"[^A-Z0-9]", "", name))
+                if name not in d:
+                    flags.append(f"L&C CODE CHECK: {code} = {name} but line "
+                                 f"reads '{d[:60]}' — code and color disagree")
+            else:
+                flags.append(f"L&C CODE {code} not in the public code table "
+                             f"— confirm on lnccabinetry.com")
         out.append({"bodies": bodies, "qty": ln["qty"], "raw": d,
-                    "flags": []})
+                    "flags": flags})
     return out
