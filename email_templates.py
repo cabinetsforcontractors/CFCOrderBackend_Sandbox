@@ -259,9 +259,13 @@ def _render_payment_link(order: Dict) -> str:
     INV-5711 email, re-confirmed as THE template 2026-07-26). Structure:
     greeting -> "Your Order #N" header -> Billing/Shipping blocks ->
     Items|Qty|Item Cost|Item Total table -> Subtotal (in-stock) / Tariff /
-    Shipping / Grand Total -> SHIPPING TO verify box -> centered CLICK HERE
-    pay sentence -> signature. Expects shipping_result; fetches line items
-    itself when not supplied.
+    Shipping / Grand Total -> SHIPPING TO verify box -> residential
+    classification box -> policies consent box -> centered CLICK HERE
+    pay sentence -> signature. Fold-in ruling (William 2026-07-27):
+    policies + residential ride every invoice (old-template behavior —
+    the residential box asserts residential unconditionally); no extra
+    footer. Expects shipping_result; fetches line items itself when not
+    supplied.
     """
     customer = order.get("customer_name") or "Valued Customer"
     first_name = customer.split()[0] if customer.strip() else "there"
@@ -320,6 +324,27 @@ def _render_payment_link(order: Dict) -> str:
     if not rows:
         rows = "<tr><td colspan='4' style='padding:8px 6px;color:#888'>(line items pending sync)</td></tr>"
 
+    confirm_commercial_url = order.get("confirm_commercial_url", "#")
+    residential_notice = f"""<div style="background:#EFF6FF;border:1px solid #BFDBFE;border-radius:8px;padding:16px 18px;margin:20px 0">
+<p style="margin:0 0 8px;font-weight:700;color:#1E40AF;font-size:14px">&#128205; Delivery Address Classification</p>
+<p style="margin:0 0 8px;font-size:13px;color:#1E40AF;line-height:1.6">Your delivery address has been classified as a <strong>residential address</strong>. Residential deliveries include liftgate service at delivery.</p>
+<p style="margin:0 0 14px;font-size:13px;color:#1E40AF;line-height:1.6">If this is actually a <strong>commercial address</strong> (business with a loading dock or forklift), <strong>do not pay this invoice</strong>.</p>
+<p style="margin:0;text-align:center"><a href="{confirm_commercial_url}" style="display:inline-block;background:#DC2626;color:#ffffff;text-decoration:none;padding:10px 24px;border-radius:6px;font-weight:700;font-size:13px;letter-spacing:0.3px">This is a commercial address &rarr;</a></p>
+</div>"""
+
+    policy_box = """<div style="background:#FFFBEA;border:1px solid #F0E0A0;border-radius:6px;padding:14px 18px;margin:18px 0;font-size:13px;color:rgb(51,51,51);line-height:1.6">
+<strong>&#9888;&#65039; Please read before completing payment</strong><br>
+By clicking the payment link you agree to the following policies:
+<ul style="margin:8px 0 0;padding-left:20px">
+<li>No returns on assembled or installed cabinets.</li>
+<li>20% restocking fee on returned undamaged items in original packaging.</li>
+<li>Damaged items must be noted on the delivery receipt and reported within 48 hours of delivery.</li>
+<li>Buyer is responsible for verifying all measurements before ordering &mdash; we cannot accept returns for incorrect sizing.</li>
+<li>Minor color variation between door samples and production run is normal and not grounds for return.</li>
+<li>Shipping quotes are estimates; final shipping cost may vary for remote locations.</li>
+</ul>
+</div>"""
+
     return f"""<div style="font-family:'Open Sans',Helvetica,Arial,sans-serif;font-size:14px;padding:20px">
 <div style="max-width:660px;margin:0px auto;padding:28px;border:1px solid rgb(229,229,229)">
 <p style="color:rgb(51,51,51)">Hey {first_name},</p>
@@ -344,6 +369,8 @@ def _render_payment_link(order: Dict) -> str:
 <div style="font-weight:700;margin:6px 0">{company}, {ship_line}</div>
 <div style="color:#c0392b;font-weight:700">Please verify this address BEFORE paying. If your ship-to address has changed, reply to this email first &mdash; shipping cost may change with a different address.</div>
 </div>
+{residential_notice}
+{policy_box}
 <p style="text-align:center"><font color="#6fa8dc"><b><a href="{payment_link}">If everything looks in order (CLICK HERE) to make payment</a></b></font></p>
 <p style="color:rgb(51,51,51)">Any questions, just reply or call.</p>
 <p style="color:rgb(51,51,51);margin-top:18px">William Prince<br>Cabinets For Contractors<br>www.CabinetsForContractors.net<br>(770) 990-4885</p>

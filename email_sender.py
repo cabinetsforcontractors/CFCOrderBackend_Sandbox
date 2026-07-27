@@ -308,6 +308,17 @@ def create_invoice_draft(
     }
     order_data["payment_link"] = (square_link or "").strip() or "#"
 
+    # Fold-in ruling 2026-07-27: the residential box rides every invoice; its
+    # red button needs a live confirm-commercial link. Monthly token — a daily
+    # one would die at midnight while the invoice sits unpaid.
+    try:
+        from checkout import generate_checkout_token
+        base = os.environ.get("CHECKOUT_BASE_URL", "").strip() or "https://cfcorderbackend-sandbox.onrender.com"
+        ctok = generate_checkout_token(str(order_id), long_lived=True)
+        order_data["confirm_commercial_url"] = f"{base}/checkout/{order_id}/confirm-commercial?token={ctok}"
+    except Exception as e:
+        print(f"[EMAIL] draft-invoice confirm-commercial url failed for {order_id}: {e}")
+
     html_body = render_template("payment_link", order_data)
     if not html_body:
         return {"success": False, "error": "template render failed"}
