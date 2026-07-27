@@ -248,9 +248,19 @@ def run_square_sync(conn, hours_back: int = 24) -> dict:
 
                         order_total = float(order["order_total"]) if order["order_total"] else 0
 
+                        # Shipping = payment minus items minus tariff (the
+                        # invoice math in reverse). Before 2026-07-27 the
+                        # tariff was lumped into shipping_cost.
+                        try:
+                            from checkout import TARIFF_RATE as _tariff_rate
+                        except Exception:
+                            _tariff_rate = 0.08
                         shipping_cost = None
+                        tariff_amount = None
                         if len(order_ids) == 1 and order_total > 0:
-                            shipping_cost = parsed["amount"] - order_total
+                            tariff_amount = round(order_total * _tariff_rate, 2)
+                            shipping_cost = round(
+                                parsed["amount"] - order_total - tariff_amount, 2)
                             if shipping_cost < 0:
                                 shipping_cost = None
 
@@ -275,6 +285,7 @@ def run_square_sync(conn, hours_back: int = 24) -> dict:
                             "square_payment_id": parsed["payment_id"],
                             "payment_amount": parsed["amount"],
                             "shipping_cost": shipping_cost,
+                            "tariff_amount": tariff_amount,
                             "description": parsed["description"],
                             "multi_order_payment": len(order_ids) > 1
                         })))
@@ -288,26 +299,11 @@ def run_square_sync(conn, hours_back: int = 24) -> dict:
                             "square_payment_id": parsed["payment_id"]
                         })
 
-                        # Update B2BWave order status to 4 ("Being Prepared")
-                        try:
-                            import base64 as _b64
-                            import urllib.request as _urllib_req
-                            import json as _json
-                            from config import B2BWAVE_URL as _B2B_URL, B2BWAVE_USERNAME as _B2B_USER, B2BWAVE_API_KEY as _B2B_KEY
-                            if _B2B_URL and _B2B_KEY:
-                                _creds = _b64.b64encode(f"{_B2B_USER}:{_B2B_KEY}".encode()).decode()
-                                _payload = _json.dumps({"status_order_id": 4}).encode()
-                                _req = _urllib_req.Request(
-                                    f"{_B2B_URL}/api/orders/{order_id}/change_status",
-                                    data=_payload, method="PATCH"
-                                )
-                                _req.add_header("Authorization", f"Basic {_creds}")
-                                _req.add_header("Content-Type", "application/json")
-                                with _urllib_req.urlopen(_req, timeout=15) as _resp:
-                                    _resp.read()
-                                print(f"[SQUARE_SYNC] B2BWave order {order_id} marked paid (status 4)")
-                        except Exception as b2b_err:
-                            print(f"[SQUARE_SYNC] Failed to update B2BWave status for order {order_id}: {b2b_err}")
+                        # B2BWave paid -> Being Prepared rides Trigger 6 inside
+                        # run_payment_triggers (ladder-guarded, readback-verified,
+                        # event-logged). The raw inline PATCH that used to live
+                        # here raced ahead of it with no guards and no event row
+                        # — removed 2026-07-27 (the 5709/5732 silent-skip lesson).
 
                         # Triggers 2 + 4: email confirmation + auto-BOL
                         try:

@@ -283,8 +283,9 @@ def create_invoice_draft(
     the repo makes the draft, nobody hand-builds invoices. DRAFT-FIRST: this
     never sends; William reviews, adds/replaces the Square link, sends.
 
-    square_link empty -> the Pay Now button carries '#' and the subject is
-    prefixed [ADD SQUARE LINK] so an unfinished draft can't slip out quietly.
+    square_link empty -> the pay line carries '#' until William pastes the
+    Square link in. (William 2026-07-27: never prefix the subject with
+    [ADD SQUARE LINK] — the subject a customer sees must be the real one.)
     """
     token = get_gmail_access_token()
     if not token:
@@ -323,8 +324,6 @@ def create_invoice_draft(
     if not html_body:
         return {"success": False, "error": "template render failed"}
     subject = get_template_subject("payment_link", order_data)
-    if not (square_link or "").strip():
-        subject = f"[ADD SQUARE LINK] {subject}"
 
     pdf_bytes = None
     try:
@@ -424,7 +423,7 @@ def get_email_history(order_id: str) -> list:
             with conn.cursor(cursor_factory=__import__('psycopg2').extras.RealDictCursor) as cur:
                 cur.execute(
                     """
-                    SELECT id, order_id, event_type, event_data, source, created_at
+                    SELECT event_id AS id, order_id, event_type, event_data, source, created_at
                     FROM order_events
                     WHERE order_id = %s
                     AND event_type IN ('email_sent', 'email_send_failed')

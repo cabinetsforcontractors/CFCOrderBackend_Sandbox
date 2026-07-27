@@ -69,40 +69,45 @@ def _rank(status_id: int) -> Optional[int]:
 
 
 def set_order_status(order_id: str, target_id: int, reason: str,
-                     triggered_by: str = "b2bwave_status") -> Dict:
+                     triggered_by: str = "b2bwave_status",
+                     log_skips: bool = False) -> Dict:
     """Move an order's B2BWave status UP the ladder to target_id.
     No-op (with explanation) when: mutations disabled, order not found,
     order at Temporary/Canceled/Invoiced, or already at/past target.
-    Applied writes are readback-verified and logged to order_events."""
+    Applied writes are readback-verified and logged to order_events.
+    log_skips=True also logs the early-skip outcomes (one-shot checkpoint
+    callers use it so a skip is never silent — the 5709/5732 lesson);
+    sweep callers leave it off so repeated polls don't flood order_events."""
     from substitutions import _b2b, fetch_b2b_order
 
     out = {"applied": False, "order_id": str(order_id),
            "target": target_id, "target_name": STATUS_NAMES.get(target_id),
            "reason": reason}
 
+    def _skip(why: str) -> Dict:
+        out["skipped"] = why
+        if log_skips:
+            _log_event(order_id, "b2bwave_status_skipped", out, triggered_by)
+        return out
+
     target_rank = _rank(target_id)
     if target_rank is None:
-        out["skipped"] = f"target {target_id} is not on the progression ladder"
-        return out
+        return _skip(f"target {target_id} is not on the progression ladder")
 
     order = fetch_b2b_order(order_id)
     if not order:
-        out["skipped"] = "order not found on B2BWave"
-        return out
+        return _skip("order not found on B2BWave")
     current = int(order.get("status_order_id") or 0)
     out["current"] = current
     out["current_name"] = STATUS_NAMES.get(current, str(current))
 
     if current in _TERMINAL:
-        out["skipped"] = f"order is {out['current_name']} — terminal, never touched"
-        return out
+        return _skip(f"order is {out['current_name']} — terminal, never touched")
     if current == STATUS_TEMPORARY:
-        out["skipped"] = "order is Temporary (cart) — not ours to progress"
-        return out
+        return _skip("order is Temporary (cart) — not ours to progress")
     current_rank = _rank(current)
     if current_rank is not None and current_rank >= target_rank:
-        out["skipped"] = f"already at/past target ({out['current_name']})"
-        return out
+        return _skip(f"already at/past target ({out['current_name']})")
 
     if os.environ.get("B2BWAVE_MUTATIONS_ENABLED", "true").lower() == "false":
         out["blocked"] = "B2BWAVE_MUTATIONS_ENABLED=false — would have applied"
@@ -149,7 +154,8 @@ def on_payment_link_sent(order_id: str) -> Dict:
     """Checkpoint: payment link went to the customer -> 3 Awaiting Payment."""
     try:
         return set_order_status(order_id, STATUS_AWAITING_PAYMENT,
-                                "payment link sent", "checkpoint_link_sent")
+                                "payment link sent", "checkpoint_link_sent",
+                                log_skips=True)
     except Exception as e:
         return {"applied": False, "error": str(e)}
 
@@ -158,7 +164,8 @@ def on_payment_received(order_id: str) -> Dict:
     """Checkpoint: payment landed -> 4 Being Prepared."""
     try:
         return set_order_status(order_id, STATUS_BEING_PREPARED,
-                                "payment received", "checkpoint_paid")
+                                "payment received", "checkpoint_paid",
+                                log_skips=True)
     except Exception as e:
         return {"applied": False, "error": str(e)}
 
