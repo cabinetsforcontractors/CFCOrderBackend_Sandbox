@@ -95,9 +95,18 @@ def build_forward_map(conn):
 
 
 def rev_lookup(rev, prefix, token):
-    """Resolve a supplier token to our website SKU for a given line prefix."""
+    """Resolve a supplier token to our website SKU for a given line prefix.
+    A trailing-star token ("WP1884*", GHI pantry ruling 2026-07-27) is a STEM:
+    it matches any supplier token starting with the stem, but resolves ONLY
+    when exactly one website SKU fits — two depths on file = stay unresolved
+    for a human (the wrong-cabinet trap stays closed)."""
     if not prefix or not token:
         return None
+    if token.endswith("*"):
+        stem = norm(token[:-1])
+        hits = {v for (p, k), v in rev["exact"].items()
+                if p == prefix and k.startswith(stem) and v}
+        return hits.pop() if len(hits) == 1 else None
     for cand in _token_candidates(token):
         hit = rev["exact"].get((prefix, norm(cand)))
         if hit:
@@ -162,8 +171,13 @@ def ghi_desc_to_tokens(desc):
     if "SAMPLE DOOR" in d:
         return ["SAMPLE"]
     if "WALL PANTRY" in d and w:
-        # "WALL PANTRY 18X84" -> WP1884 (84s are direct rows; 90/96 = composites)
-        return [f"WP{int(float(w))}{int(float(h))}"]
+        # "WALL PANTRY 18X84" -> WP1884 (84s are direct rows; 90/96 = composites).
+        # William ruling 2026-07-27 (SO 17024 gap): the token is WP{W}{H}{D} —
+        # depth digits ride the SKU but never the description (his APW-WP188424
+        # prints as "WALL PANTRY 18x84"). The starred candidate stem-matches
+        # any depth; rev_lookup resolves it only when unambiguous.
+        stem = f"WP{int(float(w))}{int(float(h))}"
+        return [stem, f"{stem}*"]
     if "UTILITY BASE" in d and w:
         return [f"UCB{int(float(w)):02d}{int(float(h)):02d}"]
     if "TOE KICK" in d:

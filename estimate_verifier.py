@@ -203,6 +203,47 @@ def verify_ds_html(order_id: str, html: str) -> Dict:
             "line_count": len(parsed.get("lines") or []), "sent_count": len(sent)}
 
 
+def _reclass_cross_supplier(order_id: str, report: Dict) -> Dict:
+    """MULTI-SUPPLIER ORDERS (William ruling 2026-07-27, the PO 5635 lesson:
+    one order is supplied by several suppliers — C&S AND L&C both answered
+    PO 5635 — and each sends a doc covering only THEIR slice). A doc line
+    that isn't in this supplier's slice but IS on the order belongs to the
+    attribution conversation, not the discrepancy lane: reclassified to
+    'attributed_elsewhere' (informational) so revision requests never fire
+    over another supplier's lines. Lines on nobody's slice stay unexpected."""
+    unexpected = report.get("unexpected_from_supplier") or []
+    if not unexpected:
+        return report
+    from psycopg2.extras import RealDictCursor
+    bodies = set()
+    with get_db() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""SELECT oli.sku, rp.supplier_sku
+                           FROM order_line_items oli
+                           LEFT JOIN rta_products rp ON rp.product_sku = oli.sku
+                           WHERE oli.order_id = %s""", (order_id,))
+            for r in cur.fetchall():
+                for raw in (r.get("sku"), r.get("supplier_sku")):
+                    s = (raw or "").upper().replace(" ", "")
+                    if not s:
+                        continue
+                    bodies.add(s)
+                    if "-" in s:
+                        bodies.add(s.split("-", 1)[1])
+    keep, moved = [], []
+    for e in unexpected:
+        b = str(e.get("body") or e.get("sku") or "").upper().replace(" ", "")
+        cands = {b} | ({b.split("-", 1)[1]} if "-" in b else set())
+        (moved if cands & bodies else keep).append(e)
+    if moved:
+        report["attributed_elsewhere"] = moved
+        report["unexpected_from_supplier"] = keep
+        if (not keep and not report.get("qty_mismatch")
+                and not report.get("missing_at_supplier")):
+            report["ok"] = True
+    return report
+
+
 def verify_dl_html(order_id: str, html: str, subject: str = "") -> Dict:
     """DL Cabinetry confirmation email (grammar decoded 2026-07-27 from the
     real JOB #5517 email). DL SKUs = their line code + space + our form
@@ -448,6 +489,7 @@ def _apply_verdict(order_id: str, supplier: str, verdict_ok: bool,
                 "summary": {k: len(report.get(k) or [])
                             for k in ("matched", "qty_mismatch", "missing_at_supplier",
                                       "unexpected_from_supplier",
+                                      "attributed_elsewhere",
                                       "unresolved_supplier_lines", "flags")},
             }, default=str)))
             conn.commit()
@@ -667,6 +709,18 @@ def process_message(message_id: str, force: bool = False,
         except Exception as e:
             results.append({"supplier": "DL", "error": str(e)})
 
+    # multi-supplier reclass (William 2026-07-27): runs for real AND dry —
+    # doc lines that belong to another supplier's slice of the same order
+    # become informational, not discrepancies
+    for v in results:
+        if v.get("error") or not v.get("po") or not v.get("report"):
+            continue
+        okey = "".join(c for c in str(v["po"]) if c.isdigit())
+        try:
+            v["report"] = _reclass_cross_supplier(okey, v["report"])
+        except Exception:
+            pass
+
     if dry_run:
         return {"status": "dry_run", "message_id": message_id,
                 "subject": msg["subject"],
@@ -678,7 +732,8 @@ def process_message(message_id: str, force: bool = False,
                           k: len((v.get("report") or {}).get(k) or [])
                           for k in ("matched", "qty_mismatch",
                                     "missing_at_supplier",
-                                    "unexpected_from_supplier")}
+                                    "unexpected_from_supplier",
+                                    "attributed_elsewhere")}
                           if v.get("report") else None,
                           "report_ok": (v.get("report") or {}).get("ok")}
                     for v in results]}
