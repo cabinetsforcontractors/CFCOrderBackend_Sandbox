@@ -226,7 +226,7 @@ _VERIFY_SUPPLIERS = {
     "GHI": (("AKS", "APW", "GRSH", "NOR", "SNS", "SNW"), ("GHI", "GHI Cabinets")),
     "DuraStone": (("NSN", "CMEN", "NBDS", "SIV"), ("DuraStone",)),
     "Love-Milestone": ((), ("Love-Milestone",)),
-    "Cabinet & Stone": ((), ("Cabinet & Stone", "Cabinet & Stone CA")),
+    "Cabinet & Stone": ((), ("Cabinet & Stone", "Cabinet & Stone CA", "C&S")),
     "LI": ((), ("LI", "Cabinetry Distribution")),
     "L&C Cabinetry": ((), ("L&C Cabinetry", "L&C", "LC")),
 }
