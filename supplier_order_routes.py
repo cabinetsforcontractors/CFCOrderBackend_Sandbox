@@ -126,6 +126,55 @@ def scan_replies_now(hours_back: int = 24, _: bool = Depends(require_admin)):
         return {"status": "error", "message": str(e)}
 
 
+@supplier_order_router.get("/supplier-orders/map-report")
+def map_report(_: bool = Depends(require_admin)):
+    """AUTO-DISPATCH Stage 1 [admin, READ-ONLY]: is the supplier-SKU map
+    TRUE? Universe = rta_products (the active catalog). Per line prefix:
+    the warehouse route (warehouse_mapping), supplier-token coverage
+    (rta_products.supplier_sku), and route-vs-supplier disagreement.
+    Dispatch artifacts are built from this map — every gap here is a
+    blocked line (or a wrong SKU) at dispatch time."""
+    from db_helpers import get_db
+    from psycopg2.extras import RealDictCursor
+    out = {"status": "ok", "prefixes": [], "totals": {
+        "prefixes": 0, "skus": 0, "with_token": 0, "token_missing": 0,
+        "unrouted_prefixes": 0, "supplier_disagrees": 0}}
+    with get_db() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""SELECT UPPER(sku_prefix) AS p, warehouse_name
+                           FROM warehouse_mapping""")
+            route = {r["p"]: r["warehouse_name"] for r in cur.fetchall()}
+            cur.execute("""
+                SELECT UPPER(SPLIT_PART(product_sku, '-', 1)) AS pre,
+                       COUNT(*) AS skus,
+                       COUNT(*) FILTER (WHERE supplier_sku IS NOT NULL
+                                        AND supplier_sku <> '') AS with_token,
+                       MAX(NULLIF(supplier, '')) AS a_supplier
+                FROM rta_products GROUP BY 1 ORDER BY 1""")
+            rows = cur.fetchall()
+    for r in rows:
+        wh = route.get(r["pre"])
+        missing = r["skus"] - r["with_token"]
+        sup = r["a_supplier"] or ""
+        wh_u, sup_u = (wh or "").upper(), sup.upper()
+        disagree = bool(wh and sup and sup_u not in wh_u and wh_u not in sup_u)
+        out["prefixes"].append(
+            {"prefix": r["pre"], "warehouse": wh, "skus": r["skus"],
+             "with_token": r["with_token"], "token_missing": missing,
+             "rta_supplier": sup, "supplier_disagrees": disagree})
+        t = out["totals"]
+        t["prefixes"] += 1
+        t["skus"] += r["skus"]
+        t["with_token"] += r["with_token"]
+        t["token_missing"] += missing
+        if not wh:
+            t["unrouted_prefixes"] += 1
+        if disagree:
+            t["supplier_disagrees"] += 1
+    out["prefixes"].sort(key=lambda e: (-e["token_missing"], e["prefix"]))
+    return out
+
+
 @supplier_order_router.get("/supplier-orders/attachment-text/{message_id}")
 def attachment_text(message_id: str, _: bool = Depends(require_admin)):
     """Grammar-decoding tool [admin, READ-ONLY]: fetch one Gmail message and
