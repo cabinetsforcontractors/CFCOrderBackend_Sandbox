@@ -688,18 +688,20 @@ def get_order_events(order_id: str):
 
 
 @orders_router.get("/orders/{order_id}/timeline")
-def get_order_timeline(order_id: str):
+def get_order_timeline(order_id: str, full: bool = False):
     """Beat 5 (2026-07-27): one order's WHOLE story on one screen —
     DB events + every ledgered email that mentions the order, merged
     chronologically. Read-only; emails come from the ledger (each read from
-    Gmail once, ever), events from order_events."""
+    Gmail once, ever), events from order_events. The 15-minute b2bwave_sync
+    ticks are noise, not story — excluded unless ?full=true."""
     entries = []
     with get_db() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("""
                 SELECT event_type, event_data, source, created_at
                 FROM order_events WHERE order_id = %s
-            """, (order_id,))
+            """ + ("" if full else
+                   " AND event_type NOT IN ('b2bwave_sync')"), (order_id,))
             for r in cur.fetchall():
                 data = r["event_data"]
                 if isinstance(data, str):
