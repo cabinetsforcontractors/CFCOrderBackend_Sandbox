@@ -173,21 +173,73 @@ def _valid_oid(oid, known_ids):
 
 
 def _sweep_unread(order_emails, known_ids):
-    tasks = []
-    for m in search_emails("is:unread in:inbox newer_than:7d", 40)[:30]:
-        c = get_email_content(m["id"])
-        if not c:
+    """Beat 5 (2026-07-27): ONE task per THREAD (the Nationwide collapse —
+    a long conversation is one board item, '3 unread in thread', not three
+    rows) and LEDGER-FED metadata: messages already in the email ledger cost
+    zero Gmail fetches; only unledgered ids fall back to a live fetch.
+    Gmail's unread search returns newest first, so the first message seen
+    per thread titles the task."""
+    msgs = search_emails("is:unread in:inbox newer_than:7d", 40)[:30]
+    ids = [m["id"] for m in msgs if m.get("id")]
+    meta = {}
+    if ids:
+        try:
+            with get_db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT message_id, thread_id, from_addr, subject,
+                               email_date, order_ids
+                        FROM email_ledger WHERE message_id = ANY(%s)
+                    """, (ids,))
+                    for mid, tid, frm, subj, edate, oids in cur.fetchall():
+                        meta[mid] = {
+                            "thread": tid, "from": frm or "",
+                            "subject": subj or "",
+                            "date": edate.isoformat() if edate else "",
+                            "order_ids": oids or ""}
+        except Exception:
+            pass
+    threads = {}
+    for m in msgs:
+        mid = m.get("id")
+        if not mid:
             continue
-        addr = _sender_address(c.get("from", ""))
+        mm = meta.get(mid)
+        if not mm:
+            c = get_email_content(mid)
+            if not c:
+                continue
+            mm = {"thread": m.get("threadId"), "from": c.get("from", ""),
+                  "subject": c.get("subject") or "",
+                  "date": c.get("date", ""),
+                  "order_ids": extract_order_id(
+                      (c.get("subject") or "") + " "
+                      + (c.get("body") or "")[:500]) or ""}
+        tid = mm["thread"] or mid
+        if tid in threads:
+            threads[tid]["count"] += 1     # newest already holds the title
+        else:
+            threads[tid] = {"count": 1, "latest": mm, "latest_id": mid}
+    tasks = []
+    for tid, t in threads.items():
+        mm = t["latest"]
+        addr = _sender_address(mm["from"])
         kind, who = _classify_sender(addr, order_emails)
-        oid = _valid_oid(extract_order_id(
-            (c.get("subject") or "") + " " + (c.get("body") or "")[:500]), known_ids)
+        oid = None
+        for cand in str(mm.get("order_ids") or "").split(","):
+            oid = _valid_oid(cand.strip(), known_ids)
+            if oid:
+                break
+        if not oid:
+            oid = _valid_oid(extract_order_id(mm["subject"]), known_ids)
+        extra = f" ({t['count']} unread in thread)" if t["count"] > 1 else ""
         tasks.append({
-            "task_key": f"email:{m['id']}", "type": f"unread-{kind}",
-            "title": c.get("subject") or "(no subject)",
-            "detail": f"from {who or addr}" + (f" — order #{oid}" if oid else ""),
-            "order_id": oid, "gmail_id": m["id"], "thread_id": m.get("threadId"),
-            "date_str": c.get("date", ""),
+            "task_key": f"thread:{tid}", "type": f"unread-{kind}",
+            "title": mm["subject"] or "(no subject)",
+            "detail": f"from {who or addr}{extra}"
+                      + (f" — order #{oid}" if oid else ""),
+            "order_id": oid, "gmail_id": t["latest_id"], "thread_id": tid,
+            "date_str": mm["date"],
         })
     return tasks
 
@@ -713,13 +765,17 @@ def email_action(payload: dict = Body(...), _: bool = Depends(require_admin)):
         return {"status": "error", "message": "task has no gmail message"}
     gmail_id = row[0]
     from ghi_inbox import _gmail_post
+    # Beat 5: thread-grouped tasks (task_key thread:{tid}) act on the WHOLE
+    # thread — read/archive/trash one board row = the whole conversation.
+    target = (f"threads/{task_key.split(':', 1)[1]}"
+              if task_key.startswith("thread:") else f"messages/{gmail_id}")
     if action == "read":
-        res = _gmail_post(f"messages/{gmail_id}/modify", {"removeLabelIds": ["UNREAD"]})
+        res = _gmail_post(f"{target}/modify", {"removeLabelIds": ["UNREAD"]})
     elif action == "archive":
-        res = _gmail_post(f"messages/{gmail_id}/modify",
+        res = _gmail_post(f"{target}/modify",
                           {"removeLabelIds": ["UNREAD", "INBOX"]})
     else:
-        res = _gmail_post(f"messages/{gmail_id}/trash", {})
+        res = _gmail_post(f"{target}/trash", {})
     ok = bool(res)
     if ok:
         with get_db() as conn:

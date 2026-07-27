@@ -422,50 +422,23 @@ def run_gmail_sync(db_conn, hours_back=2):
     except Exception as e:
         results["errors"].append(f"RL quote search error: {e}")
     
-    # 4. Tracking Numbers / PRO Numbers (never from drafts — a draft is an
-    # unsent working copy; a bogus draft once re-stamped a fake PRO in a loop)
+    # 4. Tracking / PRO — LEDGER CUTOVER (Beat 5, William 2026-07-27). The
+    # raw re-scanner that lived here is RETIRED: it re-read the same mail
+    # every cycle and overwrote orders.tracking unconditionally (the fake-PRO
+    # incident class). Now the email ledger reads each message exactly once,
+    # order_facts derives tracking, and the applier stamps orders
+    # ONLY-IF-EMPTY with the source message id logged as provenance.
     try:
-        messages = search_emails(f'{time_filter} -in:draft (PRO OR tracking OR "has shipped")')
-        print(f"[GMAIL] Found {len(messages)} potential tracking emails")
-        
-        for msg in messages:
-            try:
-                email = get_email_content(msg['id'])
-                if not email:
-                    continue
-                
-                # Never capture tracking from OUR OWN automation notifications —
-                # they echo order numbers + tracking previews and once created a
-                # self-reinfecting loop with a bogus PRO (incident 2026-07-18).
-                if is_own_automation_email(email.get('subject', '')):
-                    continue
-                
-                text = email['subject'] + ' ' + email['body']
-                
-                # PRO number pattern
-                pro_match = re.search(r'PRO\s*(?:#|Number)?[:\s]*([A-Z]{0,2}\d{8,10}(?:-\d)?)', 
-                                     text, re.IGNORECASE)
-                if pro_match:
-                    pro_no = pro_match.group(1).upper()
-                    order_id = extract_order_id(text)
-                    if order_id:
-                        update_order_tracking(db_conn, order_id, pro_no, 'PRO', email)
-                        results["tracking_numbers"] += 1
-                        continue
-                
-                # UPS tracking (1Z...)
-                ups_match = re.search(r'\b(1Z[A-Z0-9]{16})\b', text)
-                if ups_match:
-                    order_id = extract_order_id(text)
-                    if order_id:
-                        update_order_tracking(db_conn, order_id, ups_match.group(1), 'UPS', email)
-                        results["tracking_numbers"] += 1
-                        
-            except Exception as e:
-                results["errors"].append(f"Tracking error: {e}")
-                
+        from email_ledger import run_ledger_cycle
+        led = run_ledger_cycle(hours_back=hours_back)
+        results["tracking_numbers"] = len(led.get("stamped") or [])
+        results["ledger"] = {"ingested": led.get("ingested", 0),
+                             "seen": led.get("seen", 0),
+                             "facts_orders": led.get("facts_orders", 0)}
+        for e in (led.get("errors") or [])[:5]:
+            results["errors"].append(f"Ledger: {e}")
     except Exception as e:
-        results["errors"].append(f"Tracking search error: {e}")
+        results["errors"].append(f"Ledger cycle error: {e}")
     
     # 5. Phase 3B: Scan for customer emails (lifecycle tracking + cancel detection)
     try:

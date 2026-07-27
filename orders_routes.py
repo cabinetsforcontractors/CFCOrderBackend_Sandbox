@@ -687,6 +687,57 @@ def get_order_events(order_id: str):
             return {"status": "ok", "events": events}
 
 
+@orders_router.get("/orders/{order_id}/timeline")
+def get_order_timeline(order_id: str):
+    """Beat 5 (2026-07-27): one order's WHOLE story on one screen —
+    DB events + every ledgered email that mentions the order, merged
+    chronologically. Read-only; emails come from the ledger (each read from
+    Gmail once, ever), events from order_events."""
+    entries = []
+    with get_db() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT event_type, event_data, source, created_at
+                FROM order_events WHERE order_id = %s
+            """, (order_id,))
+            for r in cur.fetchall():
+                data = r["event_data"]
+                if isinstance(data, str):
+                    try:
+                        data = json.loads(data)
+                    except Exception:
+                        data = {"raw": data[:200]}
+                entries.append({
+                    "at": r["created_at"].isoformat() if r["created_at"] else "",
+                    "source": r["source"] or "system", "kind": "event",
+                    "title": r["event_type"],
+                    "detail": json.dumps(data or {}, default=str)[:400],
+                })
+            try:
+                # order_ids is comma-joined -> exact-token regex, so 5709
+                # never matches 15709
+                cur.execute("""
+                    SELECT message_id, thread_id, folder, from_addr, subject,
+                           email_date, kind
+                    FROM email_ledger
+                    WHERE order_ids ~ ('(^|,)' || %s || '($|,)')
+                """, (order_id,))
+                for r in cur.fetchall():
+                    entries.append({
+                        "at": r["email_date"].isoformat() if r["email_date"] else "",
+                        "source": "email", "kind": f"email-{r['folder']}",
+                        "title": r["subject"] or "(no subject)",
+                        "detail": f"{r['kind']} — from {r['from_addr'] or '?'}",
+                        "message_id": r["message_id"],
+                        "thread_id": r["thread_id"],
+                    })
+            except Exception:
+                conn.rollback()  # ledger table not present yet — events only
+    entries.sort(key=lambda e: e["at"] or "")
+    return {"status": "ok", "order_id": order_id,
+            "count": len(entries), "timeline": entries}
+
+
 @orders_router.delete("/orders/{order_id}")
 def delete_order(order_id: str, _: bool = Depends(require_admin)):
     """Delete an order and its shipments. [admin]"""

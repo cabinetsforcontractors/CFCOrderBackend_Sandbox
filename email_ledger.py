@@ -1,6 +1,11 @@
 """
 email_ledger.py
-THE CLEAN DATA LAYER (William architecture ruling 2026-07-18) — SHADOW MODE.
+THE CLEAN DATA LAYER (William architecture ruling 2026-07-18).
+CUTOVER LIVE 2026-07-27 (Beat 5, William's word): no longer shadow — the
+ledger cycle (ingest -> rebuild facts -> apply) rides every gmail-sync run,
+and the applier is THE only email-derived tracking writer (gmail_sync's raw
+re-scanner is retired). Rails: only-if-empty stamps, provenance message id
+on every write, hand-sent indicator kills duplicate tracking drafts.
 
 Root problem this replaces: five scanners re-read raw Gmail every cycle and
 re-derive state each time, writing straight onto orders — which produced
@@ -72,6 +77,12 @@ STREAMS = (
     ('(from:roccabinetry.com OR from:roccabinetrytampa.com OR '
      'from:sent-via.netsuite.com) -in:draft', "supplier_doc"),
     ('(PRO OR tracking OR "has shipped") -in:draft', "tracking_mention"),
+    # general mail (Beat 5 cutover): the board + per-order timeline read the
+    # ledger, so ALL recent mail gets ledgered. Specific streams above run
+    # first so their kinds win; these two catch the rest. Each message is
+    # still fetched from Gmail exactly once, ever.
+    ('in:inbox -in:draft', "inbox_mail"),
+    ('in:sent -in:draft', "sent_mail"),
 )
 
 AUTOMATION_SUBJECT_PREFIXES = (
@@ -385,15 +396,94 @@ def compare_facts_vs_orders() -> Dict:
 
 
 # =============================================================================
-# SHADOW SWEEP HOOK (rides the sync cycle: ingest + rebuild, nothing else)
+# CUTOVER APPLIER (Beat 5, 2026-07-27 — facts write orders, with rails)
 # =============================================================================
 
-def run_ledger_shadow(hours_back: int = 24) -> Dict:
+def apply_facts_to_orders(dry_run: bool = False) -> Dict:
+    """Stamp orders.tracking/pro_number from order_facts. THE RAILS:
+    only-if-empty (a stamped order is never overwritten — the fake-PRO class
+    dies here), provenance message id logged in the order event, and when the
+    facts indicator says the tracking email was hand-sent, the promise row's
+    tracking stage completes too so the robot never drafts a duplicate
+    (mirrors progress_emails.stamp_manual_tracking)."""
+    out = {"status": "ok", "stamped": [], "skipped_already": 0, "errors": []}
+    with get_db() as conn:
+        ensure_ledger_tables(conn)
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT f.order_id, f.tracking_value, f.pro_value,
+                       f.tracking_msg, f.tracking_email_sent_at,
+                       o.tracking, o.pro_number
+                FROM order_facts f
+                JOIN orders o ON o.order_id = f.order_id
+                WHERE f.tracking_value IS NOT NULL
+            """)
+            rows = cur.fetchall()
+        for oid, f_trk, f_pro, f_msg, f_sent, o_trk, o_pro in rows:
+            if (o_trk or "").strip() or (o_pro or "").strip():
+                out["skipped_already"] += 1
+                continue
+            item = {"order_id": oid, "tracking": f_trk, "pro": f_pro,
+                    "hand_sent": bool(f_sent)}
+            if dry_run:
+                out["stamped"].append(item)
+                continue
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("""UPDATE orders SET tracking = %s,
+                                   updated_at = NOW() WHERE order_id = %s""",
+                                (f_trk, oid))
+                    if f_pro:
+                        cur.execute("""UPDATE orders SET pro_number = %s,
+                                       updated_at = NOW() WHERE order_id = %s""",
+                                    (f_pro, oid))
+                    if f_sent:
+                        cur.execute("""
+                            INSERT INTO progress_promises
+                                (order_id, suppliers, post_payment_at,
+                                 tracking_at)
+                            VALUES (%s, 'ledger-tracking', NOW(), NOW())
+                            ON CONFLICT (order_id) DO UPDATE
+                            SET tracking_at =
+                                COALESCE(progress_promises.tracking_at, NOW())
+                        """, (oid,))
+                    cur.execute("""
+                        INSERT INTO order_events
+                            (order_id, event_type, event_data, source)
+                        VALUES (%s, 'tracking_stamped', %s, 'email_ledger')
+                    """, (oid, json.dumps({"message_id": f_msg,
+                                           "tracking": f_trk, "pro": f_pro,
+                                           "hand_sent": bool(f_sent)})))
+                    conn.commit()
+                out["stamped"].append(item)
+            except Exception as e:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                out["errors"].append(f"{oid}: {e}")
+    return out
+
+
+# =============================================================================
+# THE LEDGER CYCLE (rides every gmail-sync run: ingest -> rebuild -> apply)
+# =============================================================================
+
+def run_ledger_cycle(hours_back: int = 24) -> Dict:
     ing = ingest_new_messages(hours_back=hours_back)
-    reb = rebuild_order_facts() if ing.get("new_rows") else {"orders": 0}
+    if ing.get("new_rows"):
+        reb = rebuild_order_facts()
+        app = apply_facts_to_orders()
+    else:
+        reb, app = {"orders": 0}, {"stamped": [], "errors": []}
     return {"ingested": ing.get("new_rows", 0), "seen": ing.get("seen", 0),
             "facts_orders": reb.get("orders", 0),
-            "errors": ing.get("errors", [])}
+            "stamped": app.get("stamped", []),
+            "errors": (ing.get("errors") or []) + (app.get("errors") or [])}
+
+
+# pre-cutover name, kept so old callers/notes stay valid
+run_ledger_shadow = run_ledger_cycle
 
 
 # =============================================================================
@@ -432,6 +522,13 @@ def ledger_reset(_: bool = Depends(require_admin),
 @ledger_router.get("/ledger/compare")
 def ledger_compare(_: bool = Depends(require_admin)):
     return compare_facts_vs_orders()
+
+
+@ledger_router.post("/ledger/apply")
+def ledger_apply(dry_run: bool = True, _: bool = Depends(require_admin)):
+    """CUTOVER APPLIER door — dry_run=true (default) previews the stamps;
+    dry_run=false writes them (only-if-empty rails apply either way)."""
+    return apply_facts_to_orders(dry_run=dry_run)
 
 
 @ledger_router.get("/ledger")

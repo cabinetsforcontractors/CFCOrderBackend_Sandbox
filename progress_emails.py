@@ -548,10 +548,15 @@ def run_progress_sweep(dry_run: bool = False, days_back: int = 7) -> Dict:
                   AND (o.pro_number IS NULL OR o.pro_number = '')
             """)
             late = cur.fetchall()
-            # C) TRACKING: tracking/PRO captured, tracking draft not yet made
+            # C) TRACKING: tracking/PRO captured, tracking draft not yet made.
+            # Beat 5 cutover: the ledger indicator rides along — when a
+            # hand-sent tracking email already reached the customer,
+            # ledger_sent is set and we complete the stage WITHOUT drafting.
             cur.execute("""
-                SELECT o.* FROM progress_promises p
+                SELECT o.*, f.tracking_email_sent_at AS ledger_sent
+                FROM progress_promises p
                 JOIN orders o ON o.order_id = p.order_id
+                LEFT JOIN order_facts f ON f.order_id = p.order_id
                 WHERE p.tracking_at IS NULL
                   AND ((o.tracking IS NOT NULL AND o.tracking <> '')
                        OR (o.pro_number IS NOT NULL AND o.pro_number <> ''))
@@ -630,6 +635,20 @@ def run_progress_sweep(dry_run: bool = False, days_back: int = 7) -> Dict:
 
         for o in shipped:
             try:
+                if o.get("ledger_sent"):
+                    # ledger indicator: customer already got tracking by hand
+                    # — complete the stage, draft nothing (William's rule)
+                    if not dry_run:
+                        with conn.cursor() as cur:
+                            cur.execute("""UPDATE progress_promises
+                                           SET tracking_at = NOW()
+                                           WHERE order_id = %s""",
+                                        (o["order_id"],))
+                            conn.commit()
+                    out["tracking"].append(
+                        {"order_id": o["order_id"],
+                         "skipped": "hand-sent (ledger indicator)"})
+                    continue
                 item = {"order_id": o["order_id"],
                         "tracking": o.get("tracking") or o.get("pro_number")}
                 if not dry_run:
@@ -642,6 +661,11 @@ def run_progress_sweep(dry_run: bool = False, days_back: int = 7) -> Dict:
                         raise RuntimeError("draft create failed")
                     with conn.cursor() as cur:
                         cur.execute("""UPDATE progress_promises SET tracking_at = NOW()
+                                       WHERE order_id = %s""", (o["order_id"],))
+                        # robot drafted the tracking email -> stamp the
+                        # ledger indicator so the facts spreadsheet is truth
+                        cur.execute("""UPDATE order_facts
+                                       SET tracking_email_sent_at = NOW()
                                        WHERE order_id = %s""", (o["order_id"],))
                         conn.commit()
                     _notify(o["order_id"], "tracking", body)
