@@ -388,6 +388,28 @@ def _internal_lines_table(items: List[Dict]) -> str:
             f"<th align='left' style='padding:4px 10px;'>Description</th></tr>{rows}</table>")
 
 
+# SUBJECT IDENTIFIER (William ruling 2026-07-27, the PO 5635 lesson: the
+# same bare "PO 5635" subject went to TWO suppliers — C&S and L&C — and
+# their replies were indistinguishable by subject). Every outbound supplier
+# subject now carries the supplier code: "PO 5635-CS", "PO 5635-LC"...
+# The other half of the ruling lives in the classifiers: the sender's
+# VANITY DOMAIN identifies the supplier; gmail-based suppliers (L&C) are
+# identified by their exact address.
+SUPPLIER_SUBJECT_CODE = {
+    "GHI": "GHI", "ROC": "ROC", "ROC Tampa": "ROC",
+    "Love-Milestone": "LM", "Cabinet & Stone": "CS",
+    "Cabinet & Stone CA": "CS", "LI": "LI", "Cabinetry Distribution": "LI",
+    "DuraStone": "DS", "DL": "DL", "DL Cabinetry": "DL",
+    "L&C Cabinetry": "LC", "Go Bravura": "GB",
+}
+
+
+def po_tag(order_id: str, warehouse: str) -> str:
+    code = SUPPLIER_SUBJECT_CODE.get(warehouse) or \
+        "".join(c for c in (warehouse or "").upper() if c.isalnum())[:4]
+    return f"PO {order_id}-{code}" if code else f"PO {order_id}"
+
+
 def build_po_email(order_id: str, warehouse: str, wdata: Dict) -> Dict:
     """Supplier-facing PO email: no customer info, no Our SKU column, our
     door names stripped, their door name/presku in the opening line,
@@ -405,7 +427,7 @@ def build_po_email(order_id: str, warehouse: str, wdata: Dict) -> Dict:
             f"{STOCK_CHECK_ASK}"
             f"{SIGNATURE_HTML}</div>")
     return {"html": html, "attachment": None, "units": total_units,
-            "subject": f"PO {order_id} - Cabinets For Contractors"}
+            "subject": f"{po_tag(order_id, warehouse)} - Cabinets For Contractors"}
 
 
 def build_roc_csv(order_id: str, wdata: Dict) -> Dict:
@@ -461,7 +483,7 @@ def build_roc_csv(order_id: str, wdata: Dict) -> Dict:
     return {"html": html, "units": order_units, "companions": tray_qty,
             "attachment": {"filename": f"ROC_order_{order_id}.csv",
                            "content": csv_text.encode(), "mime": "text/csv"},
-            "subject": f"UPLOAD NEEDED: ROC quick-order CSV - PO {order_id}"}
+            "subject": f"UPLOAD NEEDED: ROC quick-order CSV - {po_tag(order_id, 'ROC')}"}
 
 
 def build_ghi_xlsx(order_id: str, wdata: Dict) -> Dict:
@@ -514,7 +536,7 @@ def build_ghi_xlsx(order_id: str, wdata: Dict) -> Dict:
             "attachment": {"filename": f"CFC_PO_{order_id}_GHI.xlsx",
                            "content": xlsx,
                            "mime": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"},
-            "subject": f"PO {order_id} - Cabinets For Contractors order sheet"}
+            "subject": f"{po_tag(order_id, 'GHI')} - Cabinets For Contractors order sheet"}
 
 
 # =============================================================================

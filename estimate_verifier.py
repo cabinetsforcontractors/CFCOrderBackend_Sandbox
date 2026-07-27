@@ -52,7 +52,8 @@ INTERNAL_ALERT_EMAIL = os.environ.get("WAREHOUSE_NOTIFICATION_EMAIL",
 CANDIDATE_QUERY_PDF = ('has:attachment filename:pdf '
                        '(ghicabinets OR QUOFL OR "Quotation_S" OR Estimate_ OR '
                        'Invoice_ OR milestonecabinetry OR cabinetstone OR '
-                       '"Cabinetry Distribution" OR "Sales Order")')
+                       '"Cabinetry Distribution" OR "Sales Order" OR '
+                       'lnccabinetryvab)')
 CANDIDATE_QUERY_HTML = ('(from:roccabinetry.com OR from:sent-via.netsuite.com '
                         'OR from:dlcabinetry.com) '
                         '("order confirmation" OR "Invoice" OR "Sales Order")')
@@ -177,6 +178,12 @@ def verify_pdf(order_id: str, data: bytes, supplier: str) -> Dict:
             parsed = sdp.parse_cs_quotation_pdf(data)
             report = sdp.body_space_diff(sent, sdp.fold_cs_lines(parsed["lines"]))
             doc_ref = parsed.get("quote_number")
+        elif supplier == "L&C Cabinetry":
+            parsed = sdp.parse_lc_estimate_pdf(data)
+            report = sdp.body_space_diff(
+                sent, [f for f in sdp.fold_lc_lines(parsed["lines"])
+                       if not f.get("fee")])
+            doc_ref = parsed.get("estimate_number")
         else:  # LI
             parsed = sdp.parse_li_estimate_pdf(data)
             report = sdp.body_space_diff(sent, sdp.fold_li_lines(parsed["lines"]))
@@ -372,8 +379,10 @@ def build_revision_request(order_id: str, supplier: str, doc_ref: str,
             f"<ol>{items}</ol>"
             f"<p>Please send the corrected confirmation for our records.</p>"
             f"<p>Thank you,<br>Cabinets For Contractors<br>(770) 990-4885</p></div>")
+    from supplier_orders import po_tag
     return {"html": html,
-            "subject": f"PO {order_id} - please revise {doc_ref or 'your confirmation'}"}
+            "subject": f"{po_tag(order_id, supplier)} - please revise "
+                       f"{doc_ref or 'your confirmation'}"}
 
 
 # =============================================================================
@@ -774,6 +783,8 @@ def verify_pdf_from_doc(data: bytes, supplier: str) -> Dict:
         parsed = sdp.parse_lm_quote_pdf(data)
     elif supplier == "Cabinet & Stone":
         parsed = sdp.parse_cs_quotation_pdf(data)
+    elif supplier == "L&C Cabinetry":
+        parsed = sdp.parse_lc_estimate_pdf(data)
     else:
         parsed = sdp.parse_li_estimate_pdf(data)
     po = parsed.get("po")

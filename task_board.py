@@ -52,13 +52,20 @@ FLAG_RE = re.compile(
     r"PROGRESS DRAFT READY|APPROVAL DRAFT READY|DISCREPANCY|needs a human"
     r"|ALERT|ACTION|SEND CHECK|CONFIRM", re.I)
 
+# SENDER IDENTIFIER (William ruling 2026-07-27): the vanity DOMAIN names the
+# supplier no matter which person sends; suppliers on plain gmail (L&C, LI)
+# are named by their exact address.
 SUPPLIER_DOMAINS = {
     "ghicabinets.com": "GHI", "roccabinetry.com": "ROC",
     "roccabinetrytampa.com": "ROC Tampa", "cabinetstonellc.com": "Cabinet & Stone",
     "durastoneusa.com": "DuraStone", "milestonecabinetry.com": "Love-Milestone",
+    "dlcabinetry.com": "DL Cabinetry", "lnccabinetry.com": "L&C Cabinetry",
     "rlcarriers.com": "R+L Carriers", "dylt.com": "Daylight",
 }
-SUPPLIER_ADDRESSES = {"cabinetrydistribution@gmail.com": "Cabinetry Distribution (Li)"}
+SUPPLIER_ADDRESSES = {
+    "cabinetrydistribution@gmail.com": "Cabinetry Distribution (Li)",
+    "lnccabinetryvab@gmail.com": "L&C Cabinetry",
+}
 
 OWN_ADDRESSES = {a.strip().lower() for a in os.environ.get(
     "OWN_EMAIL_ADDRESSES",

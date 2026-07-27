@@ -1075,3 +1075,88 @@ def fold_li_lines(lines):
         folded.append({"bodies": [pc], "qty": qty, "raw": f"composite {pc}",
                        "flags": flags})
     return folded
+
+
+# =============================================================================
+# L&C CABINETRY — QuickBooks Estimate PDF grammar
+# =============================================================================
+# Decoded 2026-07-27 from the real "ESTIMATE 12800 - 5635.pdf" (the PO 5635
+# two-supplier order that taught the multi-supplier lesson). Shape: header
+# "Estimate" + "L&C CABINETRY VAB"; "ESTIMATE # 12800"; OUR po on the line
+# under "PO NUMBER SALES REP" ("5635 MIGUEL. C"); rows = QTY / ACTIVITY /
+# DESCRIPTION (activity text repeats inside description) / RATE / AMOUNT
+# with pypdf line wraps; dash separator rows and FEE rows (SURCHARGE /
+# HANDLE FEE / tariff prose) fold out; totals SUBTOTAL / TAX / TOTAL $.
+# L&C item naming is PROSE ("D6 DOVE GREY SAMPLE DOOR") -> body space.
+# SENDER NOTE (William ruling 2026-07-27): L&C mails from a GMAIL address
+# (lnccabinetryvab@gmail.com) — identify suppliers by vanity DOMAIN when
+# they have one, by the exact ADDRESS when they ride gmail.
+
+_LC_FEE = ("SURCHARGE", "HANDLE FEE", "TARIFF", "DELIVERY", "FREIGHT",
+           "ASSEMBLY", "RESTOCKING")
+# row end = LOOKAHEAD (never consumes the newline — consuming it starves the
+# next row's \n anchor and silently drops every second row)
+_LC_ROW = re.compile(
+    r"(?:^|\n)(\d{1,3})\s+(.+?)\s(\d[\d,]*\.\d{2})\s+(\d[\d,]*\.\d{2})"
+    r"(?=\s*(?:\n|$))",
+    re.DOTALL)
+
+
+def parse_lc_estimate_pdf(data):
+    """L&C QuickBooks Estimate PDF -> {'supplier','po','estimate_number',
+    'total','lines':[{desc, qty, rate, amount, fee}]}"""
+    from pypdf import PdfReader
+
+    txt = "\n".join(p.extract_text() or ""
+                    for p in PdfReader(io.BytesIO(data)).pages)
+    est = re.search(r"ESTIMATE\s*#\s*(\d{3,8})", txt)
+    po = re.search(r"PO\s*NUMBER[^\n]*\n\s*(\d{3,6}[A-Z]?)", txt)
+    m = re.search(r"TOTAL\s*\$\s*([\d,]+\.\d{2})", txt)
+    total = float(m.group(1).replace(",", "")) if m else None
+
+    region = txt
+    mh = re.search(r"QTY\s+ACTIVITY\s+DESCRIPTION\s+RATE\s+AMOUNT", region)
+    if mh:
+        region = region[mh.end():]
+    ms = re.search(r"\n\s*SUBTOTAL\b", region)
+    if ms:
+        region = region[:ms.start()]
+
+    lines = []
+    for m in _LC_ROW.finditer(region):
+        desc = re.sub(r"\s+", " ", m.group(2)).strip()
+        if not desc.replace("-", "").replace(" ", ""):
+            continue  # dash separator row
+        fee = any(k in desc.upper() for k in _LC_FEE)
+        lines.append({"desc": desc, "qty": int(m.group(1)),
+                      "rate": float(m.group(3).replace(",", "")),
+                      "amount": float(m.group(4).replace(",", "")),
+                      "fee": fee})
+    return {"supplier": "L&C Cabinetry",
+            "po": po.group(1) if po else None,
+            "estimate_number": est.group(1) if est else None,
+            "total": total, "lines": lines}
+
+
+def fold_lc_lines(lines):
+    """Body space: prose item text collapses to match candidates —
+    'D6 DOVE GREY SAMPLE DOOR' (their activity text, which repeats in the
+    description column and gets halved) -> {the phrase, its squashed
+    alphanumeric form, the leading style code D6}."""
+    out = []
+    for ln in lines:
+        if ln.get("fee"):
+            out.append({"bodies": [], "qty": ln["qty"], "raw": ln["desc"],
+                        "flags": [], "fee": True})
+            continue
+        d = ln["desc"].upper()
+        toks = d.split()
+        half = len(toks) // 2
+        if half and toks[:half] == toks[half:]:
+            d = " ".join(toks[:half])
+            toks = toks[:half]
+        squash = re.sub(r"[^A-Z0-9]", "", d)
+        bodies = [d, squash] + ([toks[0]] if toks else [])
+        out.append({"bodies": bodies, "qty": ln["qty"], "raw": d,
+                    "flags": []})
+    return out

@@ -215,6 +215,7 @@ _VERIFY_SUPPLIERS = {
     "Love-Milestone": ((), ("Love-Milestone",)),
     "Cabinet & Stone": ((), ("Cabinet & Stone", "Cabinet & Stone CA")),
     "LI": ((), ("LI", "Cabinetry Distribution")),
+    "L&C Cabinetry": ((), ("L&C Cabinetry", "L&C", "LC")),
 }
 
 # uppercase text markers -> supplier key (checked in order; PDF docs only)
@@ -222,6 +223,7 @@ _PDF_MARKERS = (
     ("GHI", ("GHI CUSTOM", "GHI CABINET")),
     ("Love-Milestone", ("QUOFL", "MILESTONE CABINETRY")),
     ("Cabinet & Stone", ("C&S-HOUSTON", "CABINETSTONE")),
+    ("L&C Cabinetry", ("L&C CABINETRY", "L & C CABINETRY", "LNCCABINETRYVAB")),
     ("LI", ("CABINETRY DISTRIBUTION",)),
 )
 
