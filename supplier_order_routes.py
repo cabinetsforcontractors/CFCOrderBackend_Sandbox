@@ -126,6 +126,31 @@ def scan_replies_now(hours_back: int = 24, _: bool = Depends(require_admin)):
         return {"status": "error", "message": str(e)}
 
 
+@supplier_order_router.get("/supplier-orders/attachment-text/{message_id}")
+def attachment_text(message_id: str, _: bool = Depends(require_admin)):
+    """Grammar-decoding tool [admin, READ-ONLY]: fetch one Gmail message and
+    return the extracted text of each PDF attachment (pypdf) plus subject.
+    Built 2026-07-27 to decode the L&C estimate format — useful forever."""
+    from estimate_verifier import fetch_message_full
+    msg = fetch_message_full(message_id)
+    if not msg:
+        return {"status": "error", "message": "could not fetch message"}
+    out = {"status": "ok", "subject": msg.get("subject"), "attachments": []}
+    for att in msg.get("attachments") or []:
+        entry = {"filename": att.get("filename")}
+        try:
+            import io
+            from pypdf import PdfReader
+            reader = PdfReader(io.BytesIO(att["data"]))
+            entry["pages"] = len(reader.pages)
+            entry["text"] = "\n".join((p.extract_text() or "")
+                                      for p in reader.pages)[:20000]
+        except Exception as e:
+            entry["error"] = str(e)
+        out["attachments"].append(entry)
+    return out
+
+
 @supplier_order_router.post("/supplier-orders/verify-email/{message_id}")
 def verify_email_now(message_id: str, force: bool = False,
                      dry_run: bool = False,
