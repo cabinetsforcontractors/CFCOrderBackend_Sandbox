@@ -64,7 +64,7 @@ def _already_handled(conn, message_id: str) -> bool:
         cur.execute("""SELECT 1 FROM order_events
                        WHERE event_type IN ('rl_delivered',
                                             'rl_delivered_mismatch')
-                         AND event_data LIKE %s LIMIT 1""",
+                         AND event_data::text LIKE %s LIMIT 1""",
                     (f"%{message_id}%",))
         return bool(cur.fetchone())
 
