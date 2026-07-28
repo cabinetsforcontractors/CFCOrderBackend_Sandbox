@@ -438,8 +438,19 @@ async def ghi_order_sheet(order_id: str, template: UploadFile = File(None),
             with open(tpl_path, "rb") as f:
                 tpl_bytes = f.read()
     if not tpl_bytes:
+        # same fallback as dispatch (2026-07-28): the supplier_templates store
+        try:
+            from supplier_orders import get_supplier_template
+            stored = get_supplier_template("GHI")
+            if stored:
+                tpl_bytes = stored[1]
+        except Exception:
+            pass
+    if not tpl_bytes:
         return {"status": "error",
-                "message": "no GHI template: upload 'template' or set GHI_TEMPLATE_PATH"}
+                "message": "no GHI template: upload 'template', set "
+                           "GHI_TEMPLATE_PATH, or store one via "
+                           "POST /supplier-orders/template/GHI"}
 
     prefixes, aliases = _VERIFY_SUPPLIERS["GHI"]
     with get_db() as conn:
