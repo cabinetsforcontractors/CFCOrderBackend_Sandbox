@@ -80,7 +80,9 @@ SUPPLIER_CHANNELS = {
     "DL":              {"mode": "portal_prepared", "artifact": "po_email"},
     "L&C Cabinetry":   {"mode": "portal_prepared", "artifact": "po_email"},
     "Linda":           {"mode": "portal_prepared", "artifact": "po_email"},
-    "Go Bravura":      {"mode": "portal_prepared", "artifact": "po_email"},
+    # William 2026-07-28: GB doors going live on .net — GB is EMAIL-TO-ORDER
+    # with the default PO-email logic (opposite of ROC's portal-only law)
+    "Go Bravura":      {"mode": "email_auto", "artifact": "po_email"},
 }
 
 # our website line prefix -> ROC store line prefix (their quick-order SKUs).

@@ -215,6 +215,11 @@ def sync_order_from_b2bwave(order_data: dict) -> dict:
 
 
 def refresh_ai_summaries_for_active_orders():
+    # RETIRED (William 2026-07-28 "yes retire"): the timeline tab, task board
+    # and alerts engine replaced it, and it was erroring 400 on every order.
+    # Set AI_SUMMARY_ENABLED=true to resurrect.
+    if os.environ.get("AI_SUMMARY_ENABLED", "false").lower() != "true":
+        return
     """
     Generate/refresh the 6-bullet AI state summary for active orders.
 

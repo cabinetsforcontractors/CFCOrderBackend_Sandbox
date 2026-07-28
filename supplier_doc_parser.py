@@ -191,6 +191,19 @@ def ghi_desc_to_tokens(desc):
     if "KIT" in d and re.search(r"JIF+Y", d):
         # GHI spells it JIFFY or JIFFFY (ruled a match, 5693)
         return ["JIFFY-KIT", "JK"]
+    # NEW-FORM VOCABULARY (William 2026-07-28 "proceed", the SO 17247 false
+    # alarms): GHI's eff-7/2 form introduced these description shapes.
+    if "END PANEL" in d and m3:
+        # "END PANEL 24X4X35" -> EP24X35 (middle number is the return depth)
+        return [f"EP{int(float(m3.group(1)))}X{int(float(m3.group(3)))}"]
+    if "END PANEL" in d and w:
+        return [f"EP{int(float(w))}X{int(float(h))}"]
+    if "ISLAND PANEL" in d:
+        # "3'X4'X1/4\" ISLAND PANEL" -> 3X4PAN (first two numbers are FEET —
+        # the foot marks break the generic WxH regex, so match them here)
+        n = re.search(r"(\d+)\s*'?\s*X\s*(\d+)", d)
+        if n:
+            return [f"{int(n.group(1))}X{int(n.group(2))}PAN"]
     if "PANEL" in d and ("REFRIGERATOR" in d or "REF" in d):
         n = re.search(r"(\d{2,3})", d)
         if n:
@@ -215,6 +228,12 @@ def ghi_desc_to_tokens(desc):
         n = re.search(r"BASE\s*(\d+)", d) or re.search(r"(\d{2})", d)
         if n:
             return [f"FSB{int(n.group(1))}"]
+    if "SINK BASE" in d:
+        # new-form "SINK BASE 36\"" (2026-07-28): must never fall through to
+        # the plain-BASE branch (SO 17247 resolved it to B36)
+        n = re.search(r"BASE\s*(\d+)", d) or re.search(r"(\d{2})", d)
+        if n:
+            return [f"SB{int(n.group(1))}"]
     if "DRAWER BASE" in d:
         dm = re.search(r"(\d)\s*DRAWER\s*BASE\s*(\d+)", d)
         if dm:
