@@ -53,7 +53,7 @@ def _orders_for_pro(conn, pro: str):
                        WHERE pro_number = %s OR tracking ILIKE %s""",
                     (pro, f"%{pro}%"))
         hits.update(str(r[0]) for r in cur.fetchall())
-        cur.execute("SELECT order_id FROM shipments WHERE pro_number = %s",
+        cur.execute("SELECT order_id FROM order_shipments WHERE pro_number = %s",
                     (pro,))
         hits.update(str(r[0]) for r in cur.fetchall())
     return sorted(hits)
@@ -163,7 +163,7 @@ def process_rl_delivered(hours_back: int = 48, dry_run: bool = False) -> Dict:
 
                 # stamp delivered_at only-if-empty on the matching shipment
                 with conn.cursor() as cur:
-                    cur.execute("""UPDATE shipments
+                    cur.execute("""UPDATE order_shipments
                                    SET delivered_at = NOW()
                                    WHERE order_id = %s AND delivered_at IS NULL
                                      AND (pro_number = %s
