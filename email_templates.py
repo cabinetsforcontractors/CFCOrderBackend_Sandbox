@@ -380,7 +380,7 @@ By clicking the payment link you agree to the following policies:
 </div>
 {residential_notice}
 {policy_box}
-<p style="text-align:center"><font color="#6fa8dc"><b><a href="{payment_link}">If everything looks in order (CLICK HERE) to make payment</a></b></font></p>
+<p style="text-align:center;margin:26px 0"><a href="{payment_link}" style="display:inline-block;background:#1D4ED8;color:#ffffff;text-decoration:none;padding:16px 46px;border-radius:12px;font-weight:800;font-size:19px;letter-spacing:0.5px">CLICK TO PAY NOW</a></p>
 <p style="color:rgb(51,51,51)">Any questions, just reply or call.</p>
 <p style="color:rgb(51,51,51);margin-top:18px">CFC Team<br>Cabinets For Contractors<br>www.CabinetsForContractors.net<br>www.CabinetsForContractors.com<br>(770) 990-4885</p>
 </div></div>"""

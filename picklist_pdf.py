@@ -114,8 +114,11 @@ def generate_picklist_pdf(order_data: dict, line_items=None) -> Optional[bytes]:
     desc_style = ParagraphStyle('PDesc', parent=small, fontSize=8, leading=10)
     head_style = ParagraphStyle('PHead', parent=small, fontName='Helvetica-Bold',
                                 textColor=colors.HexColor('#555555'))
+    # little per-line check box (the .net picklist look) — its own narrow
+    # column right after Quantity, sized like a real tick box
     rows = [[Paragraph('#', head_style), Paragraph('Description', head_style),
-             Paragraph('Quantity', head_style), Paragraph('Notes', head_style)]]
+             Paragraph('Quantity', head_style), '',
+             Paragraph('Notes', head_style)]]
     for i, item in enumerate(line_items, 1):
         sku = item.get('sku') or ''
         name = item.get('product_name') or item.get('name') or ''
@@ -124,9 +127,14 @@ def generate_picklist_pdf(order_data: dict, line_items=None) -> Optional[bytes]:
             Paragraph(str(i), small),
             Paragraph(f"[{sku}] {name}", desc_style),
             Paragraph(str(qty), small),
-            '',  # empty write-in box
+            Table([['']], colWidths=[0.28 * inch], rowHeights=[0.22 * inch],
+                  style=TableStyle([('BOX', (0, 0), (0, 0), 0.75,
+                                     colors.HexColor('#999999'))])),
+            '',
         ])
-    tbl = Table(rows, colWidths=[0.5 * inch, 4.3 * inch, 0.9 * inch, 1.6 * inch],
+    tbl = Table(rows,
+                colWidths=[0.5 * inch, 4.0 * inch, 0.75 * inch, 0.45 * inch,
+                           1.6 * inch],
                 repeatRows=1)
     style = [
         ('VALIGN', (0, 0), (-1, -1), 'TOP'),
@@ -137,10 +145,8 @@ def generate_picklist_pdf(order_data: dict, line_items=None) -> Optional[bytes]:
         ('TOPPADDING', (0, 0), (-1, -1), 6),
         ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
         ('ALIGN', (2, 0), (2, -1), 'CENTER'),
+        ('ALIGN', (3, 1), (3, -1), 'CENTER'),
     ]
-    # a visible check box in every Notes cell
-    for r in range(1, len(rows)):
-        style.append(('BOX', (3, r), (3, r), 0.5, colors.HexColor('#999999')))
     tbl.setStyle(TableStyle(style))
     elements.append(tbl)
 

@@ -446,15 +446,13 @@ async def ghi_order_sheet(order_id: str, template: UploadFile = File(None),
         fwd = sdp.build_forward_map(conn)
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             items = _order_lines_for_supplier(cur, order_id, prefixes, aliases)
-            cur.execute("SELECT company_name, customer_name FROM orders WHERE order_id = %s",
-                        (order_id,))
-            order = cur.fetchone() or {}
     if not items:
         return {"status": "error", "message": f"order {order_id} has no GHI line items"}
-    ship_to = (order.get("company_name") or order.get("customer_name") or "")
+    # HARD RULE (William 2026-07-28): never the customer's name in anything a
+    # supplier sees.
     try:
         xlsx, report = sdp.make_ghi_sheets(items, tpl_bytes, order_id, fwd,
-                                           ship_to=f"{ship_to} / PO {order_id}".strip(" /"))
+                                           ship_to="CFC Will Send BOL")
     except Exception as e:
         return {"status": "error", "message": f"sheet generation failed: {e}"}
     if report_only or report["unplaced"] or report["unmapped_prefix"]:

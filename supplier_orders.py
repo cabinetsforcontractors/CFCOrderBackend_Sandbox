@@ -517,15 +517,10 @@ def build_ghi_xlsx(order_id: str, wdata: Dict) -> Dict:
         fwd = sdp.build_forward_map(conn)
     items = [{"website_sku": i["website_sku"], "quantity": i["quantity"]}
              for i in wdata["items"]]
-    from psycopg2.extras import RealDictCursor
-    with get_db() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT company_name, customer_name FROM orders WHERE order_id = %s",
-                        (order_id,))
-            o = cur.fetchone() or {}
-    ship_to = (o.get("company_name") or o.get("customer_name") or "")
+    # HARD RULE (William 2026-07-28): never the customer's name in anything a
+    # supplier sees — the Ship To field says we send the BOL, nothing more.
     xlsx, report = sdp.make_ghi_sheets(items, tpl, order_id, fwd,
-                                       ship_to=f"{ship_to} / PO {order_id}".strip(" /"))
+                                       ship_to="CFC Will Send BOL")
     if report["unplaced"] or report["unmapped_prefix"]:
         return {"error": f"GHI sheet needs review before sending: "
                          f"unplaced={report['unplaced']} unmapped={report['unmapped_prefix']}"}

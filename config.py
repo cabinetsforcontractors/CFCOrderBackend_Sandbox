@@ -104,7 +104,8 @@ SUPPLIER_INFO = {
         'name': 'GHI Cabinets',
         'address': '1807 48th Ave E Unit 110, Palmetto FL 34221',
         'contact': 'Kathryn Belfiore (941) 479-8070',
-        'email': 'kbelfiore@ghicabinets.com'
+        # William 2026-07-28: orders go to the orders box going forward
+        'email': 'orders@ghicabinets.com'
     },
     'Linda': {
         'name': 'Dealer Cabinetry',
