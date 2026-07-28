@@ -91,6 +91,9 @@ AUTOMATION_SUBJECT_PREFIXES = (
     "DISCREPANCY",
     "ALERT!!",
     "GHI EMAIL NEEDS A HUMAN",
+    "DELIVERED DRAFT READY",
+    "R+L DELIVERED NEEDS A HUMAN",
+    "AUTO-INVOICE NEEDS A HUMAN",
 )
 
 
@@ -476,10 +479,22 @@ def run_ledger_cycle(hours_back: int = 24) -> Dict:
         app = apply_facts_to_orders()
     else:
         reb, app = {"orders": 0}, {"stamped": [], "errors": []}
+    # R+L delivered notices -> customer delivered-email DRAFTS (William
+    # 2026-07-28 "yes" ruling; idempotent, safe to run every cycle)
+    rl = {}
+    try:
+        from rl_delivered import process_rl_delivered
+        rl = process_rl_delivered(hours_back=hours_back)
+    except Exception as e:
+        rl = {"errors": [str(e)]}
     return {"ingested": ing.get("new_rows", 0), "seen": ing.get("seen", 0),
             "facts_orders": reb.get("orders", 0),
             "stamped": app.get("stamped", []),
-            "errors": (ing.get("errors") or []) + (app.get("errors") or [])}
+            "rl_delivered": {k: rl.get(k) for k in
+                             ("drafted", "mismatched", "unmatched")
+                             if rl.get(k)},
+            "errors": (ing.get("errors") or []) + (app.get("errors") or [])
+                      + (rl.get("errors") or [])}
 
 
 # pre-cutover name, kept so old callers/notes stay valid
@@ -522,6 +537,15 @@ def ledger_reset(_: bool = Depends(require_admin),
 @ledger_router.get("/ledger/compare")
 def ledger_compare(_: bool = Depends(require_admin)):
     return compare_facts_vs_orders()
+
+
+@ledger_router.post("/ledger/rl-delivered")
+def ledger_rl_delivered(hours_back: int = 48, dry_run: bool = True,
+                        _: bool = Depends(require_admin)):
+    """Run the R+L delivered-notice handler on demand [admin]. dry_run=true
+    (default) reports the decisions without stamping, drafting, or alerting."""
+    from rl_delivered import process_rl_delivered
+    return process_rl_delivered(hours_back=hours_back, dry_run=dry_run)
 
 
 @ledger_router.post("/ledger/apply")
