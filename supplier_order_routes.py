@@ -273,6 +273,62 @@ def b2bwave_status_set(order_id: str, req: B2BStatusSet,
         return {"status": "error", "message": str(e)}
 
 
+@supplier_order_router.post("/supplier-orders/draft-ghi-sheet/{order_id}")
+async def draft_ghi_sheet(order_id: str, sheet: UploadFile = File(...),
+                          _: bool = Depends(require_admin)):
+    """Land the GHI order email as a Gmail DRAFT with the uploaded sheet
+    attached [admin] (William 2026-07-28: supplier order drafts land COMPLETE).
+    Same composition as send-ghi-sheet — template v2 greeting, door/presku,
+    Total Qty, stock-check ask, signature — but NOTHING sends and no
+    supplier_orders row is touched. William reviews in Drafts and presses
+    Send (or fires send-ghi-sheet for the tracked path)."""
+    from config import SUPPLIER_INFO
+    from freight_routes import get_supplier_sheet
+    from supplier_orders import (door_info_for, supplier_greeting, po_tag,
+                                 SIGNATURE_HTML, STOCK_CHECK_ASK)
+
+    xlsx_bytes = await sheet.read()
+    if not xlsx_bytes:
+        return {"status": "error", "message": "empty sheet upload"}
+
+    sheet_info = get_supplier_sheet(order_id, True)
+    if sheet_info.get("status") != "ok":
+        return {"status": "error",
+                "message": sheet_info.get("message", "supplier-sheet failed")}
+    wdata = (sheet_info.get("warehouses") or {}).get("GHI")
+    if not wdata or not wdata.get("items"):
+        return {"status": "error",
+                "message": f"order {order_id} has no GHI line items"}
+
+    total_units = sum(int(i.get("quantity") or 0) for i in wdata["items"])
+    door = door_info_for("GHI", wdata["items"])
+    door_txt = f" ({door['door_name']}, {door['presku']})" if door else ""
+    html = (f"<div style='font-family:Arial,sans-serif;font-size:14px;'>"
+            f"<p>{supplier_greeting('GHI')}</p>"
+            f"<p>See attached for our <strong>PO {order_id}</strong>:{door_txt}</p>"
+            f"<p><strong>Total Qty All SKUS: {total_units}</strong></p>"
+            f"{STOCK_CHECK_ASK}"
+            f"{SIGNATURE_HTML}</div>")
+    subject = f"{po_tag(order_id, 'GHI')} - Cabinets For Contractors order sheet"
+    to_addr = (SUPPLIER_INFO.get("GHI") or {}).get("email", "")
+    if not to_addr:
+        return {"status": "error", "message": "no GHI email in SUPPLIER_INFO"}
+
+    from email_sender import create_gmail_draft
+    res = create_gmail_draft(to_addr, subject, html,
+                             [{"filename": f"CFC_PO_{order_id}_GHI.xlsx",
+                               "content": xlsx_bytes,
+                               "mime": ("application/vnd.openxmlformats-"
+                                        "officedocument.spreadsheetml.sheet")}])
+    if not res.get("success"):
+        return {"status": "error", "message": res.get("error")}
+    return {"status": "ok", "order_id": order_id, "supplier": "GHI",
+            "draft_id": res["draft_id"], "to": to_addr, "subject": subject,
+            "units": total_units,
+            "attachment": f"CFC_PO_{order_id}_GHI.xlsx",
+            "note": "draft only — nothing sent, no supplier_orders row touched"}
+
+
 @supplier_order_router.post("/supplier-orders/send-ghi-sheet/{order_id}")
 async def send_ghi_sheet(order_id: str, sheet: UploadFile = File(...),
                          _: bool = Depends(require_admin)):

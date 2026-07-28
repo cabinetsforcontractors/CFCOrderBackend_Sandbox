@@ -106,18 +106,21 @@ async def preview_template(template_id: str):
 @email_router.post("/orders/{order_id}/draft-invoice")
 async def draft_invoice(order_id: str, to: str = "", shipping: float = 0.0,
                         square_link: str = "", tariff_rate: float = 0.08,
-                        auto_link: bool = True):
-    """BEAT 3: render the v4 invoice (template + PDF) into a Gmail DRAFT with
-    the PDF attached. Never sends. Empty square_link + auto_link=true (the
-    default, 2026-07-27) -> the robot CREATES the Square payment link itself
-    (INV-{order_id}, grand total). `to` defaults to the order's customer
-    email — pass to=homesupplyplus@gmail.com for test orders."""
+                        auto_link: bool = True, note: str = ""):
+    """BEAT 3: render the v4 invoice (template + PDF + pick list) into a Gmail
+    DRAFT with the PDFs attached. Never sends. Empty square_link +
+    auto_link=true (the default, 2026-07-27) -> the robot CREATES the Square
+    payment link itself (INV-{order_id}, grand total). `to` defaults to the
+    order's customer email — pass to=homesupplyplus@gmail.com for test orders.
+    `note` (2026-07-28) rides the email body and the PDF as a highlighted
+    per-invoice note (the 5731 B09->B09-FH case)."""
     from email_sender import create_invoice_draft
     result = create_invoice_draft(order_id, to_email=to,
                                   shipping_amount=shipping,
                                   square_link=square_link,
                                   tariff_rate=tariff_rate,
-                                  auto_link=auto_link)
+                                  auto_link=auto_link,
+                                  note=note)
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("error"))
     return result

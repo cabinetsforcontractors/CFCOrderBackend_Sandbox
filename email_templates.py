@@ -338,12 +338,20 @@ By clicking the payment link you agree to the following policies:
 <ul style="margin:8px 0 0;padding-left:20px">
 <li>No returns on assembled or installed cabinets.</li>
 <li>20% restocking fee on returned undamaged items in original packaging.</li>
-<li>Damaged items must be noted on the delivery receipt and reported within 48 hours of delivery.</li>
+<li>Damaged items must be noted on the BOL, no exceptions, and reported within 48 hours of delivery.</li>
 <li>Buyer is responsible for verifying all measurements before ordering &mdash; we cannot accept returns for incorrect sizing.</li>
-<li>Minor color variation between door samples and production run is normal and not grounds for return.</li>
-<li>Shipping quotes are estimates; final shipping cost may vary for remote locations.</li>
+<li>Warehouse pickups: it is your responsibility to check the order at pickup and confirm every SKU ordered is present and accounted for &mdash; once you leave the warehouse, no claims can be made for missing items.</li>
 </ul>
 </div>"""
+
+    # Optional per-invoice note (William 2026-07-28, the 5731 B09->B09-FH case):
+    # rides only when the door passes one; renders between the address blocks
+    # and the items table so it is read before the lines.
+    note = (order.get("invoice_note") or "").strip()
+    note_block = (
+        f"""<div style="background:#FEF3C7;border:1px solid #F59E0B;border-radius:6px;padding:12px 16px;margin:0 0 18px;font-size:13px;color:rgb(51,51,51);line-height:1.6"><strong>&#128221; Note about your order:</strong> {note}</div>"""
+        if note else ""
+    )
 
     return f"""<div style="font-family:'Open Sans',Helvetica,Arial,sans-serif;font-size:14px;padding:20px">
 <div style="max-width:660px;margin:0px auto;padding:28px;border:1px solid rgb(229,229,229)">
@@ -355,8 +363,9 @@ By clicking the payment link you agree to the following policies:
 <td style="vertical-align:top;width:50%"><strong>Billing Info</strong><br>{company}<br>{customer}<br>{street}{('<br>' + street2) if street2 else ''}<br>{csz}<br>{phone}<br>{email}</td>
 <td style="vertical-align:top;width:50%"><strong>Shipping Info</strong><br>{company}<br>{street}{('<br>' + street2) if street2 else ''}<br>{csz}</td>
 </tr></tbody></table>
+{note_block}
 <table style="color:rgb(51,51,51);width:100%;border-collapse:collapse">
-<thead><tr style="border-bottom:2px solid #ddd"><th style="text-align:left;padding:8px 6px">Items</th><th style="text-align:center;padding:8px 6px">Qty</th><th style="text-align:right;padding:8px 6px">Item Cost</th><th style="text-align:right;padding:8px 6px">Item Total</th></tr></thead>
+<thead><tr style="border-bottom:2px solid #ddd"><th style="text-align:left;padding:8px 6px">SKU's</th><th style="text-align:center;padding:8px 6px">Qty</th><th style="text-align:right;padding:8px 6px">Each</th><th style="text-align:right;padding:8px 6px">Total</th></tr></thead>
 <tbody>{rows}</tbody>
 <tfoot>
 <tr><td colspan="2"></td><td style="padding:6px;text-align:right">Subtotal (in-stock)</td><td style="padding:6px;text-align:right">${total_items:,.2f}</td></tr>
@@ -373,7 +382,7 @@ By clicking the payment link you agree to the following policies:
 {policy_box}
 <p style="text-align:center"><font color="#6fa8dc"><b><a href="{payment_link}">If everything looks in order (CLICK HERE) to make payment</a></b></font></p>
 <p style="color:rgb(51,51,51)">Any questions, just reply or call.</p>
-<p style="color:rgb(51,51,51);margin-top:18px">William Prince<br>Cabinets For Contractors<br>www.CabinetsForContractors.net<br>(770) 990-4885</p>
+<p style="color:rgb(51,51,51);margin-top:18px">CFC Team<br>Cabinets For Contractors<br>www.CabinetsForContractors.net<br>www.CabinetsForContractors.com<br>(770) 990-4885</p>
 </div></div>"""
 
 

@@ -64,14 +64,18 @@ def auto_shipping(order_id: str, order: Dict) -> Dict:
         notes = [n for leg in (q.get("legs") or []) for n in leg.get("notes", [])]
         return {"ok": False,
                 "reason": "not all legs quoted: " + ("; ".join(notes[:4]) or "?")}
+    # William ruling 2026-07-28 ("B"): the markup rides the CARRIER BASE only —
+    # pallet pass-throughs and accessorial fees are added flat, never marked up.
     markup = float(os.environ.get("SHIPPING_MARKUP_PCT", "0") or 0)
-    ship = round(float(q["order_shipping_total"]) * (1 + markup / 100.0), 2)
+    base_total = sum(float(leg.get("carrier_base") or 0)
+                     for leg in (q.get("legs") or []))
+    ship = round(float(q["order_shipping_total"]) + base_total * (markup / 100.0), 2)
     carriers = {leg.get("warehouse"): leg.get("carrier")
                 for leg in (q.get("legs") or [])}
     return {"ok": True, "shipping": ship,
             "detail": (f"carriers {carriers}, residential="
                        f"{q.get('residential')} ({q.get('residential_source')})"
-                       + (f", markup {markup}%" if markup else ""))}
+                       + (f", markup {markup}% on carrier base" if markup else ""))}
 
 
 def run_auto_invoice(order_id: str, triggered_by: str = "new_order",
