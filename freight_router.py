@@ -140,7 +140,12 @@ def _rl_quote(origin_zip, dest_zip, weight, oversized):
         })
     except Exception as e:
         return None, f"R+L error: {e}"
-    q = res.get("quote", res) if isinstance(res, dict) else {}
+    # {"success": false, "quote": null, "error": "..."} is the proxy's R+L-down
+    # shape — "quote": null must NOT win over the fallback (2026-07-28 5737
+    # crash: NoneType.get). Surface the proxy's own error when it has one.
+    if isinstance(res, dict) and res.get("error") and not res.get("quote"):
+        return None, f"R+L: {str(res['error'])[:140]}"
+    q = (res.get("quote") or res) if isinstance(res, dict) else {}
     total = q.get("total_cost")
     if total is None:
         total = q.get("net_charge", q.get("price"))
