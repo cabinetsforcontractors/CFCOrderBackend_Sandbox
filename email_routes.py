@@ -14,9 +14,11 @@ Mount in main.py with:
     app.include_router(email_router)
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends, File, Form, UploadFile
 from pydantic import BaseModel
 from typing import Optional
+
+from auth import require_admin
 
 from email_templates import get_template_list, render_template_preview, TEMPLATE_REGISTRY
 from email_sender import send_order_email, send_email_dry_run, get_email_history
@@ -102,6 +104,33 @@ async def preview_template(template_id: str):
 # =============================================================================
 # SEND ENDPOINTS
 # =============================================================================
+
+@email_router.post("/email/draft-raw")
+async def draft_raw(to: str = Form(...), subject: str = Form(...),
+                    html: UploadFile = File(...),
+                    attachments: list[UploadFile] = File(None),
+                    _: bool = Depends(require_admin)):
+    """Land a fully-composed email as a Gmail DRAFT [admin] — html body +
+    attachments arrive as multipart uploads (byte-faithful), NOTHING sends.
+    The safe carrier for hand-made one-offs (William 2026-07-28, the 5731
+    ship-to case): the human composes, the robot's mailbox carries."""
+    html_body = (await html.read()).decode("utf-8", errors="replace")
+    if not html_body.strip():
+        return {"status": "error", "message": "empty html body"}
+    atts = []
+    for f in (attachments or []):
+        data = await f.read()
+        if data:
+            atts.append({"filename": f.filename, "content": data,
+                         "mime": f.content_type or "application/octet-stream"})
+    from email_sender import create_gmail_draft
+    res = create_gmail_draft(to, subject, html_body, atts)
+    if not res.get("success"):
+        return {"status": "error", "message": res.get("error")}
+    return {"status": "ok", "draft_id": res["draft_id"], "to": to,
+            "subject": subject,
+            "attachments": [a["filename"] for a in atts]}
+
 
 @email_router.post("/orders/{order_id}/draft-invoice")
 async def draft_invoice(order_id: str, to: str = "", shipping: float = 0.0,
