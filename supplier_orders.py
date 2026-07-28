@@ -512,7 +512,6 @@ def build_ghi_xlsx(order_id: str, wdata: Dict) -> Dict:
     if tpl is None:
         return {"error": "no GHI template on this environment — upload one via "
                          "POST /supplier-orders/template/GHI (or set GHI_TEMPLATE_PATH)"}
-    tpl = normalize_ghi_template(tpl)
 
     import supplier_doc_parser as sdp
     with get_db() as conn:
@@ -521,8 +520,15 @@ def build_ghi_xlsx(order_id: str, wdata: Dict) -> Dict:
              for i in wdata["items"]]
     # HARD RULE (William 2026-07-28): never the customer's name in anything a
     # supplier sees — the Ship To field says we send the BOL, nothing more.
-    xlsx, report = sdp.make_ghi_sheets(items, tpl, order_id, fwd,
-                                       ship_to="CFC Will Send BOL")
+    if sdp.is_new_ghi_form(tpl):
+        # eff-7/2 Grp form (William 2026-07-28 "proceed"): values-only
+        # rebuild off the form's MASTER LIST
+        xlsx, report = sdp.make_ghi_sheets_neweff(items, tpl, order_id, fwd,
+                                                  ship_to="CFC Will Send BOL")
+    else:
+        tpl = normalize_ghi_template(tpl)
+        xlsx, report = sdp.make_ghi_sheets(items, tpl, order_id, fwd,
+                                           ship_to="CFC Will Send BOL")
     if report["unplaced"] or report["unmapped_prefix"]:
         return {"error": f"GHI sheet needs review before sending: "
                          f"unplaced={report['unplaced']} unmapped={report['unmapped_prefix']}"}

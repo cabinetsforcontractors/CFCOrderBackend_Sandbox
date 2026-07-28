@@ -521,6 +521,153 @@ def diff_ds_revisions(prev_lines, new_lines):
 # GHI ORDER SHEET GENERATION (outbound) — proven on real order 5155
 # =============================================================================
 
+def is_new_ghi_form(template_bytes):
+    """True for GHI's eff-7/2 'Grp' order form: interactive 'GRP CFC' order
+    tab + a plain-values 'MASTER LIST' data tab (their sheet name carries a
+    trailing space)."""
+    import openpyxl
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(template_bytes), read_only=True)
+        names = {n.strip().upper() for n in wb.sheetnames}
+        wb.close()
+    except Exception:
+        return False
+    return "GRP CFC" in names and "MASTER LIST" in names
+
+
+def make_ghi_sheets_neweff(items, template_bytes, po_number, fwd_map,
+                           company="Cabinets For Contractors", ship_to=""):
+    """Fill GHI's eff-7/2 order form SERVER-SIDE (William 2026-07-28
+    "proceed with GHI dispatch builder").
+
+    The form's GRP CFC tab is formula-driven (line dropdown repopulates the
+    rows), which no server can recompute — so the artifact is rebuilt as a
+    VALUES-ONLY workbook in the same layout GHI accepted and keyed
+    penny-perfect on PO 5731/SO 17247: header block (fields in column C,
+    order number in F1, Ship To = never the customer), then only the ordered
+    lines as QTY | PRODUCT CODE | DESCRIPTION | PRICE | TOTAL COST rows.
+    Codes/descriptions/prices come from the form's own MASTER LIST tab —
+    the only price truth on the form (line-tab literals are stale, standing
+    law). One output tab per cabinet line. Returns (xlsx_bytes, report)
+    shaped exactly like make_ghi_sheets."""
+    import openpyxl
+    from openpyxl.styles import Font
+
+    # 1. MASTER LIST -> per-line catalog {bare token: (code, desc, price)}
+    src = openpyxl.load_workbook(io.BytesIO(template_bytes), read_only=True,
+                                 data_only=True)
+    ml = next(n for n in src.sheetnames
+              if n.strip().upper() == "MASTER LIST")
+    catalog, line_names = {}, {}
+    for row in src[ml].iter_rows(min_row=2, values_only=True):
+        line, code, desc, price = (list(row) + [None] * 4)[:4]
+        if not line or not code:
+            continue
+        mcode = re.search(r"\(([A-Z]+)\)", str(line))
+        if not mcode:
+            continue
+        tab = mcode.group(1)
+        line_names[tab] = str(line).strip()
+        token = norm(code)
+        if token.endswith(tab):
+            token = token[:-len(tab)]
+        try:
+            p = round(float(price), 2)
+        except (TypeError, ValueError):
+            p = None
+        catalog.setdefault(tab, {})[token] = (str(code).strip(),
+                                              str(desc or "").strip(), p)
+    src.close()
+
+    # 2. group ordered items per line tab (same token dance as the legacy
+    # filler: forward map, dialect fixes, pantry composites)
+    by_tab, unmapped = {}, []
+    for it in items:
+        sku = norm(it.get("website_sku"))
+        pre = sku.split("-")[0]
+        tab = GHI_LINE_TAB.get(pre)
+        if not tab:
+            unmapped.append(sku)
+            continue
+        tok = fwd_map.get(it.get("website_sku")) or fwd_map.get(sku)
+        if not tok:
+            body = sku.split("-", 1)[1] if "-" in sku else sku
+            tok = GHI_DIALECT.get(body, body)
+        qty = int(it.get("quantity") or 1)
+        if norm(tok) in GHI_COMPOSITES:
+            for part in GHI_COMPOSITES[norm(tok)]:
+                by_tab.setdefault(tab, []).append(
+                    (norm(part), qty, f"{sku} (composite {tok})"))
+        else:
+            by_tab.setdefault(tab, []).append(
+                (norm(tok).rstrip("*"), qty, sku))
+
+    # 3. values-only workbook, GRP CFC layout
+    out_wb = openpyxl.Workbook()
+    out_wb.remove(out_wb.active)
+    placed, unplaced, tabs = [], [], []
+    bold = Font(bold=True)
+    for tab, wants in by_tab.items():
+        cat = catalog.get(tab)
+        if not cat:
+            unplaced.extend({"token": t, "qty": q, "source": s,
+                             "reason": f"no line {tab} on MASTER LIST"}
+                            for t, q, s in wants)
+            continue
+        ws = out_wb.create_sheet(
+            title=("GRP CFC" if len(by_tab) == 1 else tab))
+        ws["F1"] = str(po_number)                       # our order number
+        ws["A3"], ws["C3"] = "Company Name:", company
+        ws["A5"], ws["C5"] = "PO Number:", str(po_number)
+        ws["A8"], ws["C8"] = ("Shipping Information",
+                              ship_to or "CFC Will Send BOL")
+        ws["A11"], ws["C11"] = "Phone Number", "(770) 990-4885"
+        ws["A14"], ws["C14"] = "Select Cabinet Line", line_names.get(tab, tab)
+        ws["A15"], ws["C15"] = "Cabinet Assembly", "NO"
+        ws["F14"] = "Cabinet Order Total"
+        for cell in ("A3", "A5", "A8", "A11", "A14", "A15", "F14"):
+            ws[cell].font = bold
+        headers = ["QTY", "PRODUCT CODE", "DESCRIPTION", "PRICE", "",
+                   "TOTAL COST"]
+        for c, h in enumerate(headers, start=1):
+            cell = ws.cell(row=17, column=c, value=h)
+            cell.font = bold
+        r, total = 18, 0.0
+        for tok, qty, srcsku in wants:
+            hit = cat.get(tok)
+            if not hit:
+                for k in cat:                        # B09 -> B09-FH class
+                    if k.startswith(tok) or tok.startswith(k):
+                        hit = cat[k]
+                        break
+            if not hit:
+                unplaced.append({"token": tok, "qty": qty, "source": srcsku,
+                                 "reason": "not on MASTER LIST"})
+                continue
+            code, desc, price = hit
+            ws.cell(row=r, column=1, value=qty)
+            ws.cell(row=r, column=2, value=code)
+            ws.cell(row=r, column=3, value=desc)
+            if price is not None:
+                ws.cell(row=r, column=4, value=price)
+                ws.cell(row=r, column=6, value=round(price * qty, 2))
+                total += round(price * qty, 2)
+            placed.append({"tab": tab, "token": tok, "qty": qty,
+                           "source": srcsku})
+            r += 1
+        ws["H14"] = round(total, 2)
+        for col, width in (("A", 6), ("B", 18), ("C", 46), ("D", 10),
+                           ("E", 4), ("F", 12), ("H", 12)):
+            ws.column_dimensions[col].width = width
+        tabs.append(tab)
+
+    buf = io.BytesIO()
+    out_wb.save(buf)
+    report = {"placed": placed, "unplaced": unplaced,
+              "unmapped_prefix": unmapped, "tabs": tabs}
+    return buf.getvalue(), report
+
+
 def make_ghi_sheets(items, template_bytes, po_number, fwd_map,
                     company="Cabinets For Contractors", ship_to=""):
     """Fill the GHI xlsx order sheet (Downloads 5707.xlsx format) from website-

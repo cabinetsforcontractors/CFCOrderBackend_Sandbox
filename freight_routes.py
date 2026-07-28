@@ -451,8 +451,12 @@ async def ghi_order_sheet(order_id: str, template: UploadFile = File(None),
     # HARD RULE (William 2026-07-28): never the customer's name in anything a
     # supplier sees.
     try:
-        xlsx, report = sdp.make_ghi_sheets(items, tpl_bytes, order_id, fwd,
-                                           ship_to="CFC Will Send BOL")
+        if sdp.is_new_ghi_form(tpl_bytes):
+            xlsx, report = sdp.make_ghi_sheets_neweff(
+                items, tpl_bytes, order_id, fwd, ship_to="CFC Will Send BOL")
+        else:
+            xlsx, report = sdp.make_ghi_sheets(items, tpl_bytes, order_id, fwd,
+                                               ship_to="CFC Will Send BOL")
     except Exception as e:
         return {"status": "error", "message": f"sheet generation failed: {e}"}
     if report_only or report["unplaced"] or report["unmapped_prefix"]:
