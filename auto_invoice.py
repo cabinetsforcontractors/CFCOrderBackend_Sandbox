@@ -115,6 +115,48 @@ def run_auto_invoice(order_id: str, triggered_by: str = "new_order",
             if not cur.fetchone()[0]:
                 return _needs_human(out, order_id, "no line items synced yet")
 
+    # WILLIAM'S COMMENTS GATE (2026-07-28, "Beat C proceed" — the 5731
+    # lesson): a customer comment can contradict the order (ship-to override,
+    # special instructions). ANY non-empty comment = a human reads it first.
+    comments = (order.get("comments") or "").strip()
+    if comments:
+        return _needs_human(out, order_id,
+                            "customer comments on the order — read them before "
+                            "invoicing: “" + comments[:400] + "”")
+
+    # SUBSTITUTION INTAKE TRIGGER (William 2026-07-28, "yes"): lines that
+    # don't exist in the supplier's real catalog (the B09 case) get a
+    # substitution proposal (customer approves the swap) — the invoice waits.
+    try:
+        from catalog_check import phantom_sku_check
+        phantom = phantom_sku_check(order_id).get("flagged") or []
+    except Exception as e:
+        print(f"[AUTO-INVOICE] catalog check failed {order_id}: {e}")
+        phantom = []
+    if phantom:
+        bits = []
+        for f in phantom:
+            if f.get("candidate_sku") and not dry_run:
+                try:
+                    from substitutions import create_substitution_proposal
+                    r = create_substitution_proposal(
+                        order_id, f["sku"], f["candidate_sku"],
+                        reason="catalog_error")
+                    f["proposal"] = r.get("status")
+                except Exception as e:
+                    f["proposal"] = f"error: {e}"
+            bits.append(
+                f"{f['sku']}: supplier catalog has no {f['token']}"
+                + (f" — substitution proposal ({f['candidate_sku']}): "
+                   f"{f.get('proposal', 'dry-run, none sent')}"
+                   if f.get("candidate_sku") else " — no clear substitute"))
+        out["phantom_lines"] = phantom
+        return _needs_human(
+            out, order_id,
+            "catalog check — " + "; ".join(bits) +
+            f". Once resolved, re-run POST /orders/{order_id}/auto-invoice"
+            f"?dry_run=false")
+
     ship = auto_shipping(order_id, order)
     if not ship["ok"]:
         return _needs_human(out, order_id, f"freight quote failed — "

@@ -287,6 +287,11 @@ def build_proposal_email(order: Dict, sub: Dict) -> str:
     qty = sub.get("quantity") or 1
     price = float(sub.get("keep_price") or 0)
     line_total = price * qty
+    # wording branch (William 2026-07-28): catalog errors aren't stock-outs
+    catalog_err = (sub.get("reason") or "") == "catalog_error"
+    problem_phrase = ("isn't available as listed"
+                      if catalog_err else "is out of stock")
+    row_label = "Not available" if catalog_err else "Out of stock"
 
     return f"""
 <div style='color:#393939;font-family:"Open Sans","Helvetica Neue",Helvetica,Arial,sans-serif;font-size:13px;line-height:1.5;max-width:50em;'>
@@ -295,7 +300,7 @@ def build_proposal_email(order: Dict, sub: Dict) -> str:
   <div style="border:1px solid #f0ad4e;background:#fdf7ec;border-radius:6px;padding:14px 16px;margin:12px 0;">
     <p style="margin:0 0 8px 0;">Hi {first},</p>
     <p style="margin:0 0 8px 0;">
-      One item on your order <strong>#{order_id}</strong> is out of stock:
+      One item on your order <strong>#{order_id}</strong> {problem_phrase}:
       <strong>{sub['original_sku']}</strong> — {sub.get('original_name', '')}.
     </p>
     <p style="margin:0 0 8px 0;">
@@ -325,7 +330,7 @@ def build_proposal_email(order: Dict, sub: Dict) -> str:
     </thead>
     <tbody>
       <tr style="color:#b0b0b0;">
-        <td style="{td}">Out of stock</td>
+        <td style="{td}">{row_label}</td>
         <td style="{td}"><s>{sub['original_sku']}</s></td>
         <td style="{td}"><s>{sub.get('original_name', '')}</s></td>
         <td style="{td}" align="right"><s>${price:,.2f}</s></td>
@@ -528,6 +533,7 @@ def create_substitution_proposal(order_id: str, original_sku: str,
         "keep_price": float(line.get("final_price") or 0),
         "customer_email": order.get("customer_email") or "",
         "customer_name": order.get("customer_name") or "",
+        "reason": reason,
     }
     html = build_proposal_email(order, sub)
     subject = f"Order #{order_id} — one item needs your OK"

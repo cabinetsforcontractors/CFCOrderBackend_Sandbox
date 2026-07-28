@@ -196,24 +196,31 @@ def run_new_order_watch(conn) -> dict:
             _record(conn, oid, "mode-off")
             out["recorded"].append({oid: "mode-off"})
             continue
+        # BEAT C (William 2026-07-27 "lets make it real"; EXTENDED TO NATIVE
+        # .NET ORDERS 2026-07-28 "Beat C proceed" — the 5731 blind spot): a
+        # first-seen order invoices ITSELF whichever site it came from.
+        # Guarded inside run_auto_invoice (env gate, test registry, already
+        # invoiced/paid, comments gate, catalog check, quote-complete;
+        # failures alert orders@, never block the watcher).
+        def _beat_c(target_oid):
+            try:
+                from auto_invoice import run_auto_invoice
+                out.setdefault("auto_invoiced", []).append(
+                    run_auto_invoice(target_oid, triggered_by="new_order_watch"))
+            except Exception as e:
+                print(f"[NEW-ORDER] auto-invoice hook failed {target_oid}: {e}")
+
         if mode == "com":
             ref = _order_reference(oid)
             if not ref.upper().startswith("COM-"):
+                # native order: B2BWave already sent the New Order email, so
+                # no clone — but Beat C applies all the same.
                 _record(conn, oid, "native-covered")
                 out["recorded"].append({oid: "native-covered"})
+                _beat_c(oid)
                 continue
         out["notified"].append(_notify_order(conn, oid))
-        # BEAT C (William 2026-07-27, "lets make it real"): a first-seen
-        # order invoices ITSELF — quote + Square link + v4 invoice email.
-        # Guarded inside run_auto_invoice (env gate, test registry, already
-        # invoiced/paid, quote-complete; failures alert orders@, never block
-        # the watcher).
-        try:
-            from auto_invoice import run_auto_invoice
-            out.setdefault("auto_invoiced", []).append(
-                run_auto_invoice(oid, triggered_by="new_order_watch"))
-        except Exception as e:
-            print(f"[NEW-ORDER] auto-invoice hook failed {oid}: {e}")
+        _beat_c(oid)
     return out
 
 
