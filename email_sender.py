@@ -304,6 +304,7 @@ def create_invoice_draft(
     tariff_rate: float = 0.08,
     auto_link: bool = True,
     note: str = "",
+    residential: str = "",
 ) -> dict:
     """BEAT 3 (William 2026-07-26): render the v4 invoice (template + PDF)
     from the order row and land it as a GMAIL DRAFT with the PDF attached —
@@ -328,6 +329,11 @@ def create_invoice_draft(
         # William 2026-07-28 (the 5731 B09->B09-FH case): a per-invoice note
         # rides the email body AND the PDF when passed.
         order_data["invoice_note"] = note.strip()
+    # classification box mirrors the actual quote (William 2026-07-28):
+    # residential="true"/"false" declares how the shipping number was quoted;
+    # empty = unknown -> the historical residential box.
+    if (residential or "").strip().lower() in ("true", "false"):
+        order_data["quoted_residential"] = residential.strip().lower() == "true"
 
     subtotal = float(order_data.get("order_total") or 0)
     tariff = round(subtotal * tariff_rate, 2)

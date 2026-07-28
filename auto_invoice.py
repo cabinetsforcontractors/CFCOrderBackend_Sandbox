@@ -73,6 +73,7 @@ def auto_shipping(order_id: str, order: Dict) -> Dict:
     carriers = {leg.get("warehouse"): leg.get("carrier")
                 for leg in (q.get("legs") or [])}
     return {"ok": True, "shipping": ship,
+            "residential": q.get("residential"),
             "detail": (f"carriers {carriers}, residential="
                        f"{q.get('residential')} ({q.get('residential_source')})"
                        + (f", markup {markup}% on carrier base" if markup else ""))}
@@ -187,6 +188,9 @@ def run_auto_invoice(order_id: str, triggered_by: str = "new_order",
     order_data["order_id"] = order_id
     order_data["shipping_result"] = out["totals"]
     order_data["payment_link"] = link["url"]
+    # classification box mirrors the actual quote (William 2026-07-28)
+    if not order.get("is_pickup"):
+        order_data["quoted_residential"] = ship.get("residential")
     try:
         from checkout import generate_checkout_token
         base = os.environ.get("CHECKOUT_BASE_URL", "").strip() or \

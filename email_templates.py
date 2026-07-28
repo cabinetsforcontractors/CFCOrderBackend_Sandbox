@@ -324,8 +324,19 @@ def _render_payment_link(order: Dict) -> str:
     if not rows:
         rows = "<tr><td colspan='4' style='padding:8px 6px;color:#888'>(line items pending sync)</td></tr>"
 
+    # WILLIAM RULING 2026-07-28: the classification box reflects how the order
+    # was ACTUALLY quoted. quoted_residential True/unknown -> residential box
+    # (the historical safe default); False -> commercial box (mirror warning,
+    # reply-first — there is no confirm-residential door).
     confirm_commercial_url = order.get("confirm_commercial_url", "#")
-    residential_notice = f"""<div style="background:#EFF6FF;border:1px solid #BFDBFE;border-radius:8px;padding:16px 18px;margin:20px 0">
+    if order.get("quoted_residential") is False:
+        residential_notice = """<div style="background:#EFF6FF;border:1px solid #BFDBFE;border-radius:8px;padding:16px 18px;margin:20px 0">
+<p style="margin:0 0 8px;font-weight:700;color:#1E40AF;font-size:14px">&#128205; Delivery Address Classification</p>
+<p style="margin:0 0 8px;font-size:13px;color:#1E40AF;line-height:1.6">Your delivery address has been classified as a <strong>commercial address</strong> — no residential delivery fees are included in this invoice.</p>
+<p style="margin:0;font-size:13px;color:#1E40AF;line-height:1.6">If this is actually a <strong>residential address</strong> (home delivery, liftgate needed), <strong>do not pay this invoice</strong> — reply to this email first, as the shipping cost will change.</p>
+</div>"""
+    else:
+        residential_notice = f"""<div style="background:#EFF6FF;border:1px solid #BFDBFE;border-radius:8px;padding:16px 18px;margin:20px 0">
 <p style="margin:0 0 8px;font-weight:700;color:#1E40AF;font-size:14px">&#128205; Delivery Address Classification</p>
 <p style="margin:0 0 8px;font-size:13px;color:#1E40AF;line-height:1.6">Your delivery address has been classified as a <strong>residential address</strong>. Residential deliveries include liftgate service at delivery.</p>
 <p style="margin:0 0 14px;font-size:13px;color:#1E40AF;line-height:1.6">If this is actually a <strong>commercial address</strong> (business with a loading dock or forklift), <strong>do not pay this invoice</strong>.</p>

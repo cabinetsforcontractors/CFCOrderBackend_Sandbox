@@ -135,7 +135,8 @@ async def draft_raw(to: str = Form(...), subject: str = Form(...),
 @email_router.post("/orders/{order_id}/draft-invoice")
 async def draft_invoice(order_id: str, to: str = "", shipping: float = 0.0,
                         square_link: str = "", tariff_rate: float = 0.08,
-                        auto_link: bool = True, note: str = ""):
+                        auto_link: bool = True, note: str = "",
+                        residential: str = ""):
     """BEAT 3: render the v4 invoice (template + PDF + pick list) into a Gmail
     DRAFT with the PDFs attached. Never sends. Empty square_link +
     auto_link=true (the default, 2026-07-27) -> the robot CREATES the Square
@@ -149,7 +150,8 @@ async def draft_invoice(order_id: str, to: str = "", shipping: float = 0.0,
                                   square_link=square_link,
                                   tariff_rate=tariff_rate,
                                   auto_link=auto_link,
-                                  note=note)
+                                  note=note,
+                                  residential=residential)
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("error"))
     return result
