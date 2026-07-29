@@ -319,6 +319,71 @@ def _sweep_unread(order_emails, known_ids, kw_rules=()):
     return tasks
 
 
+def _sweep_info(known_ids, kw_rules=()):
+    """INFO TASKS from the LEDGER, not the unread search (William 2026-07-29,
+    round 2 of the "Text from nationwide" lesson): an info email is an
+    instruction — reading it must not make the task vanish. Any inbox mail
+    from our own addresses in the last 7 days becomes/refreshes an info
+    task; it closes only by Done/action (exempt from the gone-sweep)."""
+    tasks = []
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT DISTINCT ON (thread_id)
+                           message_id, thread_id, from_addr, subject,
+                           email_date, order_ids
+                    FROM email_ledger
+                    WHERE folder = 'inbox'
+                      AND email_date > NOW() - INTERVAL '7 days'
+                    ORDER BY thread_id, email_date DESC
+                """)
+                rows = cur.fetchall()
+    except Exception as e:
+        print(f"[TASKS] info sweep ledger read failed: {e}")
+        return tasks
+    own = OWN_ADDRESSES | {FLAG_INBOX.lower()}
+    for mid, tid, frm, subj, edate, oids in rows:
+        addr = _sender_address(frm or "")
+        if addr not in own:
+            continue
+        subj = subj or ""
+        if HANDOFF_RE.search(subj) or is_own_automation_subject(subj):
+            continue
+        oid = None
+        for cand in str(oids or "").split(","):
+            oid = _valid_oid(cand.strip(), known_ids)
+            if oid:
+                break
+        kw_text = subj
+        try:
+            c = get_email_content(mid)
+            body = (c or {}).get("body") or ""
+            kw_text = f"{subj} {body[:1500]}"
+            if not oid:
+                oid = _valid_oid(extract_order_id(body[:1500]), known_ids)
+        except Exception:
+            pass
+        tasks.append({
+            "task_key": f"thread:{tid or mid}", "type": "info",
+            "title": subj or "(no subject)",
+            "detail": "info from William"
+                      + (f" — order #{oid}" if oid else "")
+                      + _keyword_tags(kw_text, kw_rules),
+            "order_id": oid, "gmail_id": mid, "thread_id": tid,
+            "date_str": edate.isoformat() if edate else "",
+        })
+    return tasks
+
+
+def is_own_automation_subject(subject: str) -> bool:
+    try:
+        from gmail_sync import is_own_automation_email
+        return is_own_automation_email(subject)
+    except Exception:
+        return False
+
+
 def _sweep_robot_flags(known_ids):
     tasks = []
     for m in search_emails(f"in:sent to:{FLAG_INBOX} newer_than:3d", 20):
@@ -512,6 +577,7 @@ def run_task_sweep(conn) -> dict:
         conn.rollback()
     for name, fn, args in [("unread", _sweep_unread,
                             (order_emails, known_ids, kw_rules)),
+                           ("info", _sweep_info, (known_ids, kw_rules)),
                            ("flags", _sweep_robot_flags, (known_ids,)),
                            ("drafts", _sweep_drafts, (known_ids,)),
                            ("noreply", _sweep_no_reply, (known_ids,))]:
@@ -553,7 +619,8 @@ def run_task_sweep(conn) -> dict:
         cur.execute("""
             UPDATE task_board_items
             SET status = 'gone', updated_at = NOW()
-            WHERE type NOT IN ('manual', 'plaud', 'follow-up') AND status = 'open'
+            WHERE type NOT IN ('manual', 'plaud', 'follow-up', 'info')
+              AND status = 'open'
               AND last_seen < %s
         """, (sweep_start,))
         gone = cur.rowcount
