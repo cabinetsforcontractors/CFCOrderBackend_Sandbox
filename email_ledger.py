@@ -488,14 +488,25 @@ def run_ledger_cycle(hours_back: int = 24) -> Dict:
         rl = process_rl_delivered(hours_back=hours_back)
     except Exception as e:
         rl = {"errors": [str(e)]}
+    # FREIGHT-BILL AUDITOR (Phase 2, William 2026-07-29): unprocessed BILL2
+    # reports audit themselves each cycle (idempotent per message + per
+    # (pro, report) stamp)
+    bill = {}
+    try:
+        from rl_bill_audit import process_bill2_reports
+        bill = process_bill2_reports(hours_back=hours_back)
+    except Exception as e:
+        bill = {"errors": [str(e)]}
     return {"ingested": ing.get("new_rows", 0), "seen": ing.get("seen", 0),
             "facts_orders": reb.get("orders", 0),
             "stamped": app.get("stamped", []),
             "rl_delivered": {k: rl.get(k) for k in
                              ("drafted", "mismatched", "unmatched")
                              if rl.get(k)},
+            "bill2": {k: bill.get(k) for k in ("audited", "already")
+                      if bill.get(k)},
             "errors": (ing.get("errors") or []) + (app.get("errors") or [])
-                      + (rl.get("errors") or [])}
+                      + (rl.get("errors") or []) + (bill.get("errors") or [])}
 
 
 # pre-cutover name, kept so old callers/notes stay valid
@@ -547,6 +558,15 @@ def ledger_rl_delivered(hours_back: int = 48, dry_run: bool = True,
     (default) reports the decisions without stamping, drafting, or alerting."""
     from rl_delivered import process_rl_delivered
     return process_rl_delivered(hours_back=hours_back, dry_run=dry_run)
+
+
+@ledger_router.post("/ledger/rl-bill-audit/{message_id}")
+def ledger_rl_bill_audit(message_id: str, dry_run: bool = True,
+                         _: bool = Depends(require_admin)):
+    """Run the freight-bill auditor on ONE BILL2 email [admin]. dry_run=true
+    (default) parses + matches + compares with ZERO writes and no email."""
+    from rl_bill_audit import audit_bill2_message
+    return audit_bill2_message(message_id, dry_run=dry_run)
 
 
 @ledger_router.post("/ledger/apply")
