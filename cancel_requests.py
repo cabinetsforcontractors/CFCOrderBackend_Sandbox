@@ -48,7 +48,7 @@ from db_helpers import get_db
 PUBLIC_BASE_URL = os.environ.get("CHECKOUT_BASE_URL",
                                  "https://cfcorderbackend-sandbox.onrender.com").strip().rstrip("/")
 INTERNAL_ALERT_EMAIL = os.environ.get("WAREHOUSE_NOTIFICATION_EMAIL",
-                                      "cabinetsforcontractors@gmail.com").strip()
+                                      "orders@cabinetsforcontractors.com").strip()
 
 cancel_request_router = APIRouter(tags=["cancel-requests"])
 

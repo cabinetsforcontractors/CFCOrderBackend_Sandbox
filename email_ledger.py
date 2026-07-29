@@ -497,6 +497,13 @@ def run_ledger_cycle(hours_back: int = 24) -> Dict:
         bill = process_bill2_reports(hours_back=hours_back)
     except Exception as e:
         bill = {"errors": [str(e)]}
+    # NEW-CUSTOMER NOTIFICATION GUARD (at most once per NOTIF_GUARD_HOURS,
+    # one API list call — the guard itself decides whether it's due)
+    try:
+        from b2bwave_notif_guard import run_notif_guard
+        run_notif_guard(dry_run=False)
+    except Exception as e:
+        print(f"[LEDGER] notif guard failed: {e}")
     return {"ingested": ing.get("new_rows", 0), "seen": ing.get("seen", 0),
             "facts_orders": reb.get("orders", 0),
             "stamped": app.get("stamped", []),
@@ -558,6 +565,15 @@ def ledger_rl_delivered(hours_back: int = 48, dry_run: bool = True,
     (default) reports the decisions without stamping, drafting, or alerting."""
     from rl_delivered import process_rl_delivered
     return process_rl_delivered(hours_back=hours_back, dry_run=dry_run)
+
+
+@ledger_router.post("/b2bwave/notif-guard")
+def notif_guard_now(dry_run: bool = True, force: bool = True,
+                    _: bool = Depends(require_admin)):
+    """Run the new-customer notification guard on demand [admin].
+    dry_run=true (default) lists strays without patching."""
+    from b2bwave_notif_guard import run_notif_guard
+    return run_notif_guard(dry_run=dry_run, force=force)
 
 
 @ledger_router.post("/ledger/rl-bill-audit/{message_id}")

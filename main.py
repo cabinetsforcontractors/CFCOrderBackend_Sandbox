@@ -322,7 +322,14 @@ def start_auto_sync():
         f"email_allowlist={'ON' if _email_allowlist_on else 'OFF'} "
         f"b2bwave_mutations={'ENABLED' if _b2b_mutations_on else 'DISABLED'}"
     )
-    if SYNC_SERVICE_LOADED:
+    # SINGLE-ROBOT GATE (William 2026-07-29, the two-services discovery):
+    # both Render services run this repo against ONE database — set
+    # BACKGROUND_LOOPS_ENABLED=false on the service that should only serve
+    # the API (the old app keeps working; only the watcher/sync loops stop).
+    if os.environ.get("BACKGROUND_LOOPS_ENABLED", "true").lower() == "false":
+        print("[AUTO-SYNC] BACKGROUND_LOOPS_ENABLED=false — this service "
+              "serves the API only; another service runs the loops")
+    elif SYNC_SERVICE_LOADED:
         start_auto_sync_thread(run_gmail_sync, run_square_sync)
     else:
         print("[AUTO-SYNC] sync_service not loaded, auto-sync disabled")

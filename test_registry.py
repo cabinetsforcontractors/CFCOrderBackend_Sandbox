@@ -74,13 +74,22 @@ def _ensure_table():
 
 
 def test_order_ids() -> set:
-    """The registry as a set of order-id strings. Never raises."""
+    """The registry as a set of order-id strings, PLUS the storefront
+    quote CLASS (storefront note 2026-07-29, William accepted: any record
+    whose comments carry the '[CFC-COM] … saved quote' marker is a dealer's
+    saved-quote Temporary consuming a number — they mint continuously, so a
+    rule beats a list). Never raises."""
     try:
         _ensure_table()
         with get_db() as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT order_id FROM test_orders")
-                return {str(r[0]) for r in cur.fetchall()}
+                ids = {str(r[0]) for r in cur.fetchall()}
+                cur.execute("""SELECT order_id FROM orders
+                               WHERE comments ILIKE '%%[CFC-COM]%%'
+                                 AND comments ILIKE '%%saved quote%%'""")
+                ids |= {str(r[0]) for r in cur.fetchall()}
+                return ids
     except Exception as e:
         print(f"[TEST-REGISTRY] read failed ({e}) — using seed fallback")
         return set(SEED)

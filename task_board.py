@@ -71,7 +71,10 @@ OWN_ADDRESSES = {a.strip().lower() for a in os.environ.get(
     "OWN_EMAIL_ADDRESSES",
     "orders@cabinetsforcontractors.com,cabinetsforcontractors@gmail.com"
 ).split(",") if a.strip()}
-FLAG_INBOX = os.environ.get("FLAG_INBOX_EMAIL", "wpjob1@gmail.com").strip()
+# Identity sweep 2026-07-29: robot alerts live in orders@ now — the
+# robot-flag sweep watches the box the alerts actually go to (env wins).
+FLAG_INBOX = os.environ.get("FLAG_INBOX_EMAIL",
+                            "orders@cabinetsforcontractors.com").strip()
 
 NO_REPLY_BUSINESS_DAYS = 2
 ORDER_TYPES = {"unpaid-order", "supplier-action", "shipment-watch",

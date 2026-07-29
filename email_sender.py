@@ -38,8 +38,10 @@ from db_helpers import get_db, get_order_by_id
 # Outbound identity: EMAIL_FROM_ADDRESS switch (orders@ after Gmail alias
 # verification, William 2026-07-19) wins; legacy william@ header is the
 # unset default. Same switch as email_identity.py.
+# Identity sweep 2026-07-29 (item 2 of the build-1-7 wave): the robot's
+# default sender name is the company, not a person — env still wins.
 CFC_SENDER_NAME = os.environ.get(
-    "EMAIL_FROM_NAME", "William Prince — Cabinets For Contractors").strip()
+    "EMAIL_FROM_NAME", "Cabinets For Contractors").strip()
 # Fallback re-homed 2026-07-26: ALL @cabinetsforcontractors.NET mailboxes were
 # DELETED (GoDaddy M365 cleanup, marketing-lane note) — mail to them bounces.
 CFC_SENDER_EMAIL = (os.environ.get("EMAIL_FROM_ADDRESS", "").strip()

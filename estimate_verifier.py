@@ -47,7 +47,7 @@ from typing import Dict, List, Optional
 from db_helpers import get_db
 
 INTERNAL_ALERT_EMAIL = os.environ.get("WAREHOUSE_NOTIFICATION_EMAIL",
-                                      "cabinetsforcontractors@gmail.com").strip()
+                                      "orders@cabinetsforcontractors.com").strip()
 
 CANDIDATE_QUERY_PDF = ('has:attachment filename:pdf '
                        '(ghicabinets OR QUOFL OR "Quotation_S" OR Estimate_ OR '
