@@ -712,12 +712,15 @@ def get_rundown(_: bool = Depends(require_admin)):
     with get_db() as conn:
         _ensure_tables(conn)
         with conn.cursor() as cur:
+            # the orders.payment_received check keeps UNSTAMPED phantom
+            # events out of the rundown (the 5707 Gerald case)
             cur.execute("""
                 SELECT e.order_id, e.event_data, e.created_at,
                        COALESCE(o.company_name, o.customer_name, '')
                 FROM order_events e LEFT JOIN orders o ON o.order_id = e.order_id
                 WHERE e.event_type = 'payment_received'
                   AND e.created_at > NOW() - INTERVAL '24 hours'
+                  AND COALESCE(o.payment_received, TRUE) = TRUE
                 ORDER BY e.created_at DESC
             """)
             out["payments_last24h"] = [
