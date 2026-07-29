@@ -127,8 +127,55 @@ def _ensure_tables(conn):
                 updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
             )
         """)
+        # v3 (William approved 2026-07-29): keyword-learning rules — the
+        # matcher reads this table so tasks get smarter over time without a
+        # deploy; William + the robot add rows as lessons occur.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS task_keywords (
+                id SERIAL PRIMARY KEY,
+                pattern TEXT NOT NULL,
+                label   TEXT NOT NULL,
+                enabled BOOLEAN DEFAULT TRUE,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            )
+        """)
+        cur.execute("SELECT COUNT(*) FROM task_keywords")
+        if cur.fetchone()[0] == 0:
+            for pat, label in [
+                ("out of stock", "stock issue"),
+                ("backorder", "stock issue"),
+                ("ready to ship", "ready to ship"),
+                ("ready for pickup", "ready to ship"),
+                ("has been delivered", "delivery notice"),
+                ("out for delivery", "delivery notice"),
+                ("damage", "damage mentioned"),
+                ("missing", "shortage claim"),
+                ("cancel", "cancel mentioned"),
+                ("PAYMENT LINK", "old-era invoice email"),
+                ("password reset", "password reset"),
+            ]:
+                cur.execute("""INSERT INTO task_keywords (pattern, label)
+                               VALUES (%s, %s)""", (pat, label))
     conn.commit()
     _table_ready = True
+
+
+def _keyword_rules(conn):
+    with conn.cursor() as cur:
+        cur.execute("""SELECT pattern, label FROM task_keywords
+                       WHERE enabled = TRUE""")
+        return cur.fetchall()
+
+
+def _keyword_tags(text: str, rules) -> str:
+    """' ⚡label1 ⚡label2' for every enabled rule whose pattern appears in
+    text (case-insensitive substring)."""
+    hits = []
+    low = (text or "").lower()
+    for pattern, label in rules:
+        if pattern.lower() in low and label not in hits:
+            hits.append(label)
+    return "".join(f" ⚡{h}" for h in hits)
 
 
 # =============================================================================
@@ -179,7 +226,7 @@ def _valid_oid(oid, known_ids):
     return oid if oid in known_ids else None
 
 
-def _sweep_unread(order_emails, known_ids):
+def _sweep_unread(order_emails, known_ids, kw_rules=()):
     """Beat 5 (2026-07-27): ONE task per THREAD (the Nationwide collapse —
     a long conversation is one board item, '3 unread in thread', not three
     rows) and LEDGER-FED metadata: messages already in the email ledger cost
@@ -240,11 +287,12 @@ def _sweep_unread(order_emails, known_ids):
         if not oid:
             oid = _valid_oid(extract_order_id(mm["subject"]), known_ids)
         extra = f" ({t['count']} unread in thread)" if t["count"] > 1 else ""
+        tags = _keyword_tags(mm["subject"], kw_rules)
         tasks.append({
             "task_key": f"thread:{tid}", "type": f"unread-{kind}",
             "title": mm["subject"] or "(no subject)",
             "detail": f"from {who or addr}{extra}"
-                      + (f" — order #{oid}" if oid else ""),
+                      + (f" — order #{oid}" if oid else "") + tags,
             "order_id": oid, "gmail_id": t["latest_id"], "thread_id": tid,
             "date_str": mm["date"],
         })
@@ -437,7 +485,13 @@ def run_task_sweep(conn) -> dict:
             except Exception as e:
                 errors[name] = str(e)
                 conn.rollback()
-    for name, fn, args in [("unread", _sweep_unread, (order_emails, known_ids)),
+    try:
+        kw_rules = _keyword_rules(conn)
+    except Exception as e:
+        kw_rules, errors["keywords"] = (), str(e)
+        conn.rollback()
+    for name, fn, args in [("unread", _sweep_unread,
+                            (order_emails, known_ids, kw_rules)),
                            ("flags", _sweep_robot_flags, (known_ids,)),
                            ("drafts", _sweep_drafts, (known_ids,)),
                            ("noreply", _sweep_no_reply, (known_ids,))]:
@@ -482,8 +536,54 @@ def run_task_sweep(conn) -> dict:
               AND last_seen < %s
         """, (sweep_start,))
         gone = cur.rowcount
+        # REPLY-AWARENESS (William approved 2026-07-29, the 5696 case):
+        # when the LAST word on a thread is OURS (ledger sent-folder newer
+        # than the last inbound), the thread task settles itself with a
+        # [replied] note — his answers get recorded instead of the task
+        # sitting stale.
+        replied = 0
+        try:
+            cur.execute("""
+                WITH latest AS (
+                    SELECT thread_id,
+                           MAX(email_date) FILTER (WHERE folder = 'sent') AS last_sent,
+                           MAX(email_date) FILTER (WHERE folder = 'inbox') AS last_in
+                    FROM email_ledger
+                    WHERE thread_id IS NOT NULL
+                    GROUP BY thread_id
+                )
+                UPDATE task_board_items i
+                SET status = 'handled',
+                    note = COALESCE(i.note || ' · ', '')
+                           || '[replied ' || to_char(l.last_sent, 'MM/DD HH24:MI') || ']',
+                    note_at = NOW(), updated_at = NOW()
+                FROM latest l
+                WHERE i.task_key = 'thread:' || l.thread_id
+                  AND i.status = 'open'
+                  AND l.last_sent IS NOT NULL
+                  AND (l.last_in IS NULL OR l.last_sent > l.last_in)
+                  AND COALESCE(i.note, '') NOT LIKE '%[replied%'
+            """)
+            replied = cur.rowcount
+        except Exception as e:
+            errors["replied"] = str(e)
+            conn.rollback()
+        # ARCHIVE PURGE (William approved 2026-07-29): completed tasks are
+        # kept 3 months in the Archive, then deleted.
+        purged = 0
+        try:
+            cur.execute("""
+                DELETE FROM task_board_items
+                WHERE status IN ('handled', 'gone')
+                  AND updated_at < NOW() - INTERVAL '90 days'
+            """)
+            purged = cur.rowcount
+        except Exception as e:
+            errors["purge"] = str(e)
+            conn.rollback()
     conn.commit()
     return {"status": "ok", "swept": upserted, "gone": gone,
+            "replied_settled": replied, "purged": purged,
             "errors": errors or None,
             "at": sweep_start.isoformat()}
 
@@ -576,6 +676,146 @@ def get_tasks(_: bool = Depends(require_admin)):
 def sweep_now(_: bool = Depends(require_admin)):
     with get_db() as conn:
         return run_task_sweep(conn)
+
+
+@task_router.get("/tasks/archive")
+def get_archive(limit: int = 200, _: bool = Depends(require_admin)):
+    """The Archive (William approved 2026-07-29): every completed/vanished
+    task, kept 3 months then purged by the sweep."""
+    with get_db() as conn:
+        _ensure_tables(conn)
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT task_key, board, type, title, detail, order_id,
+                       status, note, note_at, updated_at
+                FROM task_board_items
+                WHERE status IN ('handled', 'gone')
+                ORDER BY updated_at DESC LIMIT %s
+            """, (min(int(limit), 500),))
+            cols = ["task_key", "board", "type", "title", "detail", "order_id",
+                    "status", "note", "note_at", "updated_at"]
+            rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+    for r in rows:
+        for k in ("note_at", "updated_at"):
+            if r.get(k) is not None and hasattr(r[k], "isoformat"):
+                r[k] = r[k].isoformat()
+    return {"status": "ok", "count": len(rows), "archive": rows}
+
+
+@task_router.get("/tasks/rundown")
+def get_rundown(_: bool = Depends(require_admin)):
+    """THE MORNING RUNDOWN as a list (William approved 2026-07-29 — 'this
+    rundown will be delivered via the app'): what landed, what waits on a
+    human, what's due — assembled live from the same tables the board uses."""
+    test_ids = _registry_ids()
+    out = {"status": "ok", "at": datetime.now(timezone.utc).isoformat()}
+    with get_db() as conn:
+        _ensure_tables(conn)
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT e.order_id, e.event_data, e.created_at,
+                       COALESCE(o.company_name, o.customer_name, '')
+                FROM order_events e LEFT JOIN orders o ON o.order_id = e.order_id
+                WHERE e.event_type = 'payment_received'
+                  AND e.created_at > NOW() - INTERVAL '24 hours'
+                ORDER BY e.created_at DESC
+            """)
+            out["payments_last24h"] = [
+                {"order_id": str(a), "detail": str(b)[:200],
+                 "at": c.isoformat(), "customer": d}
+                for a, b, c, d in cur.fetchall() if str(a) not in test_ids]
+            cur.execute("""
+                SELECT order_id, event_data, created_at FROM order_events
+                WHERE event_type IN ('rl_delivered', 'delivery_photo_uploaded',
+                                     'replacement_request_created')
+                  AND created_at > NOW() - INTERVAL '24 hours'
+                ORDER BY created_at DESC
+            """)
+            out["deliveries_and_claims_last24h"] = [
+                {"order_id": str(a), "detail": str(b)[:200], "at": c.isoformat()}
+                for a, b, c in cur.fetchall() if str(a) not in test_ids]
+            cur.execute("""
+                SELECT task_key, type, title, detail, order_id, due_date
+                FROM task_board_items
+                WHERE status = 'open' AND (
+                    type IN ('robot-flag', 'draft-waiting', 'supplier-action')
+                    OR due_date <= CURRENT_DATE)
+                ORDER BY (due_date IS NULL), due_date, last_seen DESC
+                LIMIT 60
+            """)
+            cols = ["task_key", "type", "title", "detail", "order_id", "due_date"]
+            rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+            for r in rows:
+                if r.get("due_date") is not None and hasattr(r["due_date"], "isoformat"):
+                    r["due_date"] = r["due_date"].isoformat()
+            out["needs_you"] = [r for r in rows if r["type"] == "robot-flag"]
+            out["drafts_waiting"] = [r for r in rows if r["type"] == "draft-waiting"]
+            out["supplier_actions"] = [r for r in rows if r["type"] == "supplier-action"]
+            out["due_today"] = [r for r in rows
+                                if r.get("due_date")
+                                and r["type"] not in ("robot-flag", "draft-waiting",
+                                                      "supplier-action")]
+            cur.execute("""
+                SELECT order_id, COALESCE(company_name, customer_name, ''),
+                       order_total, EXTRACT(DAY FROM NOW() - order_date)::int
+                FROM orders
+                WHERE payment_received = false AND is_complete = false
+                  AND payment_link_sent = true
+                  AND COALESCE(lifecycle_status, 'active') = 'active'
+                  AND COALESCE(order_total, 0) > 0
+                ORDER BY order_date ASC LIMIT 15
+            """)
+            out["awaiting_payment"] = [
+                {"order_id": str(a), "customer": b,
+                 "total": float(c or 0), "days_open": d}
+                for a, b, c, d in cur.fetchall() if str(a) not in test_ids]
+    return out
+
+
+@task_router.get("/tasks/keywords")
+def list_keywords(_: bool = Depends(require_admin)):
+    with get_db() as conn:
+        _ensure_tables(conn)
+        with conn.cursor() as cur:
+            cur.execute("""SELECT id, pattern, label, enabled, created_at
+                           FROM task_keywords ORDER BY id""")
+            rows = [{"id": a, "pattern": b, "label": c, "enabled": d,
+                     "created_at": e.isoformat() if e else ""}
+                    for a, b, c, d, e in cur.fetchall()]
+    return {"status": "ok", "keywords": rows}
+
+
+@task_router.post("/tasks/keywords")
+def add_keyword(payload: dict = Body(...), _: bool = Depends(require_admin)):
+    """Teach the board a keyword (William approved 2026-07-29: 'the logic
+    will be ongoing to look for key words so tasks can become smarter over
+    time'). pattern = case-insensitive substring; label = the ⚡tag shown."""
+    pattern = (payload.get("pattern") or "").strip()
+    label = (payload.get("label") or "").strip()
+    if not pattern or not label:
+        return {"status": "error", "message": "pattern and label required"}
+    with get_db() as conn:
+        _ensure_tables(conn)
+        with conn.cursor() as cur:
+            cur.execute("""INSERT INTO task_keywords (pattern, label)
+                           VALUES (%s, %s) RETURNING id""", (pattern, label))
+            kid = cur.fetchone()[0]
+        conn.commit()
+    return {"status": "ok", "id": kid, "pattern": pattern, "label": label}
+
+
+@task_router.post("/tasks/keywords/{kid}/toggle")
+def toggle_keyword(kid: int, _: bool = Depends(require_admin)):
+    with get_db() as conn:
+        _ensure_tables(conn)
+        with conn.cursor() as cur:
+            cur.execute("""UPDATE task_keywords SET enabled = NOT enabled
+                           WHERE id = %s RETURNING enabled""", (kid,))
+            row = cur.fetchone()
+        conn.commit()
+    if not row:
+        return {"status": "error", "message": "not found"}
+    return {"status": "ok", "id": kid, "enabled": row[0]}
 
 
 @task_router.post("/tasks/note")
