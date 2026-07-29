@@ -79,8 +79,26 @@ def _ensure_tables():
                     content BYTEA,
                     created_at TIMESTAMPTZ DEFAULT NOW()
                 )""")
+            # at-delivery pallet photos (William 2026-07-29: "take images no
+            # matter what of the pallets when delivered" — required to make a
+            # freight claim; phone page auto-uploads them onto the order)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS delivery_photos (
+                    id SERIAL PRIMARY KEY,
+                    order_id TEXT NOT NULL,
+                    filename TEXT,
+                    mime TEXT,
+                    content BYTEA,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                )""")
             conn.commit()
     _tables_ready = True
+
+
+def delivery_photos_url(order_id) -> str:
+    """The tokenized phone-friendly at-delivery photo page for one order."""
+    tok = generate_checkout_token(str(order_id), long_lived=True)
+    return f"{BASE_URL}/delivery-photos/{order_id}?token={tok}"
 
 
 def claims_form_url(order_id) -> str:
@@ -177,7 +195,7 @@ with photos.
 <button type="button" class="btn2" onclick="addLine()">+ Add an item</button>
 <label>Tell us what happened</label>
 <textarea name="description" placeholder="What happened, and when was the order delivered?"></textarea>
-<label>Photos (required for damage/defect/wrong-item claims — show the item AND its packaging)</label>
+<label>Photos — at least 2 per item claimed (show the item AND its packaging)</label>
 <input type="file" name="photos" id="photos" accept="image/*" multiple>
 <div class="err" id="err"></div>
 <p style="margin-top:22px"><button class="btn" type="submit">Submit request</button></p>
@@ -203,9 +221,10 @@ if(q>max)bad='Qty for '+sku+' cannot exceed the '+max+' you ordered.';
 out.push({{sku:sku,qty:q,issue:d.querySelector('.ltype').value,
 note:d.querySelector('.lnote').value}});}});
 if(!out.length)bad='Add at least one item.';
-var needPhoto=out.some(function(l){{return l.issue!=='missing';}});
-if(needPhoto&&!document.getElementById('photos').files.length)
-bad='Photos are required for damage, defect, or wrong-item claims.';
+var claimed=out.filter(function(l){{return l.issue!=='missing';}}).length;
+var need=claimed*2;
+if(need&&document.getElementById('photos').files.length<need)
+bad='Please add at least 2 photos per item claimed ('+need+' total for your '+claimed+' item'+(claimed>1?'s':'')+') — the item AND its packaging.';
 if(bad){{ev.preventDefault();var e=document.getElementById('err');
 e.textContent=bad;e.style.display='block';return false;}}
 document.getElementById('linesJson').value=JSON.stringify(out);}});
@@ -270,6 +289,17 @@ async def claim_submit(order_id: str,
     if not clean:
         raise HTTPException(status_code=400,
                             detail="no valid claim lines (SKUs must be on the order)")
+
+    # William 2026-07-29: no fewer than 2 photos per item claimed
+    # (missing-item lines exempt — nothing to photograph)
+    claimed_lines = sum(1 for l in clean if l["issue"] != "missing")
+    usable_photos = sum(1 for f in (photos or [])[:MAX_PHOTOS]
+                        if getattr(f, "filename", None))
+    if claimed_lines and usable_photos < claimed_lines * 2:
+        raise HTTPException(
+            status_code=400,
+            detail=f"at least 2 photos per claimed item required "
+                   f"({claimed_lines * 2} total for {claimed_lines} items)")
 
     with get_db() as conn:
         with conn.cursor() as cur:
@@ -339,6 +369,122 @@ async def claim_submit(order_id: str,
 request for order #{order_id} is in (reference #{req_id}). A real person
 reviews every request; we will get back to you within one business day.</p>
 </div></div></body></html>""")
+
+
+# =============================================================================
+# AT-DELIVERY PHOTOS — phone page, auto-upload (William 2026-07-29)
+# =============================================================================
+
+@claims_router.get("/delivery-photos/{order_id}", response_class=HTMLResponse)
+def delivery_photos_page(order_id: str, token: str = ""):
+    """Phone-friendly at-delivery photo page: opens the camera, every picture
+    uploads automatically as it is taken/selected — no submit button."""
+    _ensure_tables()
+    if not verify_checkout_token(str(order_id), token or ""):
+        return HTMLResponse(
+            "<h3 style='font-family:Arial;margin:40px'>This photo link has "
+            "expired. Please reply to any order email and we will send a "
+            "fresh one.</h3>", status_code=403)
+    if not get_order_by_id(order_id):
+        raise HTTPException(status_code=404, detail="Order not found")
+    return HTMLResponse(f"""<!DOCTYPE html><html><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Delivery Photos — Order #{order_id}</title>
+<style>{_PAGE_CSS}
+.big{{display:block;width:100%;background:#1D4ED8;color:#fff;border:none;
+border-radius:12px;padding:20px;font-size:18px;font-weight:800;
+text-align:center;cursor:pointer;margin:18px 0}}
+.thumb{{width:31%;margin:1%;border-radius:8px;border:2px solid #e2e8f0;
+object-fit:cover;aspect-ratio:1;float:left}}
+.ok{{border-color:#059669}}
+.fail{{border-color:#dc2626;opacity:.5}}
+#count{{font-weight:700;color:#059669;font-size:15px}}
+</style></head><body><div class="wrap"><div class="card">
+<h1>Delivery photos</h1>
+<div class="sub">Order #{order_id} &bull; Cabinets For Contractors</div>
+<div class="note"><strong>Photograph the pallets as they come off the
+truck</strong> &mdash; every side, plus any box that looks dinged. Photos
+taken at delivery are <strong>required to make a freight claim</strong>,
+and they upload automatically as you take them.</div>
+<label class="big" for="cam">&#128247; Take / add photos</label>
+<input id="cam" type="file" accept="image/*" capture="environment" multiple
+       style="display:none">
+<div id="count"></div>
+<div id="grid" style="overflow:hidden"></div>
+</div></div>
+<script>
+var up=0;
+document.getElementById('cam').addEventListener('change',function(){{
+Array.prototype.slice.call(this.files).forEach(function(f){{
+var img=document.createElement('img');img.className='thumb';
+img.src=URL.createObjectURL(f);
+document.getElementById('grid').appendChild(img);
+var fd=new FormData();fd.append('token','{token}');fd.append('photo',f);
+fetch('{BASE_URL}/delivery-photos/{order_id}/upload',{{method:'POST',body:fd}})
+.then(function(r){{if(!r.ok)throw 0;img.className='thumb ok';up++;
+document.getElementById('count').textContent=up+' photo'+(up>1?'s':'')+' saved \\u2705';}})
+.catch(function(){{img.className='thumb fail';}});
+}});
+this.value='';
+}});
+</script></body></html>""")
+
+
+@claims_router.post("/delivery-photos/{order_id}/upload")
+async def delivery_photo_upload(order_id: str, token: str = Form(...),
+                                photo: UploadFile = File(...)):
+    _ensure_tables()
+    if not verify_checkout_token(str(order_id), token or ""):
+        raise HTTPException(status_code=403, detail="bad token")
+    if not get_order_by_id(order_id):
+        raise HTTPException(status_code=404, detail="Order not found")
+    data = await photo.read()
+    if not data or len(data) > MAX_PHOTO_BYTES:
+        raise HTTPException(status_code=400, detail="photo empty or over 8MB")
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""INSERT INTO delivery_photos
+                (order_id, filename, mime, content)
+                VALUES (%s,%s,%s,%s) RETURNING id""",
+                (str(order_id), (photo.filename or "photo")[:200],
+                 (photo.content_type or "image/jpeg")[:100], data))
+            pid = cur.fetchone()[0]
+            cur.execute("""INSERT INTO order_events
+                (order_id, event_type, event_data, source)
+                VALUES (%s,'delivery_photo_uploaded',%s,'claims')""",
+                (str(order_id), json.dumps({"photo_id": pid,
+                                            "filename": photo.filename})))
+            conn.commit()
+    return {"status": "ok", "photo_id": pid}
+
+
+@claims_router.get("/delivery-photos/{order_id}/list")
+def delivery_photos_list(order_id: str, _: bool = Depends(require_admin)):
+    _ensure_tables()
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT id, filename, mime,
+                                  octet_length(content), created_at
+                           FROM delivery_photos WHERE order_id = %s
+                           ORDER BY id""", (str(order_id),))
+            rows = [{"id": r[0], "filename": r[1], "mime": r[2],
+                     "bytes": r[3], "created_at": str(r[4])}
+                    for r in cur.fetchall()]
+    return {"status": "ok", "order_id": order_id, "count": len(rows),
+            "photos": rows}
+
+
+@claims_router.get("/delivery-photos/photo/{photo_id}")
+def delivery_photo_bytes(photo_id: int, _: bool = Depends(require_admin)):
+    _ensure_tables()
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT mime, content FROM delivery_photos
+                           WHERE id = %s""", (photo_id,))
+            row = cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="photo not found")
+    return Response(content=bytes(row[1]), media_type=row[0] or "image/jpeg")
 
 
 # =============================================================================

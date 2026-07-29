@@ -197,17 +197,56 @@ def _first_name(order: Dict) -> str:
     return first if first else "there"
 
 
-def _make_draft(to_email: str, subject: str, body: str) -> Optional[str]:
+def _make_draft(to_email: str, subject: str, body: str,
+                attachments: Optional[list] = None) -> Optional[str]:
+    """Plaintext Gmail draft; attachments = [{filename, content(bytes),
+    mime}] (added 2026-07-29 — the delivery-today draft carries the pick
+    list)."""
     import base64
     from email.mime.text import MIMEText
     from ghi_inbox import _gmail_post
 
-    mime = MIMEText(body)
+    if attachments:
+        from email.mime.base import MIMEBase
+        from email.mime.multipart import MIMEMultipart
+        from email import encoders
+        mime = MIMEMultipart("mixed")
+        mime.attach(MIMEText(body))
+        for att in attachments:
+            maintype, _, subtype = (att.get("mime")
+                                    or "application/octet-stream").partition("/")
+            part = MIMEBase(maintype, subtype or "octet-stream")
+            part.set_payload(att["content"])
+            encoders.encode_base64(part)
+            part.add_header("Content-Disposition", "attachment",
+                            filename=att.get("filename") or "attachment")
+            mime.attach(part)
+    else:
+        mime = MIMEText(body)
     mime["To"] = to_email
     mime["Subject"] = subject
     raw = base64.urlsafe_b64encode(mime.as_bytes()).decode()
     res = _gmail_post("drafts", {"message": {"raw": raw}})
     return res.get("id") if res else None
+
+
+def _picklist_attachment(order_id) -> Optional[list]:
+    """The pick-list PDF as a draft attachment list (None on any failure —
+    the draft still goes out without it)."""
+    try:
+        from db_helpers import get_order_by_id
+        from picklist_pdf import generate_picklist_pdf
+        order = get_order_by_id(str(order_id))
+        if not order:
+            return None
+        order["order_id"] = str(order_id)
+        pk = generate_picklist_pdf(order)
+        if pk:
+            return [{"filename": f"CFC-Picklist-{order_id}.pdf",
+                     "content": pk, "mime": "application/pdf"}]
+    except Exception as e:
+        print(f"[PROGRESS] picklist failed {order_id}: {e}")
+    return None
 
 
 def _notify(order_id: str, kind: str, body: str):
@@ -235,6 +274,22 @@ INSPECT_NOTE = (
     "of delivery - no exceptions.")
 
 
+def _photo_line(order_id) -> str:
+    """The at-delivery pallet-photo instruction + phone upload link
+    (William 2026-07-29: take images no matter what; photos at delivery are
+    required to make a freight claim)."""
+    try:
+        from claims_routes import delivery_photos_url
+        return ("Take photos of the pallets at delivery - no matter what. "
+                "Photos taken at delivery are required to make a freight "
+                "claim. Open this on your phone and they upload "
+                "automatically as you take them:\n"
+                + delivery_photos_url(order_id))
+    except Exception as e:
+        print(f"[PROGRESS] photo line failed {order_id}: {e}")
+        return ""
+
+
 def _post_payment_body(order: Dict, w: Dict) -> str:
     return (
         f"Hey {_first_name(order)},\n\n"
@@ -247,7 +302,7 @@ def _post_payment_body(order: Dict, w: Dict) -> str:
         f"can expect your order to arrive between {_nice(w['arrive_min'])} and "
         f"{_nice(w['arrive_max'])}.\n\n"
         f"We will send your tracking information as soon as the carrier picks "
-        f"it up.\n\n{INSPECT_NOTE}\n\n"
+        f"it up.\n\n{INSPECT_NOTE}\n\n{_photo_line(order['order_id'])}\n\n"
         f"Any questions, just reply.\n\n{SIGNATURE}")
 
 
@@ -298,7 +353,8 @@ def _tracking_body(order: Dict) -> str:
         f"{nums}\n\n"
         f"One note: tracking will not show any movement until the carrier "
         f"scans the shipment at pickup - if it looks empty for a day, that is "
-        f"normal.\n\n{INSPECT_NOTE}\n\n{SIGNATURE}")
+        f"normal.\n\n{INSPECT_NOTE}\n\n{_photo_line(order['order_id'])}\n\n"
+        f"{SIGNATURE}")
 
 
 def _delivery_today_body(order: Dict) -> str:
@@ -309,8 +365,9 @@ def _delivery_today_body(order: Dict) -> str:
         f"When it arrives, please look over the pallet BEFORE signing the "
         f"delivery receipt and note any visible damage on the receipt - that "
         f"protects you if anything needs a claim.\n\n"
-        f"Print off the pick list (attached to your invoice email) and use it "
+        f"Print off the pick list (attached to this email) and use it "
         f"to check off each SKU and quantity as you unload.\n\n"
+        f"{_photo_line(order['order_id'])}\n\n"
         f"Any questions, just reply.\n\n{SIGNATURE}")
 
 
@@ -401,7 +458,8 @@ def run_delivery_poll(out: Dict):
                     draft_id = _make_draft(
                         o["email"],
                         f"Order #{o['order_id']} - out for delivery today",
-                        body)
+                        body,
+                        attachments=_picklist_attachment(o["order_id"]))
                     if draft_id:
                         with conn.cursor() as cur:
                             cur.execute("""UPDATE progress_promises

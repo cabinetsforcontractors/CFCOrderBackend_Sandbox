@@ -54,12 +54,23 @@ def _claims_block(order: Dict = None) -> str:
     per-order form, 2026-07-29) the link points there instead of the old
     .net page."""
     claims_url = (order or {}).get("claims_url") or CLAIMS_URL
+    photo_upload_link = ""
+    oid = (order or {}).get("order_id")
+    if oid:
+        try:
+            from claims_routes import delivery_photos_url
+            photo_upload_link = (f' (<a href="{delivery_photos_url(oid)}" '
+                                 f'style="color:#1D4ED8;font-weight:600;">'
+                                 f'upload yours here</a>)')
+        except Exception as e:
+            print(f"[TEMPLATES] claims photo link failed {oid}: {e}")
     return f"""
     <div style="background:#FFFBEA;border:1px solid #F0E0A0;border-radius:8px;padding:16px 18px;margin:20px 0;font-size:13px;line-height:1.7;color:#333333;">
         <div style="font-weight:700;font-size:14px;margin-bottom:8px;">&#128230; Please inspect your delivery &mdash; how claims work</div>
         <p style="margin:0 0 8px;"><strong>Check every box now, before assembly or installation.</strong> Print the attached pick list and check off each SKU and quantity as you unload &mdash; it is the fastest way to confirm everything arrived. If you notice any damage or issues, please let us know within <strong>48 hours</strong>.</p>
         <ul style="margin:0 0 8px;padding-left:20px;">
             <li><strong>Freight damage must be noted on the delivery receipt (BOL) at the time of delivery &mdash; no exceptions.</strong> Claims for damage that was not noted when you signed cannot be honored.</li>
+            <li><strong>Photos of the pallets taken at delivery are required to make a freight claim</strong>{photo_upload_link} &mdash; and every claimed item needs at least 2 photos (the item AND its packaging).</li>
             <li><strong>What we can replace:</strong> shipping damage noted on the BOL, manufacturing defects, and missing or incorrect items &mdash; reported within 48 hours with photos.</li>
             <li><strong>What we cannot replace:</strong> damage that occurs during or after assembly or installation. Once a cabinet has been assembled, modified, or installed, it is considered accepted.</li>
         </ul>
@@ -82,11 +93,26 @@ def _inspect_blurb(order: Dict = None) -> str:
         <strong>Once you leave, missing items cannot be claimed</strong> &mdash; please make sure everything is accounted for.
     </div>
     """
-    return """
+    photo_link = ""
+    oid = (order or {}).get("order_id")
+    if oid:
+        try:
+            from claims_routes import delivery_photos_url
+            photo_link = (
+                f'<br><strong>Take photos of the pallets at delivery &mdash; '
+                f'no matter what.</strong> Photos taken at delivery are '
+                f'required to make a freight claim. '
+                f'<a href="{delivery_photos_url(oid)}" style="color:#1D4ED8;'
+                f'font-weight:600;">Open this on your phone</a> and they '
+                f'upload automatically as you take them.')
+        except Exception as e:
+            print(f"[TEMPLATES] photo link failed {oid}: {e}")
+    return f"""
     <div style="background:#FFFBEA;border:1px solid #F0E0A0;border-radius:8px;padding:14px 18px;margin:18px 0;font-size:13px;line-height:1.7;color:#333333;">
         <strong>&#128230; Please inspect your delivery upon arrival</strong><br>
         Print off the pick list (attached to your invoice email) and use it to check off each SKU and quantity.<br>
         <strong>Freight damage must be noted on the delivery receipt (BOL) at the time of delivery &mdash; no exceptions.</strong>
+        {photo_link}
     </div>
     """
 
@@ -434,6 +460,7 @@ def _render_payment_link(order: Dict) -> str:
 <ul style="margin:8px 0 0;padding-left:20px">
 <li>No returns on assembled or installed cabinets.</li>
 <li>Damaged items must be noted on the BOL, no exceptions, and reported within 48 hours of delivery.</li>
+<li>Take photos of the pallets at delivery &mdash; photos taken at delivery are required to make a freight-damage claim.</li>
 <li>Damage that occurs during or after assembly or installation is not claimable &mdash; inspect every part BEFORE assembling. Once a cabinet is assembled, modified, or installed, it is considered accepted.</li>
 <li>20% restocking fee on returned undamaged items in original packaging.</li>
 <li>Buyer is responsible for verifying all measurements before ordering &mdash; we cannot accept returns for incorrect sizing.</li>
