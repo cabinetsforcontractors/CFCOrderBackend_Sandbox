@@ -76,7 +76,7 @@ FLAG_INBOX = os.environ.get("FLAG_INBOX_EMAIL", "wpjob1@gmail.com").strip()
 NO_REPLY_BUSINESS_DAYS = 2
 ORDER_TYPES = {"unpaid-order", "supplier-action", "shipment-watch",
                "unread-customer", "unread-supplier", "unread-website",
-               "unread-payment", "robot-flag", "draft-waiting"}
+               "unread-payment", "robot-flag", "draft-waiting", "info"}
 
 _table_ready = False
 
@@ -194,6 +194,13 @@ def _sender_address(from_header: str) -> str:
 def _classify_sender(addr: str, order_emails: dict):
     if not addr:
         return "other", ""
+    # INFO EMAILS (William 2026-07-29, the "Text from nationwide" lesson):
+    # mail from OUR OWN addresses into the inbox is William feeding the
+    # board information — it becomes an INFO task (order board when
+    # linkable), its body gets keyword-read, and it must NEVER be
+    # auto-settled by reply-awareness (the last word is ours by definition).
+    if addr in OWN_ADDRESSES or addr == FLAG_INBOX.lower():
+        return "info", "William (info)"
     domain = addr.split("@")[-1]
     if addr in SUPPLIER_ADDRESSES:
         return "supplier", SUPPLIER_ADDRESSES[addr]
@@ -287,9 +294,22 @@ def _sweep_unread(order_emails, known_ids, kw_rules=()):
         if not oid:
             oid = _valid_oid(extract_order_id(mm["subject"]), known_ids)
         extra = f" ({t['count']} unread in thread)" if t["count"] > 1 else ""
-        tags = _keyword_tags(mm["subject"], kw_rules)
+        # info emails: keyword-read the BODY too (they carry instructions —
+        # "order 5560 needs attention" — not just subjects)
+        kw_text = mm["subject"]
+        if kind == "info":
+            try:
+                c = get_email_content(t["latest_id"])
+                body = (c or {}).get("body") or ""
+                kw_text = f"{mm['subject']} {body[:1500]}"
+                if not oid:
+                    oid = _valid_oid(extract_order_id(body[:1500]), known_ids)
+            except Exception:
+                pass
+        tags = _keyword_tags(kw_text, kw_rules)
         tasks.append({
-            "task_key": f"thread:{tid}", "type": f"unread-{kind}",
+            "task_key": f"thread:{tid}",
+            "type": "info" if kind == "info" else f"unread-{kind}",
             "title": mm["subject"] or "(no subject)",
             "detail": f"from {who or addr}{extra}"
                       + (f" — order #{oid}" if oid else "") + tags,
@@ -510,6 +530,7 @@ def run_task_sweep(conn) -> dict:
                 VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'open',NOW(),NOW())
                 ON CONFLICT (task_key) DO UPDATE SET
                     title = EXCLUDED.title, detail = EXCLUDED.detail,
+                    type = EXCLUDED.type, board = EXCLUDED.board,
                     order_id = COALESCE(EXCLUDED.order_id, task_board_items.order_id),
                     gmail_id = COALESCE(EXCLUDED.gmail_id, task_board_items.gmail_id),
                     thread_id = COALESCE(EXCLUDED.thread_id, task_board_items.thread_id),
@@ -560,6 +581,7 @@ def run_task_sweep(conn) -> dict:
                 FROM latest l
                 WHERE i.task_key = 'thread:' || l.thread_id
                   AND i.status = 'open'
+                  AND i.type <> 'info'
                   AND l.last_sent IS NOT NULL
                   AND (l.last_in IS NULL OR l.last_sent > l.last_in)
                   AND COALESCE(i.note, '') NOT LIKE '%[replied%'

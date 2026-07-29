@@ -142,7 +142,7 @@ def list_orders(
                 SELECT o.*, s.current_status, s.days_open
                 FROM orders o
                 JOIN order_status s ON o.order_id = s.order_id
-                WHERE 1=1
+                WHERE COALESCE(o.lifecycle_status, 'active') != 'deleted'
             """
             params = []
 
@@ -566,6 +566,92 @@ def update_checkpoint(order_id: str, update: CheckpointUpdate, _: bool = Depends
                 "checkpoint": update.checkpoint,
                 "supplier_polls": polls_fired if polls_fired else None,
             }
+
+
+@orders_router.post("/orders/{order_id}/tombstone")
+def tombstone_order(order_id: str, reason: str = "",
+                    _: bool = Depends(require_admin)):
+    """DELETE ORDER END TO END. [admin]
+
+    William 2026-07-29: "add delete to Change Status and it will delete the
+    order end to end and stop email firing." B2BWave has NO delete API and
+    the ~8-min sync re-imports anything still there, so delete = TOMBSTONE:
+      1. every Square payment link killed;
+      2. open supplier legs canceled;
+      3. B2BWave -> Canceled (silent on this store, proven);
+      4. lifecycle_status='deleted' + is_complete locally — every sweep,
+         watcher, matcher, report and the app list filter it out forever;
+      5. open board tasks for the order archived.
+    Reversible only by hand (flags back + B2BWave status) — the UI
+    double-confirms."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM orders WHERE order_id = %s", (order_id,))
+            if not cur.fetchone():
+                raise HTTPException(status_code=404, detail="Order not found")
+
+    out = {"status": "ok", "order_id": order_id, "steps": {}}
+
+    try:
+        from auto_invoice import kill_order_links
+        out["steps"]["payment_links"] = kill_order_links(order_id)
+    except Exception as e:
+        out["steps"]["payment_links"] = {"error": str(e)}
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""UPDATE supplier_orders
+                           SET status = 'canceled', updated_at = NOW()
+                           WHERE order_id = %s
+                             AND status NOT IN ('delivered',
+                                                'invoice_verified',
+                                                'canceled')""", (order_id,))
+            out["steps"]["supplier_legs_canceled"] = cur.rowcount
+        conn.commit()
+
+    import os as _os
+    if _os.environ.get("B2BWAVE_MUTATIONS_ENABLED", "true").lower() == "false":
+        out["steps"]["b2bwave"] = {"blocked": "B2BWAVE_MUTATIONS_ENABLED=false"}
+    else:
+        try:
+            from substitutions import _b2b, fetch_b2b_order
+            canceled_id = int(_os.environ.get("B2BWAVE_CANCELED_STATUS_ID", "7"))
+            remote = fetch_b2b_order(order_id)
+            current = int((remote or {}).get("status_order_id") or 0)
+            if not remote:
+                out["steps"]["b2bwave"] = {"skipped": "not found on B2BWave"}
+            elif current == canceled_id:
+                out["steps"]["b2bwave"] = {"skipped": "already Canceled"}
+            else:
+                st, _d = _b2b("PATCH", f"orders/{order_id}/change_status",
+                              {"status_order_id": canceled_id})
+                rb = int((fetch_b2b_order(order_id) or {})
+                         .get("status_order_id") or 0)
+                out["steps"]["b2bwave"] = {"http": st, "readback": rb,
+                                           "applied": rb == canceled_id}
+        except Exception as e:
+            out["steps"]["b2bwave"] = {"error": str(e)}
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""UPDATE orders
+                           SET lifecycle_status = 'deleted',
+                               is_complete = TRUE, updated_at = NOW()
+                           WHERE order_id = %s""", (order_id,))
+            cur.execute("""INSERT INTO order_events
+                           (order_id, event_type, event_data, source)
+                           VALUES (%s, 'order_tombstoned', %s, 'web_ui')""",
+                        (order_id, json.dumps({"reason": reason or "deleted "
+                                               "via Change Status"})))
+            cur.execute("""UPDATE task_board_items
+                           SET status = 'handled',
+                               note = '[order deleted]', note_at = NOW(),
+                               updated_at = NOW()
+                           WHERE order_id = %s AND status = 'open'""",
+                        (order_id,))
+            out["steps"]["board_tasks_archived"] = cur.rowcount
+        conn.commit()
+    return out
 
 
 @orders_router.post("/orders/{order_id}/payment-unstamp")

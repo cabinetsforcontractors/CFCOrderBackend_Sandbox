@@ -673,6 +673,7 @@ def match_payment_to_order(conn, amount, customer_name, email, message_id=""):
             SELECT order_id, customer_name, company_name, order_total
             FROM orders
             WHERE payment_received = FALSE
+            AND COALESCE(lifecycle_status, 'active') != 'deleted'
             AND (
                 LOWER(customer_name) LIKE LOWER(%s)
                 OR LOWER(company_name) LIKE LOWER(%s)
