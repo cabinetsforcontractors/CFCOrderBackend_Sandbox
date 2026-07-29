@@ -125,6 +125,16 @@ TEMPLATE_REGISTRY = {
         "category": "manual",
         "is_lifecycle": False,
     },
+    "order_received": {
+        "name": "Order Received",
+        "subject": "We received your order #{order_id} - Cabinets For Contractors",
+        "description": "Instant order-received email from orders@ — replaces "
+                       "B2BWave's native New-order-customer email "
+                       "(notifications turned off fleet-wide, William "
+                       "2026-07-29)",
+        "category": "transactional",
+        "is_lifecycle": False,
+    },
     "payment_confirmation": {
         "name": "Payment Confirmation",
         "subject": "Payment Received — Order #{order_id}",
@@ -518,6 +528,83 @@ Please send your check for the Grand Total per our usual arrangement, and reply 
 
 
 
+def _render_order_received(order: Dict) -> str:
+    """The instant order-received email (William 2026-07-29: 'we will send
+    the email from you when the order is placed') — OUR replacement for
+    B2BWave's native New-order-customer email, mirroring the store-template
+    rewrite proven on order 5744: what-happens-next from orders@, items
+    table, current claims policy highlights (pickup orders get the
+    check-at-pickup variant instead of the LTL block)."""
+    customer = proper_name(order.get("customer_name", "Valued Customer"))
+    first_name = customer.split()[0] if customer else "there"
+    order_id = str(order.get("order_id", order.get("id", "")))
+    total = float(order.get("order_total") or 0)
+    po = (order.get("po_number") or order.get("purchase_order") or "").strip()
+    comments = (order.get("comments") or "").strip()
+
+    items = order.get("line_items") or []
+    if not items:
+        try:
+            from db_helpers import get_order_line_items
+            items = get_order_line_items(order_id) or []
+        except Exception:
+            items = []
+    rows = ""
+    for it in items:
+        qty = int(float(it.get("quantity") or 0))
+        price = float(it.get("price") or 0)
+        line_total = float(it.get("line_total") or (qty * price))
+        rows += (
+            "<tr><td style='padding:6px;border-bottom:1px solid #eee'>"
+            f"<strong>{it.get('sku') or ''}</strong><br>"
+            f"<span style='color:#888;font-size:12px'>{it.get('product_name') or ''}</span></td>"
+            f"<td style='padding:6px;border-bottom:1px solid #eee;text-align:center'>{qty}</td>"
+            f"<td style='padding:6px;border-bottom:1px solid #eee;text-align:right'>${price:,.2f}</td>"
+            f"<td style='padding:6px;border-bottom:1px solid #eee;text-align:right'>${line_total:,.2f}</td></tr>")
+    if not rows:
+        rows = "<tr><td colspan='4' style='padding:6px;color:#888'>(items syncing — your invoice will show every line)</td></tr>"
+
+    po_line = f"<br>Purchase order: <strong>{po}</strong>" if po else ""
+    comments_line = f"<br>Comments: {comments}" if comments else ""
+
+    if order.get("is_pickup"):
+        policy = """
+    <p><strong>Warehouse pickup:</strong> we'll let you know as soon as your
+    order is ready. At pickup, use your pick list to check off each SKU and
+    quantity before leaving the warehouse &mdash; <strong>once you leave,
+    missing items cannot be claimed</strong>.</p>"""
+    else:
+        policy = f"""
+    <p style="margin-bottom:6px"><strong style="color:#e74c3c">TAKE PHOTOS OF THE PALLETS AT DELIVERY &mdash; NO MATTER WHAT.</strong><br>
+    Photos taken at the time of delivery are <strong>required to make a freight claim</strong>. Your delivery emails will include a phone-friendly link where the photos upload automatically as you take them.</p>
+    <p style="margin-bottom:6px">Freight damage or shortage must be noted on the delivery receipt (BOL) <strong>at the time of delivery &mdash; no exceptions</strong>; report within <strong>48 hours</strong> with at least <strong>2 photos per item claimed</strong>.</p>
+    <p style="margin-bottom:6px">Damage that occurs during or after assembly or installation is not claimable &mdash; inspect every part BEFORE assembling. Full terms on the <a href="https://www.cabinetsforcontractors.net/pages/4-policies" style="color:#1D4ED8">Policies Page</a>.</p>"""
+
+    body = f"""
+    <p>Hi {first_name},</p>
+    <p>Thank you &mdash; your order <strong>#{order_id}</strong> is in and our
+    system is already working on it.{po_line}{comments_line}<br>
+    Items total: <strong>${total:,.2f}</strong></p>
+    <div style="background:#EFF6FF;border:1px solid #BFDBFE;border-radius:8px;padding:14px 16px;margin:14px 0;font-size:13px;line-height:1.7">
+    <strong>What happens next:</strong> you'll receive your invoice from
+    <strong>orders@cabinetsforcontractors.com</strong> shortly, with your
+    shipping cost and payment link. After payment you'll get a receipt, then
+    progress updates as your order moves &mdash; warehouse, tracking, and
+    delivery.<br><br>
+    Please add <strong>orders@cabinetsforcontractors.com</strong> to your
+    contacts so our emails never land in spam.</div>
+    <table style="width:100%;border-collapse:collapse;font-size:13px">
+    <thead><tr style="border-bottom:2px solid #ddd"><th style="text-align:left;padding:6px">SKU's</th><th style="text-align:center;padding:6px">Qty</th><th style="text-align:right;padding:6px">Each</th><th style="text-align:right;padding:6px">Total</th></tr></thead>
+    <tbody>{rows}</tbody>
+    </table>
+    {policy}
+    <p>Any questions, just reply or call (770) 990-4885.</p>
+    <p>CFC Team<br>Cabinets For Contractors<br>www.CabinetsForContractors.net<br>www.CabinetsForContractors.com</p>
+    """
+    return _wrap_email(_header("We received your order",
+                               f"Order #{order_id}"), body)
+
+
 def _render_payment_confirmation(order: Dict) -> str:
     customer = proper_name(order.get("customer_name", "Valued Customer"))
     first_name = customer.split()[0] if customer else "there"
@@ -842,6 +929,7 @@ def _render_abandoned_cart_nudge(order: Dict) -> str:
 
 _RENDERERS = {
     "payment_link": _render_payment_link,
+    "order_received": _render_order_received,
     "payment_confirmation": _render_payment_confirmation,
     "shipping_notification": _render_shipping_notification,
     "delivery_confirmation": _render_delivery_confirmation,

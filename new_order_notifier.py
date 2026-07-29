@@ -191,6 +191,36 @@ def run_new_order_watch(conn) -> dict:
             _record(conn, oid, "test-order")
             out["recorded"].append({oid: "test-order"})
             continue
+        # CUSTOMER ORDER-RECEIVED EMAIL (William 2026-07-29: B2BWave customer
+        # notifications are OFF fleet-wide — "we will send the email from you
+        # when the order is placed"). Fires once per order (this loop only
+        # sees orders not yet in new_order_notices); allowlist-guarded like
+        # every customer send; failure alerts, never blocks the watcher.
+        if os.environ.get("ORDER_RECEIVED_EMAIL_ENABLED",
+                          "true").lower() == "true":
+            try:
+                from db_helpers import get_order_by_id
+                from email_sender import send_order_email
+                _o = get_order_by_id(oid) or {}
+                _to = (_o.get("email") or "").strip()
+                if _to:
+                    res = send_order_email(oid, "order_received", _to,
+                                           triggered_by="new_order_watch")
+                    out.setdefault("order_received", []).append(
+                        {oid: res.get("to") if res.get("success")
+                         else f"failed: {res.get('error')}"})
+                    if not res.get("success"):
+                        from supplier_orders import _send_email
+                        _send_email(oid, NOTIFY_TO,
+                                    f"ORDER-RECEIVED EMAIL FAILED - order #{oid}",
+                                    f"<p>The instant order-received email for "
+                                    f"order <strong>#{oid}</strong> did not "
+                                    f"send: {res.get('error')}. B2BWave "
+                                    f"notifications are off — the customer has "
+                                    f"received NOTHING. Send one by hand.</p>",
+                                    triggered_by="order_received_failed")
+            except Exception as e:
+                print(f"[NEW-ORDER] order-received email failed {oid}: {e}")
         mode = _mode()
         if mode == "off":
             _record(conn, oid, "mode-off")
