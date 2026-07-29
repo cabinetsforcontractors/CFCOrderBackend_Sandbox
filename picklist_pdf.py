@@ -38,7 +38,8 @@ def generate_picklist_pdf(order_data: dict, line_items=None) -> Optional[bytes]:
             line_items = []
 
     company = order_data.get('company_name') or ''
-    customer = order_data.get('customer_name') or ''
+    from email_templates import proper_name
+    customer = proper_name(order_data.get('customer_name') or '')
     street = order_data.get('street') or ''
     street2 = order_data.get('street2') or ''
     city = order_data.get('city') or ''

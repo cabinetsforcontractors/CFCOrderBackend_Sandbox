@@ -144,6 +144,20 @@ OVERSIZED_KEYWORDS = ['OVEN', 'PANTRY', '96"', '96*', 'X96', '96X', '96H', '96 H
 # HELPER FUNCTIONS
 # =============================================================================
 
+def pays_by_check(order) -> bool:
+    """Accounts invoiced WITHOUT a Square payment link — they pay by check
+    (William 2026-07-29: Nationwide). NO_PAYMENT_LINK_CUSTOMERS env =
+    comma-separated substrings matched case-insensitively against the
+    order's company and customer names; the Nationwide default stands
+    until overridden."""
+    tokens = [t.strip().lower() for t in os.environ.get(
+        "NO_PAYMENT_LINK_CUSTOMERS", "nationwide custom homes").split(",")
+        if t.strip()]
+    hay = " ".join([str((order or {}).get("company_name") or ""),
+                    str((order or {}).get("customer_name") or "")]).lower()
+    return any(t in hay for t in tokens)
+
+
 def is_b2bwave_configured():
     return bool(B2BWAVE_URL and B2BWAVE_USERNAME and B2BWAVE_API_KEY)
 

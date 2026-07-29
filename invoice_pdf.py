@@ -88,7 +88,8 @@ def generate_invoice_pdf(order_data: dict, shipping_result: dict) -> Optional[by
 
     # Same fields the email template reads (the order ROW, not B2BWave dicts)
     order_id = str(order_data.get('order_id') or order_data.get('id') or '')
-    customer_name = order_data.get('customer_name') or ''
+    from email_templates import proper_name
+    customer_name = proper_name(order_data.get('customer_name') or '')
     company_name = order_data.get('company_name') or ''
     email = order_data.get('email') or order_data.get('customer_email') or ''
     phone = order_data.get('phone') or order_data.get('customer_phone') or ''

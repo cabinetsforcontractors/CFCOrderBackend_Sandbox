@@ -568,6 +568,54 @@ def update_checkpoint(order_id: str, update: CheckpointUpdate, _: bool = Depends
             }
 
 
+@orders_router.post("/orders/{order_id}/payment-unstamp")
+def payment_unstamp(order_id: str, reason: str, b2bwave_status: int = 0,
+                    source: str = "admin", _: bool = Depends(require_admin)):
+    """Reverse a WRONG payment stamp. [admin]
+
+    Built 2026-07-29 (the Gerald triple-stamp: one Square payment stamped
+    three orders). Clears payment_received/_at/_amount, logs a
+    payment_unstamped event, and — when b2bwave_status is passed — FORCE-sets
+    the B2BWave status to it (the ladder never downgrades, so a wrongly
+    reached Being Prepared needs this explicit push back; readback-verified).
+    """
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""UPDATE orders SET payment_received = FALSE,
+                           payment_received_at = NULL, payment_amount = NULL,
+                           updated_at = NOW() WHERE order_id = %s""",
+                        (order_id,))
+            if cur.rowcount == 0:
+                raise HTTPException(status_code=404, detail="Order not found")
+            cur.execute("""INSERT INTO order_events
+                           (order_id, event_type, event_data, source)
+                           VALUES (%s, 'payment_unstamped', %s, %s)""",
+                        (order_id, json.dumps({"reason": reason}), source))
+
+    out = {"status": "ok", "order_id": order_id, "unstamped": True,
+           "reason": reason}
+    if b2bwave_status:
+        import os as _os
+        if _os.environ.get("B2BWAVE_MUTATIONS_ENABLED", "true").lower() == "false":
+            out["b2bwave"] = {"blocked": "B2BWAVE_MUTATIONS_ENABLED=false"}
+            return out
+        from substitutions import _b2b, fetch_b2b_order
+        from b2bwave_status import STATUS_NAMES, _log_event
+        target = int(b2bwave_status)
+        st, _data = _b2b("PATCH", f"orders/{order_id}/change_status",
+                         {"status_order_id": target})
+        check = fetch_b2b_order(order_id)
+        readback = int((check or {}).get("status_order_id") or 0)
+        b2b_out = {"http": st, "target": target,
+                   "target_name": STATUS_NAMES.get(target, str(target)),
+                   "readback": readback, "forced": True,
+                   "applied": readback == target,
+                   "reason": f"payment-unstamp: {reason}"}
+        _log_event(order_id, "b2bwave_status_set", b2b_out, "payment_unstamp")
+        out["b2bwave"] = b2b_out
+    return out
+
+
 @orders_router.patch("/orders/{order_id}/set-status")
 def set_order_status(order_id: str, status: str, source: str = "web_ui", _: bool = Depends(require_admin)):
     """

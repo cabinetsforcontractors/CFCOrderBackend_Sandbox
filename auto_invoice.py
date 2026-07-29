@@ -166,28 +166,36 @@ def run_auto_invoice(order_id: str, triggered_by: str = "new_order",
     tariff_rate = 0.08
     tariff = round(total * tariff_rate, 2)
     grand = round(total + tariff + ship["shipping"], 2)
+    # pay-by-check accounts (William 2026-07-29, Nationwide): invoice goes
+    # out WITHOUT a Square link — check notice replaces the pay button.
+    from config import pays_by_check
+    check_account = pays_by_check(order)
     out.update(totals={"total_items": total, "tariff_amount": tariff,
                        "tariff_rate": tariff_rate,
                        "total_shipping": ship["shipping"],
                        "grand_total": grand},
-               shipping_detail=ship["detail"], to=email)
+               shipping_detail=ship["detail"], to=email,
+               pay_by_check=check_account)
     if dry_run:
         out.update(status="dry_run")
         return out
 
-    try:
-        from square_links import create_payment_link
-        link = create_payment_link(order_id, grand)
-    except Exception as e:
-        return _needs_human(out, order_id, f"Square link creation failed — {e}")
-    _event(order_id, "payment_link_created",
-           {"link_id": link["id"], "url": link["url"], "amount": grand,
-            "auto": True})
+    link = None
+    if not check_account:
+        try:
+            from square_links import create_payment_link
+            link = create_payment_link(order_id, grand)
+        except Exception as e:
+            return _needs_human(out, order_id, f"Square link creation failed — {e}")
+        _event(order_id, "payment_link_created",
+               {"link_id": link["id"], "url": link["url"], "amount": grand,
+                "auto": True})
 
     order_data = dict(order)
     order_data["order_id"] = order_id
     order_data["shipping_result"] = out["totals"]
-    order_data["payment_link"] = link["url"]
+    order_data["payment_link"] = link["url"] if link else "#"
+    order_data["pay_by_check"] = check_account
     # classification box mirrors the actual quote (William 2026-07-28)
     if not order.get("is_pickup"):
         order_data["quoted_residential"] = ship.get("residential")
@@ -207,8 +215,9 @@ def run_auto_invoice(order_id: str, triggered_by: str = "new_order",
                            triggered_by=f"auto_invoice_{triggered_by}")
     if not res.get("success"):
         return _needs_human(out, order_id,
-                            f"send failed — {res.get('error')} "
-                            f"(link {link['url']} already exists; reuse it)")
+                            f"send failed — {res.get('error')}"
+                            + (f" (link {link['url']} already exists; "
+                               f"reuse it)" if link else ""))
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute("""UPDATE orders SET payment_link_sent = TRUE,
@@ -217,16 +226,20 @@ def run_auto_invoice(order_id: str, triggered_by: str = "new_order",
             conn.commit()
     _event(order_id, "invoice_auto_sent",
            {"to": res.get("to") or email, "grand_total": grand,
-            "link_id": link["id"], "redirected": (res.get("to") or email) != email})
+            "link_id": link["id"] if link else None,
+            "pay_by_check": check_account,
+            "redirected": (res.get("to") or email) != email})
     try:
         from b2bwave_status import on_payment_link_sent
         on_payment_link_sent(order_id)
     except Exception:
         pass
     out.update(status="sent", sent_to=res.get("to") or email,
-               payment_link=link["url"], payment_link_id=link["id"])
+               payment_link=link["url"] if link else None,
+               payment_link_id=link["id"] if link else None)
     print(f"[AUTO-INVOICE] SENT order {order_id} -> {out['sent_to']} "
-          f"grand ${grand:,.2f} link {link['id']}")
+          f"grand ${grand:,.2f} "
+          f"{'pay-by-check' if check_account else 'link ' + link['id']}")
     return out
 
 

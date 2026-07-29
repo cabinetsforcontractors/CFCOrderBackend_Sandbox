@@ -325,6 +325,12 @@ def create_invoice_draft(
     if not order_data:
         return {"success": False, "error": f"Order {order_id} not found"}
     order_data["order_id"] = order_id
+    # pay-by-check accounts (William 2026-07-29, Nationwide): no Square link
+    # on their invoices — check notice replaces the pay button.
+    from config import pays_by_check
+    if pays_by_check(order_data):
+        auto_link = False
+        order_data["pay_by_check"] = True
     if (note or "").strip():
         # William 2026-07-28 (the 5731 B09->B09-FH case): a per-invoice note
         # rides the email body AND the PDF when passed.

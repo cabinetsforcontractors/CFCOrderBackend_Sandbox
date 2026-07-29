@@ -12,6 +12,7 @@ Phase 3B Enhancement:
 import os
 import re
 import json
+import time
 import urllib.request
 import urllib.error
 from datetime import datetime, timezone, timedelta
@@ -45,6 +46,7 @@ AUTOMATION_SUBJECT_PREFIXES = (
     "DISCREPANCY",
     "ALERT!!",
     "GHI EMAIL NEEDS A HUMAN",
+    "PAYMENT NEEDS A HUMAN",
 )
 
 
@@ -71,26 +73,35 @@ def get_gmail_access_token():
         print("[GMAIL] Not configured")
         return None
     
-    try:
-        token_data = urllib.parse.urlencode({
-            'client_id': GMAIL_CLIENT_ID,
-            'client_secret': GMAIL_CLIENT_SECRET,
-            'refresh_token': GMAIL_REFRESH_TOKEN,
-            'grant_type': 'refresh_token'
-        }).encode()
-        
-        req = urllib.request.Request('https://oauth2.googleapis.com/token', data=token_data)
-        
-        with urllib.request.urlopen(req, timeout=30) as response:
-            data = json.loads(response.read().decode())
-            _access_token = data.get('access_token')
-            # Token typically valid for 1 hour, we'll refresh at 50 min
-            _token_expires = datetime.now(timezone.utc) + timedelta(minutes=50)
-            return _access_token
-            
-    except Exception as e:
-        print(f"[GMAIL] Token refresh error: {e}")
-        return None
+    # RETRY (2026-07-29, the 5731 lost payment-confirmation): the refresh was
+    # a single attempt, so one transient Google/network blip at the moment the
+    # 50-min cache expired lost the email that triggered it. Three attempts
+    # with a short backoff ride out blips; a real outage still returns None.
+    token_data = urllib.parse.urlencode({
+        'client_id': GMAIL_CLIENT_ID,
+        'client_secret': GMAIL_CLIENT_SECRET,
+        'refresh_token': GMAIL_REFRESH_TOKEN,
+        'grant_type': 'refresh_token'
+    }).encode()
+
+    last_err = None
+    for attempt in range(3):
+        if attempt:
+            time.sleep(2 * attempt)  # 2s, then 4s
+        try:
+            req = urllib.request.Request('https://oauth2.googleapis.com/token', data=token_data)
+            with urllib.request.urlopen(req, timeout=30) as response:
+                data = json.loads(response.read().decode())
+                _access_token = data.get('access_token')
+                # Token typically valid for 1 hour, we'll refresh at 50 min
+                _token_expires = datetime.now(timezone.utc) + timedelta(minutes=50)
+                return _access_token
+        except Exception as e:
+            last_err = e
+            print(f"[GMAIL] Token refresh error (attempt {attempt + 1}/3): {e}")
+
+    print(f"[GMAIL] Token refresh FAILED after 3 attempts: {last_err}")
+    return None
 
 def gmail_api_request(endpoint, params=None):
     """Make authenticated request to Gmail API"""
@@ -381,7 +392,8 @@ def run_gmail_sync(db_conn, hours_back=2):
                 customer_name = extract_customer_name(email['subject'])
                 
                 if amount and customer_name:
-                    matched = match_payment_to_order(db_conn, amount, customer_name, email)
+                    matched = match_payment_to_order(db_conn, amount, customer_name, email,
+                                                     message_id=msg['id'])
                     if matched:
                         results["payments_received"] += 1
                         
@@ -605,67 +617,174 @@ def update_order_payment_link_sent(conn, order_id, email):
 
         return True
 
-def match_payment_to_order(conn, amount, customer_name, email):
-    """Try to match a Square payment to an order"""
+def _expected_charge(cur, order_id, order_total):
+    """The amount the customer was actually asked to pay: the latest payment
+    link amount (= invoice grand total, items + tariff + shipping) when one
+    exists, else the items-only order_total."""
+    cur.execute("""
+        SELECT event_data FROM order_events
+        WHERE order_id = %s AND event_type = 'payment_link_created'
+        ORDER BY created_at DESC LIMIT 1
+    """, (str(order_id),))
+    row = cur.fetchone()
+    if row:
+        data = row['event_data'] if not isinstance(row, tuple) else row[0]
+        if isinstance(data, str):
+            try:
+                data = json.loads(data)
+            except Exception:
+                data = {}
+        amt = (data or {}).get('amount')
+        if amt:
+            return float(amt), 'invoiced amount'
+    return float(order_total or 0), 'order total'
+
+
+def match_payment_to_order(conn, amount, customer_name, email, message_id=""):
+    """Match a Square payment-received email to exactly ONE order.
+
+    REBUILT 2026-07-29 (the Gerald triple-stamp): the old matcher stamped any
+    name-matched order whose total was <= the payment ("payment might include
+    shipping", >=95%) and had no message dedupe — every 15-min sync pass
+    re-read the same Square email and stamped the NEXT unpaid order by the
+    same customer (one $2,876.11 payment stamped 5731 + 5738 + 5707; 5738 was
+    a $301.84 pickup order). Rules now:
+      1. one Square email stamps AT MOST ONCE ever (message-id dedupe);
+      2. the amount must match what the customer was actually invoiced
+         (latest payment_link_created amount, else order_total) within $1;
+      3. exactly ONE candidate may pass — amounts lining up with none or
+         several of the customer's open orders means NO stamp and a
+         PAYMENT NEEDS A HUMAN alert instead. (square_sync's exact INV-{id}
+         matching still covers link payments independently.)"""
     from psycopg2.extras import RealDictCursor
-    
+
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        # Try to find matching order by amount and customer name
+        if message_id:
+            cur.execute("""
+                SELECT 1 FROM order_events
+                WHERE event_type IN ('payment_received', 'payment_match_alert')
+                AND event_data::text LIKE %s
+                LIMIT 1
+            """, (f'%{message_id}%',))
+            if cur.fetchone():
+                return False  # this email already stamped or alerted — never twice
+
         cur.execute("""
-            SELECT order_id, customer_name, company_name, order_total, payment_received
-            FROM orders 
+            SELECT order_id, customer_name, company_name, order_total
+            FROM orders
             WHERE payment_received = FALSE
             AND (
                 LOWER(customer_name) LIKE LOWER(%s)
                 OR LOWER(company_name) LIKE LOWER(%s)
             )
             ORDER BY order_date DESC
-            LIMIT 5
+            LIMIT 10
         """, (f'%{customer_name.split()[0]}%', f'%{customer_name.split()[0]}%'))
-        
         candidates = cur.fetchall()
-        
+
+        if not candidates:
+            # not one of our open orders (Square notifies on every payment) —
+            # stay silent, square_sync's exact matcher may still know it
+            print(f"[GMAIL] No candidate orders for payment ${amount} from {customer_name}")
+            return False
+
+        passing = []
         for order in candidates:
-            order_total = float(order['order_total'] or 0)
-            # Payment might include shipping, so check if amount >= order total
-            if amount >= order_total * 0.95:  # Allow 5% variance
-                # Found match
-                cur.execute("""
-                    UPDATE orders SET 
-                        payment_received = TRUE,
-                        payment_received_at = NOW(),
-                        payment_amount = %s,
-                        updated_at = NOW()
-                    WHERE order_id = %s
-                """, (amount, order['order_id']))
-                
-                cur.execute("""
-                    INSERT INTO order_events (order_id, event_type, event_data, source)
-                    VALUES (%s, 'payment_received', %s, 'gmail_sync')
-                """, (order['order_id'], json.dumps({
-                    'amount': amount, 
-                    'customer': customer_name,
-                    'subject': email['subject'][:100]
-                })))
-                
-                # Phase 3B: Payment is customer activity — update lifecycle
-                update_last_customer_email(conn, order['order_id'])
-                
-                conn.commit()
-                print(f"[GMAIL] Order {order['order_id']}: payment ${amount} received from {customer_name}")
+            expected, basis = _expected_charge(cur, order['order_id'],
+                                               order['order_total'])
+            order['_expected'] = expected
+            order['_basis'] = basis
+            if expected > 0 and abs(float(amount) - expected) <= 1.00:
+                passing.append(order)
 
-                # Status-driven lifecycle checkpoint (William 2026-07-17):
-                # paid -> Being Prepared. Gmail-matched payments update the
-                # store status too (dispatch stays gated separately). Guarded.
-                try:
-                    from b2bwave_status import on_payment_received
-                    on_payment_received(order['order_id'])
-                except Exception as e:
-                    print(f"[GMAIL] b2bwave status hook failed for {order['order_id']}: {e}")
+        if len(passing) == 1:
+            order = passing[0]
+            cur.execute("""
+                UPDATE orders SET
+                    payment_received = TRUE,
+                    payment_received_at = NOW(),
+                    payment_amount = %s,
+                    updated_at = NOW()
+                WHERE order_id = %s
+            """, (amount, order['order_id']))
 
-                return True
-        
-        print(f"[GMAIL] No match for payment ${amount} from {customer_name}")
+            cur.execute("""
+                INSERT INTO order_events (order_id, event_type, event_data, source)
+                VALUES (%s, 'payment_received', %s, 'gmail_sync')
+            """, (order['order_id'], json.dumps({
+                'amount': amount,
+                'customer': customer_name,
+                'subject': email['subject'][:100],
+                'message_id': message_id,
+                'matched_against': f"{order['_expected']} ({order['_basis']})"
+            })))
+
+            # Phase 3B: Payment is customer activity — update lifecycle
+            update_last_customer_email(conn, order['order_id'])
+
+            conn.commit()
+            print(f"[GMAIL] Order {order['order_id']}: payment ${amount} received from {customer_name}")
+
+            # Status-driven lifecycle checkpoint (William 2026-07-17):
+            # paid -> Being Prepared. Gmail-matched payments update the
+            # store status too (dispatch stays gated separately). Guarded.
+            try:
+                from b2bwave_status import on_payment_received
+                on_payment_received(order['order_id'])
+            except Exception as e:
+                print(f"[GMAIL] b2bwave status hook failed for {order['order_id']}: {e}")
+
+            return True
+
+        # The customer has open orders but the amount lines up with none of
+        # them (or with several) — a human decides which order this pays.
+        why = ("this amount matches SEVERAL of their open orders"
+               if len(passing) > 1 else
+               "this amount matches NONE of their open orders' invoiced totals")
+        detail = {
+            'amount': amount,
+            'customer': customer_name,
+            'message_id': message_id,
+            'why': why,
+            'candidates': [{'order_id': o['order_id'],
+                            'expected': o['_expected'],
+                            'basis': o['_basis']} for o in candidates],
+        }
+        # one event on the newest candidate = the dedupe anchor + a timeline trace
+        cur.execute("""
+            INSERT INTO order_events (order_id, event_type, event_data, source)
+            VALUES (%s, 'payment_match_alert', %s, 'gmail_sync')
+        """, (candidates[0]['order_id'], json.dumps(detail)))
+        conn.commit()
+        print(f"[GMAIL] PAYMENT NEEDS A HUMAN: ${amount} from {customer_name} — {why}")
+
+        try:
+            from supplier_orders import _send_email
+            alert_to = os.environ.get("WAREHOUSE_NOTIFICATION_EMAIL",
+                                      "orders@cabinetsforcontractors.com").strip()
+            rows = "".join(
+                f"<tr><td style='padding:4px 10px;border-bottom:1px solid #eee'>{o['order_id']}</td>"
+                f"<td style='padding:4px 10px;border-bottom:1px solid #eee;text-align:right'>${o['_expected']:,.2f}</td>"
+                f"<td style='padding:4px 10px;border-bottom:1px solid #eee'>{o['_basis']}</td></tr>"
+                for o in candidates)
+            _send_email(
+                candidates[0]['order_id'], alert_to,
+                f"PAYMENT NEEDS A HUMAN - ${amount:,.2f} from {customer_name}",
+                f"<p>A Square payment of <strong>${amount:,.2f}</strong> from "
+                f"<strong>{customer_name}</strong> could not be matched to one "
+                f"order: {why}. Nothing was stamped.</p>"
+                f"<table style='border-collapse:collapse;font-size:13px'>"
+                f"<tr><th style='padding:4px 10px;text-align:left'>Open order</th>"
+                f"<th style='padding:4px 10px;text-align:right'>Invoiced / total</th>"
+                f"<th style='padding:4px 10px;text-align:left'>Basis</th></tr>"
+                f"{rows}</table>"
+                f"<p>When you know which order this pays, stamp it: "
+                f"PATCH /orders/&#123;id&#125;/checkpoint "
+                f"(checkpoint=payment_received, payment_amount={amount}).</p>",
+                triggered_by="payment_match_alert")
+        except Exception as e:
+            print(f"[GMAIL] payment-match alert failed: {e}")
+
         return False
 
 def update_order_rl_quote(conn, order_id, quote_no, email):

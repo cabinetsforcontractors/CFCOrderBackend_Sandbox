@@ -16,8 +16,53 @@ Templates:
  11. abandoned_cart_nudge   — Nudge for abandoned B2BWave carts
 """
 
+import re
 from typing import Dict, List, Optional
 from datetime import datetime
+
+
+def proper_name(name) -> str:
+    """Customers type their own names lowercase at signup ("dominic
+    gugliotti") — greet them properly (William 2026-07-29). All-lowercase or
+    ALL-CAPS words get capitalized (each hyphen/apostrophe segment on its
+    own: o'brien -> O'Brien, smith-jones -> Smith-Jones); words the customer
+    mixed-cased themselves (McDonald, DeShawn) are left exactly as typed."""
+    if not name or not str(name).strip():
+        return name or ""
+
+    def _cap(word):
+        if not (word.islower() or word.isupper()):
+            return word
+        return re.sub(r"[A-Za-z]+",
+                      lambda m: m.group(0)[0].upper() + m.group(0)[1:].lower(),
+                      word)
+
+    return " ".join(_cap(w) for w in str(name).split())
+
+
+# The claim-filing door on the live site (William 2026-07-29: claims verbiage
+# rides the invoice AND the delivered email — damage must be noted on the BOL
+# at delivery, 48-hour window, assembled/installed = accepted).
+CLAIMS_URL = "https://www.cabinetsforcontractors.net/pages/5-replacement-request"
+
+
+def _claims_block() -> str:
+    """Damage-claims verbiage for the delivered email: what is claimable,
+    what is not, the BOL notation law, the 48-hour window — presented at
+    delivery so damage done during assembly/installation can't become a
+    claim later."""
+    return f"""
+    <div style="background:#FFFBEA;border:1px solid #F0E0A0;border-radius:8px;padding:16px 18px;margin:20px 0;font-size:13px;line-height:1.7;color:#333333;">
+        <div style="font-weight:700;font-size:14px;margin-bottom:8px;">&#128230; Please inspect your delivery &mdash; how claims work</div>
+        <p style="margin:0 0 8px;"><strong>Check every box now, before assembly or installation.</strong> If you notice any damage or issues, please let us know within <strong>48 hours</strong>.</p>
+        <ul style="margin:0 0 8px;padding-left:20px;">
+            <li><strong>Freight damage must be noted on the delivery receipt (BOL) at the time of delivery &mdash; no exceptions.</strong> Claims for damage that was not noted when you signed cannot be honored.</li>
+            <li><strong>What we can replace:</strong> shipping damage noted on the BOL, manufacturing defects, and missing or incorrect items &mdash; reported within 48 hours with photos.</li>
+            <li><strong>What we cannot replace:</strong> damage that occurs during or after assembly or installation. Once a cabinet has been assembled, modified, or installed, it is considered accepted.</li>
+        </ul>
+        <p style="margin:0;">To file a claim: <a href="{CLAIMS_URL}" style="color:#1D4ED8;font-weight:600;">Replacement Request form</a> &mdash; include photos of the item and its packaging.</p>
+    </div>
+    """
 
 
 TEMPLATE_REGISTRY = {
@@ -222,9 +267,9 @@ def _wrap_email(header: str, body_content: str) -> str:
 </html>"""
 
 
-def _order_summary_block(order: Dict) -> str:
+def _order_summary_block(order: Dict, show_total: bool = True) -> str:
     order_id = order.get("order_id", "\u2014")
-    customer = order.get("customer_name", "\u2014")
+    customer = proper_name(order.get("customer_name", "\u2014"))
     company = order.get("company_name", "")
     total = order.get("order_total", 0)
     order_date = order.get("order_date", "")
@@ -234,6 +279,9 @@ def _order_summary_block(order: Dict) -> str:
 
     total_fmt = f"${float(total):,.2f}" if total else "\u2014"
     company_line = f'<tr><td style="color:#718096;padding:5px 0;font-size:13px;">Company</td><td style="font-weight:600;font-size:13px;">{company}</td></tr>' if company else ""
+    # show_total=False (William 2026-07-29): the delivered email carries no
+    # dollar figure \u2014 the order is long paid by then.
+    total_line = f'<tr><td style="color:#718096;padding:5px 0;font-size:13px;">Total</td><td style="font-weight:700;font-size:16px;color:#1a365d;">{total_fmt}</td></tr>' if show_total else ""
 
     return f"""
     <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:20px;margin:20px 0;">
@@ -243,7 +291,7 @@ def _order_summary_block(order: Dict) -> str:
             <tr><td style="color:#718096;padding:5px 0;font-size:13px;">Customer</td><td style="font-weight:600;font-size:13px;">{customer}</td></tr>
             {company_line}
             <tr><td style="color:#718096;padding:5px 0;font-size:13px;">Date</td><td style="font-weight:600;font-size:13px;">{order_date or "\u2014"}</td></tr>
-            <tr><td style="color:#718096;padding:5px 0;font-size:13px;">Total</td><td style="font-weight:700;font-size:16px;color:#1a365d;">{total_fmt}</td></tr>
+            {total_line}
         </table>
     </div>
     """
@@ -267,7 +315,7 @@ def _render_payment_link(order: Dict) -> str:
     footer. Expects shipping_result; fetches line items itself when not
     supplied.
     """
-    customer = order.get("customer_name") or "Valued Customer"
+    customer = proper_name(order.get("customer_name") or "Valued Customer")
     first_name = customer.split()[0] if customer.strip() else "there"
     company = order.get("company_name") or ""
     order_id = str(order.get("order_id", order.get("id", "")))
@@ -343,13 +391,21 @@ def _render_payment_link(order: Dict) -> str:
 <p style="margin:0;text-align:center"><a href="{confirm_commercial_url}" style="display:inline-block;background:#DC2626;color:#ffffff;text-decoration:none;padding:10px 24px;border-radius:6px;font-weight:700;font-size:13px;letter-spacing:0.3px">This is a commercial address &rarr;</a></p>
 </div>"""
 
-    policy_box = """<div style="background:#FFFBEA;border:1px solid #F0E0A0;border-radius:6px;padding:14px 18px;margin:18px 0;font-size:13px;color:rgb(51,51,51);line-height:1.6">
+    # pay_by_check (William 2026-07-29, Nationwide): some accounts are
+    # invoiced without a payment link — the policy consent rides payment
+    # itself, and the pay button is replaced by a check notice.
+    pay_by_check = bool(order.get("pay_by_check"))
+    policy_intro = ("By paying this invoice you agree to the following policies:"
+                    if pay_by_check else
+                    "By clicking the payment link you agree to the following policies:")
+    policy_box = f"""<div style="background:#FFFBEA;border:1px solid #F0E0A0;border-radius:6px;padding:14px 18px;margin:18px 0;font-size:13px;color:rgb(51,51,51);line-height:1.6">
 <strong>&#9888;&#65039; Please read before completing payment</strong><br>
-By clicking the payment link you agree to the following policies:
+{policy_intro}
 <ul style="margin:8px 0 0;padding-left:20px">
 <li>No returns on assembled or installed cabinets.</li>
-<li>20% restocking fee on returned undamaged items in original packaging.</li>
 <li>Damaged items must be noted on the BOL, no exceptions, and reported within 48 hours of delivery.</li>
+<li>Damage that occurs during or after assembly or installation is not claimable &mdash; inspect every part BEFORE assembling. Once a cabinet is assembled, modified, or installed, it is considered accepted.</li>
+<li>20% restocking fee on returned undamaged items in original packaging.</li>
 <li>Buyer is responsible for verifying all measurements before ordering &mdash; we cannot accept returns for incorrect sizing.</li>
 <li>Warehouse pickups: it is your responsibility to check the order at pickup and confirm every SKU ordered is present and accounted for &mdash; once you leave the warehouse, no claims can be made for missing items.</li>
 </ul>
@@ -363,6 +419,13 @@ By clicking the payment link you agree to the following policies:
         f"""<div style="background:#FEF3C7;border:1px solid #F59E0B;border-radius:6px;padding:12px 16px;margin:0 0 18px;font-size:13px;color:rgb(51,51,51);line-height:1.6"><strong>&#128221; Note about your order:</strong> {note}</div>"""
         if note else ""
     )
+
+    if pay_by_check:
+        pay_cta = """<div style="border:2px solid #1D4ED8;border-radius:8px;padding:16px 18px;margin:26px 0;text-align:center;font-size:14px;color:rgb(51,51,51);line-height:1.6">
+<strong>&#128179; This account is invoiced for payment by check</strong> &mdash; no online payment is needed.<br>
+Please send your check for the Grand Total per our usual arrangement, and reply to this email if you need remittance details.</div>"""
+    else:
+        pay_cta = f"""<p style="text-align:center;margin:26px 0"><a href="{payment_link}" style="display:inline-block;background:#1D4ED8;color:#ffffff;text-decoration:none;padding:16px 46px;border-radius:12px;font-weight:800;font-size:19px;letter-spacing:0.5px">CLICK TO PAY NOW</a></p>"""
 
     return f"""<div style="font-family:'Open Sans',Helvetica,Arial,sans-serif;font-size:14px;padding:20px">
 <div style="max-width:660px;margin:0px auto;padding:28px;border:1px solid rgb(229,229,229)">
@@ -391,7 +454,7 @@ By clicking the payment link you agree to the following policies:
 </div>
 {residential_notice}
 {policy_box}
-<p style="text-align:center;margin:26px 0"><a href="{payment_link}" style="display:inline-block;background:#1D4ED8;color:#ffffff;text-decoration:none;padding:16px 46px;border-radius:12px;font-weight:800;font-size:19px;letter-spacing:0.5px">CLICK TO PAY NOW</a></p>
+{pay_cta}
 <p style="color:rgb(51,51,51)">Any questions, just reply or call.</p>
 <p style="color:rgb(51,51,51);margin-top:18px">CFC Team<br>Cabinets For Contractors<br>www.CabinetsForContractors.net<br>www.CabinetsForContractors.com<br>(770) 990-4885</p>
 </div></div>"""
@@ -399,7 +462,7 @@ By clicking the payment link you agree to the following policies:
 
 
 def _render_payment_confirmation(order: Dict) -> str:
-    customer = order.get("customer_name", "Valued Customer")
+    customer = proper_name(order.get("customer_name", "Valued Customer"))
     first_name = customer.split()[0] if customer else "there"
     order_id = str(order.get("order_id", order.get("id", "")))
     amount = order.get("payment_amount") or order.get("order_total", 0)
@@ -416,7 +479,7 @@ def _render_payment_confirmation(order: Dict) -> str:
 
 
 def _render_shipping_notification(order: Dict) -> str:
-    customer = order.get("customer_name", "Valued Customer")
+    customer = proper_name(order.get("customer_name", "Valued Customer"))
     first_name = customer.split()[0] if customer else "there"
     order_id = str(order.get("order_id", order.get("id", "")))
     tracking = order.get("tracking", "")
@@ -446,22 +509,25 @@ def _render_shipping_notification(order: Dict) -> str:
 
 
 def _render_delivery_confirmation(order: Dict) -> str:
-    customer = order.get("customer_name", "Valued Customer")
+    customer = proper_name(order.get("customer_name", "Valued Customer"))
     first_name = customer.split()[0] if customer else "there"
     order_id = str(order.get("order_id", order.get("id", "")))
 
+    # v2 (William 2026-07-29): no dollar total in the delivered email; the
+    # claims block replaces the bare 48-hour line (BOL notation law, covered
+    # vs not covered, assembled/installed = accepted).
     body = f"""
     <p>Hi {first_name},</p>
     <p>Your cabinets for Order #{order_id} have been delivered!</p>
-    {_order_summary_block(order)}
-    <p>If you notice any damage or issues, please let us know within 48 hours.</p>
+    {_order_summary_block(order, show_total=False)}
+    {_claims_block()}
     <p>Thanks for choosing Cabinets For Contractors,<br><strong>William Prince</strong></p>
     """
     return _wrap_email(_header("Order Delivered", f"Order #{order_id}"), body)
 
 
 def _render_trusted_payment_reminder(order: Dict) -> str:
-    customer = order.get("customer_name", "Valued Customer")
+    customer = proper_name(order.get("customer_name", "Valued Customer"))
     first_name = customer.split()[0] if customer else "there"
     order_id = str(order.get("order_id", order.get("id", "")))
     payment_link = order.get("payment_link", "#")
@@ -479,7 +545,7 @@ def _render_trusted_payment_reminder(order: Dict) -> str:
 
 
 def _render_payment_reminder_day6(order: Dict) -> str:
-    customer = order.get("customer_name", "Valued Customer")
+    customer = proper_name(order.get("customer_name", "Valued Customer"))
     first_name = customer.split()[0] if customer else "there"
     order_id = str(order.get("order_id", order.get("id", "")))
     payment_link = order.get("payment_link", "#")
@@ -495,7 +561,7 @@ def _render_payment_reminder_day6(order: Dict) -> str:
 
 
 def _render_inactive_notice_day7(order: Dict) -> str:
-    customer = order.get("customer_name", "Valued Customer")
+    customer = proper_name(order.get("customer_name", "Valued Customer"))
     first_name = customer.split()[0] if customer else "there"
     order_id = str(order.get("order_id", order.get("id", "")))
 
@@ -510,7 +576,7 @@ def _render_inactive_notice_day7(order: Dict) -> str:
 
 
 def _render_cancel_warning_day14(order: Dict) -> str:
-    customer = order.get("customer_name", "Valued Customer")
+    customer = proper_name(order.get("customer_name", "Valued Customer"))
     first_name = customer.split()[0] if customer else "there"
     order_id = str(order.get("order_id", order.get("id", "")))
 
@@ -525,7 +591,7 @@ def _render_cancel_warning_day14(order: Dict) -> str:
 
 
 def _render_cancel_confirmation(order: Dict) -> str:
-    customer = order.get("customer_name", "Valued Customer")
+    customer = proper_name(order.get("customer_name", "Valued Customer"))
     first_name = customer.split()[0] if customer else "there"
     order_id = str(order.get("order_id", order.get("id", "")))
     reason = order.get("cancel_reason", "")
@@ -551,7 +617,7 @@ def _render_cancel_confirmation(order: Dict) -> str:
 
 def _render_quote_email(order: Dict) -> str:
     """Quote email with line items, totals, no Pay button -- CTA to B2BWave portal or call."""
-    customer = order.get("customer_name", "Valued Customer")
+    customer = proper_name(order.get("customer_name", "Valued Customer"))
     first_name = customer.split()[0] if customer else "there"
     order_id = str(order.get("order_id", order.get("id", "")))
     line_items = order.get("line_items", [])
@@ -638,7 +704,7 @@ def _render_quote_email(order: Dict) -> str:
 
 def _render_abandoned_cart_nudge(order: Dict) -> str:
     """Nudge email for abandoned B2BWave carts."""
-    customer = order.get("customer_name", "Valued Customer")
+    customer = proper_name(order.get("customer_name", "Valued Customer"))
     first_name = customer.split()[0] if customer else "there"
     order_id = str(order.get("order_id", order.get("id", "")))
     line_items = order.get("line_items", [])

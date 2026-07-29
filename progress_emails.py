@@ -191,7 +191,8 @@ def ensure_progress_table(conn):
 # =============================================================================
 
 def _first_name(order: Dict) -> str:
-    name = (order.get("customer_name") or "").strip()
+    from email_templates import proper_name
+    name = proper_name((order.get("customer_name") or "").strip())
     first = name.split(" ")[0] if name else ""
     return first if first else "there"
 
