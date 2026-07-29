@@ -329,13 +329,15 @@ def _sweep_info(known_ids, kw_rules=()):
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
+                # NOTE: the ledger stamps folder='sent' for ANYTHING from our
+                # own addresses, so info mail is identified as FROM us AND TO
+                # us (self-sent), folder ignored.
                 cur.execute("""
                     SELECT DISTINCT ON (thread_id)
-                           message_id, thread_id, from_addr, subject,
-                           email_date, order_ids
+                           message_id, thread_id, from_addr, to_addr,
+                           subject, email_date, order_ids
                     FROM email_ledger
-                    WHERE folder = 'inbox'
-                      AND email_date > NOW() - INTERVAL '7 days'
+                    WHERE email_date > NOW() - INTERVAL '7 days'
                     ORDER BY thread_id, email_date DESC
                 """)
                 rows = cur.fetchall()
@@ -343,9 +345,10 @@ def _sweep_info(known_ids, kw_rules=()):
         print(f"[TASKS] info sweep ledger read failed: {e}")
         return tasks
     own = OWN_ADDRESSES | {FLAG_INBOX.lower()}
-    for mid, tid, frm, subj, edate, oids in rows:
+    for mid, tid, frm, to, subj, edate, oids in rows:
         addr = _sender_address(frm or "")
-        if addr not in own:
+        to_low = (to or "").lower()
+        if addr not in own or not any(o in to_low for o in own):
             continue
         subj = subj or ""
         if HANDOFF_RE.search(subj) or is_own_automation_subject(subj):
