@@ -46,11 +46,14 @@ def proper_name(name) -> str:
 CLAIMS_URL = "https://www.cabinetsforcontractors.net/pages/5-replacement-request"
 
 
-def _claims_block() -> str:
+def _claims_block(order: Dict = None) -> str:
     """Damage-claims verbiage for the delivered email: what is claimable,
     what is not, the BOL notation law, the 48-hour window — presented at
     delivery so damage done during assembly/installation can't become a
-    claim later."""
+    claim later. When the order carries a tokenized claims_url (the new
+    per-order form, 2026-07-29) the link points there instead of the old
+    .net page."""
+    claims_url = (order or {}).get("claims_url") or CLAIMS_URL
     return f"""
     <div style="background:#FFFBEA;border:1px solid #F0E0A0;border-radius:8px;padding:16px 18px;margin:20px 0;font-size:13px;line-height:1.7;color:#333333;">
         <div style="font-weight:700;font-size:14px;margin-bottom:8px;">&#128230; Please inspect your delivery &mdash; how claims work</div>
@@ -60,7 +63,7 @@ def _claims_block() -> str:
             <li><strong>What we can replace:</strong> shipping damage noted on the BOL, manufacturing defects, and missing or incorrect items &mdash; reported within 48 hours with photos.</li>
             <li><strong>What we cannot replace:</strong> damage that occurs during or after assembly or installation. Once a cabinet has been assembled, modified, or installed, it is considered accepted.</li>
         </ul>
-        <p style="margin:0;">To file a claim: <a href="{CLAIMS_URL}" style="color:#1D4ED8;font-weight:600;">Replacement Request form</a> &mdash; include photos of the item and its packaging.</p>
+        <p style="margin:0;">To file a claim: <a href="{claims_url}" style="color:#1D4ED8;font-weight:600;">Replacement Request form</a> &mdash; include photos of the item and its packaging.</p>
     </div>
     """
 
@@ -290,12 +293,16 @@ def _wrap_email(header: str, body_content: str) -> str:
 </html>"""
 
 
-def _order_summary_block(order: Dict, show_total: bool = True) -> str:
+def _order_summary_block(order: Dict, show_total: bool = True,
+                         date_label: str = "Date",
+                         date_value: str = None) -> str:
     order_id = order.get("order_id", "\u2014")
     customer = proper_name(order.get("customer_name", "\u2014"))
     company = order.get("company_name", "")
     total = order.get("order_total", 0)
-    order_date = order.get("order_date", "")
+    # date_value overrides the order date (William 2026-07-29: the delivered
+    # email shows the DELIVERY date, never the order date)
+    order_date = date_value if date_value else order.get("order_date", "")
 
     if isinstance(order_date, datetime):
         order_date = order_date.strftime("%B %d, %Y")
@@ -313,7 +320,7 @@ def _order_summary_block(order: Dict, show_total: bool = True) -> str:
             <tr><td style="color:#718096;padding:5px 0;font-size:13px;">Order #</td><td style="font-weight:600;font-size:13px;">{order_id}</td></tr>
             <tr><td style="color:#718096;padding:5px 0;font-size:13px;">Customer</td><td style="font-weight:600;font-size:13px;">{customer}</td></tr>
             {company_line}
-            <tr><td style="color:#718096;padding:5px 0;font-size:13px;">Date</td><td style="font-weight:600;font-size:13px;">{order_date or "\u2014"}</td></tr>
+            <tr><td style="color:#718096;padding:5px 0;font-size:13px;">{date_label}</td><td style="font-weight:600;font-size:13px;">{order_date or "\u2014"}</td></tr>
             {total_line}
         </table>
     </div>
@@ -540,12 +547,25 @@ def _render_delivery_confirmation(order: Dict) -> str:
 
     # v2 (William 2026-07-29): no dollar total in the delivered email; the
     # claims block replaces the bare 48-hour line (BOL notation law, covered
-    # vs not covered, assembled/installed = accepted).
+    # vs not covered, assembled/installed = accepted); the date shown is the
+    # DELIVERY date (delivered_on, from the carrier notice), never the order
+    # date.
+    delivered_on = str(order.get("delivered_on") or "").strip()
+    if delivered_on:
+        try:
+            delivered_on = datetime.strptime(
+                delivered_on, "%m/%d/%Y").strftime("%B %d, %Y")
+        except ValueError:
+            pass
+    else:
+        delivered_on = datetime.now().strftime("%B %d, %Y")
+
     body = f"""
     <p>Hi {first_name},</p>
     <p>Your cabinets for Order #{order_id} have been delivered!</p>
-    {_order_summary_block(order, show_total=False)}
-    {_claims_block()}
+    {_order_summary_block(order, show_total=False,
+                          date_label="Delivered", date_value=delivered_on)}
+    {_claims_block(order)}
     <p>Thanks for choosing Cabinets For Contractors,<br><strong>William Prince</strong></p>
     """
     return _wrap_email(_header("Order Delivered", f"Order #{order_id}"), body)

@@ -132,6 +132,109 @@ async def draft_raw(to: str = Form(...), subject: str = Form(...),
             "attachments": [a["filename"] for a in atts]}
 
 
+@email_router.post("/orders/{order_id}/delivered-draft")
+async def delivered_draft(order_id: str, delivered_on: str = "",
+                          to: str = "", _: bool = Depends(require_admin)):
+    """Render the delivered-confirmation (delivery date + claims block +
+    pick list attached) into a Gmail DRAFT [admin] — the manual door for
+    deliveries the R+L machinery didn't catch (Daylight, UPS, regens).
+    delivered_on takes MM/DD/YYYY; empty = today. Never sends."""
+    order = get_order_by_id(order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    order["order_id"] = order_id
+    if (delivered_on or "").strip():
+        order["delivered_on"] = delivered_on.strip()
+    try:
+        from claims_routes import claims_form_url
+        order["claims_url"] = claims_form_url(order_id)
+    except Exception as e:
+        print(f"[EMAIL] claims url failed {order_id}: {e}")
+    from email_templates import render_template, get_template_subject
+    html = render_template("delivery_confirmation", order)
+    subject = get_template_subject("delivery_confirmation", order)
+    to_email = (to or "").strip() or (order.get("email") or "").strip()
+    if not html or not to_email:
+        raise HTTPException(status_code=400,
+                            detail="render failed or order has no email")
+    attachments = []
+    try:
+        from picklist_pdf import generate_picklist_pdf
+        pk = generate_picklist_pdf(order)
+        if pk:
+            attachments.append({"filename": f"CFC-Picklist-{order_id}.pdf",
+                                "content": pk, "mime": "application/pdf"})
+    except Exception as e:
+        print(f"[EMAIL] delivered-draft picklist failed {order_id}: {e}")
+    from email_sender import create_gmail_draft
+    res = create_gmail_draft(to_email, subject, html, attachments)
+    if not res.get("success"):
+        raise HTTPException(status_code=400, detail=res.get("error"))
+    return {"status": "ok", "draft_id": res["draft_id"], "to": to_email,
+            "subject": subject,
+            "picklist_attached": bool(attachments)}
+
+
+@email_router.post("/orders/{order_id}/roc-schedule-draft")
+async def roc_schedule_draft(order_id: str, ready_date: str,
+                             transit_lo: int = 2, transit_hi: int = 5,
+                             to: str = "",
+                             _: bool = Depends(require_admin)):
+    """ROC-SPECIFIC (William 2026-07-29): ROC's portal states a
+    ready/pickup date — the customer gets an email with that pickup date
+    and the approximate delivery window (ready date + transit business
+    days). Lands as a Gmail DRAFT + PROGRESS DRAFT READY alert; never
+    sends. ready_date = YYYY-MM-DD."""
+    from datetime import date
+    order = get_order_by_id(order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    order["order_id"] = order_id
+    try:
+        rd = date.fromisoformat(ready_date.strip())
+    except Exception:
+        raise HTTPException(status_code=400,
+                            detail="ready_date must be YYYY-MM-DD")
+    from business_days import add_business_days
+    arrive_min = add_business_days(rd, max(0, int(transit_lo)))
+    arrive_max = add_business_days(rd, max(int(transit_lo), int(transit_hi)))
+    from progress_emails import (_first_name, _make_draft, _nice,
+                                 INSPECT_NOTE, SIGNATURE)
+    body = (
+        f"Hey {_first_name(order)},\n\n"
+        f"Good news on order #{order_id} - the warehouse has your order in "
+        f"the schedule and says it will be ready for carrier pickup on "
+        f"{_nice(rd)}.\n\n"
+        f"We will arrange the freight pickup for that day, and your "
+        f"approximate delivery is between {_nice(arrive_min)} and "
+        f"{_nice(arrive_max)}.\n\n"
+        f"We will send your tracking information as soon as the carrier "
+        f"picks it up.\n\n{INSPECT_NOTE}\n\n"
+        f"Any questions, just reply.\n\n{SIGNATURE}")
+    subject = f"Order #{order_id} - ready date and estimated delivery"
+    to_email = (to or "").strip() or (order.get("email") or "").strip()
+    if not to_email:
+        raise HTTPException(status_code=400, detail="order has no email")
+    draft_id = _make_draft(to_email, subject, body)
+    if not draft_id:
+        raise HTTPException(status_code=400, detail="draft creation failed")
+    try:
+        from supplier_orders import _send_email, INTERNAL_ALERT_EMAIL
+        _send_email(order_id, INTERNAL_ALERT_EMAIL,
+                    f"PROGRESS DRAFT READY - roc-schedule - order #{order_id}",
+                    f"<div style='font-family:Arial,sans-serif;font-size:14px;'>"
+                    f"<p>A ROC ready-date/delivery-estimate draft is waiting "
+                    f"in Gmail drafts - review and send.</p>"
+                    f"<pre style='background:#f5f5f5;padding:12px;"
+                    f"white-space:pre-wrap;'>{body}</pre></div>",
+                    triggered_by="roc_schedule_draft")
+    except Exception as e:
+        print(f"[EMAIL] roc-schedule alert failed {order_id}: {e}")
+    return {"status": "ok", "draft_id": draft_id, "to": to_email,
+            "subject": subject, "ready_date": str(rd),
+            "arrive_min": str(arrive_min), "arrive_max": str(arrive_max)}
+
+
 @email_router.post("/orders/{order_id}/draft-invoice")
 async def draft_invoice(order_id: str, to: str = "", shipping: float = 0.0,
                         square_link: str = "", tariff_rate: float = 0.08,

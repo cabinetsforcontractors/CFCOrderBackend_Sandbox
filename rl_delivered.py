@@ -181,6 +181,14 @@ def process_rl_delivered(hours_back: int = 48, dry_run: bool = False) -> Dict:
                 order = get_order_by_id(order_id) or {}
                 order["order_id"] = order_id
                 order["pro_number"] = pro
+                # the email shows the DELIVERY date + the tokenized claim
+                # form link (William 2026-07-29)
+                order["delivered_on"] = delivered_on
+                try:
+                    from claims_routes import claims_form_url
+                    order["claims_url"] = claims_form_url(order_id)
+                except Exception as e:
+                    print(f"[RL-DELIVERED] claims url failed {order_id}: {e}")
                 from email_templates import render_template, \
                     get_template_subject
                 html = render_template("delivery_confirmation", order)

@@ -154,6 +154,13 @@ except ImportError:
     print("[STARTUP] email_ledger module not found, clean data layer disabled")
 
 try:
+    from claims_routes import claims_router
+    CLAIMS_LOADED = True
+except ImportError:
+    CLAIMS_LOADED = False
+    print("[STARTUP] claims_routes module not found, replacement requests disabled")
+
+try:
     from daylight_routes import daylight_router
     DAYLIGHT_LOADED = True
 except ImportError:
@@ -245,6 +252,9 @@ if PROGRESS_LOADED:
 
 if LEDGER_LOADED:
     app.include_router(ledger_router)         # Clean data layer (SHADOW): /ledger/*
+
+if CLAIMS_LOADED:
+    app.include_router(claims_router)         # Replacement requests: /claims/* + /orders/{id}/claims-link
 
 if DAYLIGHT_LOADED:
     app.include_router(daylight_router)       # Daylight carrier (Phase 1 read-only): /daylight/*
