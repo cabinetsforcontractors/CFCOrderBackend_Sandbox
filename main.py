@@ -161,6 +161,13 @@ except ImportError:
     print("[STARTUP] claims_routes module not found, replacement requests disabled")
 
 try:
+    from pay_page import pay_router
+    PAY_PAGE_LOADED = True
+except ImportError:
+    PAY_PAGE_LOADED = False
+    print("[STARTUP] pay_page module not found, pay screen disabled")
+
+try:
     from daylight_routes import daylight_router
     DAYLIGHT_LOADED = True
 except ImportError:
@@ -255,6 +262,9 @@ if LEDGER_LOADED:
 
 if CLAIMS_LOADED:
     app.include_router(claims_router)         # Replacement requests: /claims/* + /orders/{id}/claims-link
+
+if PAY_PAGE_LOADED:
+    app.include_router(pay_router)            # Pay screen: /pay/{id} -> verify -> v4 invoice + Square link
 
 if DAYLIGHT_LOADED:
     app.include_router(daylight_router)       # Daylight carrier (Phase 1 read-only): /daylight/*
