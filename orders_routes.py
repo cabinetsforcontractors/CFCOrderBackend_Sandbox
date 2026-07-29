@@ -45,7 +45,7 @@ import json
 from datetime import datetime, timezone, timedelta
 from typing import Optional, List
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 from psycopg2.extras import RealDictCursor
 
@@ -566,6 +566,53 @@ def update_checkpoint(order_id: str, update: CheckpointUpdate, _: bool = Depends
                 "checkpoint": update.checkpoint,
                 "supplier_polls": polls_fired if polls_fired else None,
             }
+
+
+@orders_router.post("/debug/purge-test-order/{order_id}")
+def purge_test_order(order_id: str, _: bool = Depends(require_admin),
+                     x_allow_destructive: str = Header("")):
+    """PERMANENTLY delete a REGISTERED TEST order's rows from every table.
+    [admin + X-Allow-Destructive: yes]
+
+    William ruling 2026-07-29: "Legacy test rows purge the rows entirely."
+    Guard: the order MUST be in the test registry — real orders can never be
+    purged through this door. Registry entry is KEPT so a B2BWave re-sync
+    of a still-live remote record stays hidden and re-purgeable."""
+    if x_allow_destructive.lower() != "yes":
+        raise HTTPException(status_code=400,
+                            detail="X-Allow-Destructive: yes header required")
+    from test_registry import test_order_ids
+    if str(order_id) not in test_order_ids():
+        raise HTTPException(status_code=400,
+                            detail=f"{order_id} is not in the test registry "
+                                   f"— only registered test orders can be "
+                                   f"purged")
+    tables = ["order_line_items", "order_events", "order_shipments",
+              "supplier_orders", "pending_checkouts", "new_order_notices",
+              "progress_promises", "delivery_photos", "daylight_shipments",
+              "orders"]
+    out = {"status": "ok", "order_id": order_id, "deleted": {}}
+    for t in tables:
+        try:
+            with get_db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"DELETE FROM {t} WHERE order_id = %s", (order_id,))
+                    out["deleted"][t] = cur.rowcount
+                conn.commit()
+        except Exception as e:
+            out["deleted"][t] = f"skip: {str(e)[:60]}"
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""UPDATE task_board_items SET status='handled',
+                               note='[purged test order]', updated_at=NOW()
+                               WHERE order_id = %s AND status='open'""",
+                            (order_id,))
+            conn.commit()
+    except Exception:
+        pass
+    return out
 
 
 @orders_router.post("/orders/{order_id}/tombstone")

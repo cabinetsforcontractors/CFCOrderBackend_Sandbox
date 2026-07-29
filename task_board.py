@@ -335,9 +335,9 @@ def _sweep_info(known_ids, kw_rules=()):
                 cur.execute("""
                     SELECT DISTINCT ON (thread_id)
                            message_id, thread_id, from_addr, to_addr,
-                           subject, email_date, order_ids
+                           subject, email_date, order_ids, kind
                     FROM email_ledger
-                    WHERE email_date > NOW() - INTERVAL '7 days'
+                    WHERE email_date > NOW() - INTERVAL '3 days'
                     ORDER BY thread_id, email_date DESC
                 """)
                 rows = cur.fetchall()
@@ -345,13 +345,35 @@ def _sweep_info(known_ids, kw_rules=()):
         print(f"[TASKS] info sweep ledger read failed: {e}")
         return tasks
     own = OWN_ADDRESSES | {FLAG_INBOX.lower()}
-    for mid, tid, frm, to, subj, edate, oids in rows:
+    # round 4 (the 60-task flood): robot self-mail and B2BWave notification
+    # copies also travel own->own — exclude the ledger's automation kind, the
+    # full automation-prefix list, known robot template subjects, and the
+    # B2BWave "Order X-(#n)" shape. Window 3 days (older ferry forwards are
+    # absorbed data, not open instructions).
+    try:
+        from email_ledger import AUTOMATION_SUBJECT_PREFIXES as _LEDGER_PREFIXES
+    except Exception:
+        _LEDGER_PREFIXES = ()
+    _ROBOT_SUBJ = ("Payment Received", "Invoice INV-", "CONFIRM DISPATCH",
+                   "PAYMENT LINK:", "Order #", "REPLACEMENT REQUEST",
+                   "ORDER-RECEIVED EMAIL FAILED", "We received your order")
+    _B2B_NOTIF = re.compile(r"^(fwd?: *)*order .+-\(#\d+\)", re.I)
+    for mid, tid, frm, to, subj, edate, oids, kind_row in rows:
+        if (kind_row or "") == "automation":
+            continue
         addr = _sender_address(frm or "")
         to_low = (to or "").lower()
         if addr not in own or not any(o in to_low for o in own):
             continue
         subj = subj or ""
         if HANDOFF_RE.search(subj) or is_own_automation_subject(subj):
+            continue
+        su = subj.upper()
+        if any(su.startswith(p.upper()) for p in _LEDGER_PREFIXES):
+            continue
+        if any(subj.startswith(p) for p in _ROBOT_SUBJ):
+            continue
+        if _B2B_NOTIF.match(subj):
             continue
         oid = None
         for cand in str(oids or "").split(","):
@@ -625,6 +647,18 @@ def run_task_sweep(conn) -> dict:
             WHERE type NOT IN ('manual', 'plaud', 'follow-up', 'info')
               AND status = 'open'
               AND last_seen < %s
+        """, (sweep_start,))
+        # UNTOUCHED info tasks age out with the source window (also the
+        # one-time cleanup of the round-3 flood); a note or due date = William
+        # engaged -> the task persists until Done.
+        cur.execute("""
+            UPDATE task_board_items
+            SET status = 'handled',
+                note = '[aged out of the info window]',
+                note_at = NOW(), updated_at = NOW()
+            WHERE type = 'info' AND status = 'open'
+              AND last_seen < %s
+              AND note IS NULL AND due_date IS NULL
         """, (sweep_start,))
         gone = cur.rowcount
         # REPLY-AWARENESS (William approved 2026-07-29, the 5696 case):

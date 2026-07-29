@@ -207,13 +207,20 @@ def attachment_text(message_id: str, _: bool = Depends(require_admin)):
     out = {"status": "ok", "subject": msg.get("subject"), "attachments": []}
     for att in msg.get("attachments") or []:
         entry = {"filename": att.get("filename")}
+        name = (att.get("filename") or "").lower()
         try:
-            import io
-            from pypdf import PdfReader
-            reader = PdfReader(io.BytesIO(att["data"]))
-            entry["pages"] = len(reader.pages)
-            entry["text"] = "\n".join((p.extract_text() or "")
-                                      for p in reader.pages)[:20000]
+            if name.endswith((".csv", ".txt")):
+                # 2026-07-29 (the R+L BILL2 report is a CSV): plain-text
+                # attachments come back as text directly.
+                entry["text"] = att["data"].decode(
+                    "utf-8", errors="replace")[:20000]
+            else:
+                import io
+                from pypdf import PdfReader
+                reader = PdfReader(io.BytesIO(att["data"]))
+                entry["pages"] = len(reader.pages)
+                entry["text"] = "\n".join((p.extract_text() or "")
+                                          for p in reader.pages)[:20000]
         except Exception as e:
             entry["error"] = str(e)
         out["attachments"].append(entry)

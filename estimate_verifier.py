@@ -131,7 +131,7 @@ def fetch_message_full(message_id: str) -> Optional[Dict]:
         mime = part.get("mimeType", "")
         body = part.get("body", {})
         fname = part.get("filename") or ""
-        if fname.lower().endswith(".pdf") and body.get("attachmentId"):
+        if fname.lower().endswith((".pdf", ".csv", ".txt")) and body.get("attachmentId"):
             att = gmail_api_request(
                 f"messages/{message_id}/attachments/{body['attachmentId']}")
             if att and att.get("data"):
