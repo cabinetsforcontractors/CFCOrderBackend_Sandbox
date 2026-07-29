@@ -54,13 +54,36 @@ def _claims_block() -> str:
     return f"""
     <div style="background:#FFFBEA;border:1px solid #F0E0A0;border-radius:8px;padding:16px 18px;margin:20px 0;font-size:13px;line-height:1.7;color:#333333;">
         <div style="font-weight:700;font-size:14px;margin-bottom:8px;">&#128230; Please inspect your delivery &mdash; how claims work</div>
-        <p style="margin:0 0 8px;"><strong>Check every box now, before assembly or installation.</strong> If you notice any damage or issues, please let us know within <strong>48 hours</strong>.</p>
+        <p style="margin:0 0 8px;"><strong>Check every box now, before assembly or installation.</strong> Print the attached pick list and check off each SKU and quantity as you unload &mdash; it is the fastest way to confirm everything arrived. If you notice any damage or issues, please let us know within <strong>48 hours</strong>.</p>
         <ul style="margin:0 0 8px;padding-left:20px;">
             <li><strong>Freight damage must be noted on the delivery receipt (BOL) at the time of delivery &mdash; no exceptions.</strong> Claims for damage that was not noted when you signed cannot be honored.</li>
             <li><strong>What we can replace:</strong> shipping damage noted on the BOL, manufacturing defects, and missing or incorrect items &mdash; reported within 48 hours with photos.</li>
             <li><strong>What we cannot replace:</strong> damage that occurs during or after assembly or installation. Once a cabinet has been assembled, modified, or installed, it is considered accepted.</li>
         </ul>
         <p style="margin:0;">To file a claim: <a href="{CLAIMS_URL}" style="color:#1D4ED8;font-weight:600;">Replacement Request form</a> &mdash; include photos of the item and its packaging.</p>
+    </div>
+    """
+
+
+def _inspect_blurb(order: Dict = None) -> str:
+    """The SHORT pre-delivery inspection notice (William 2026-07-29): rides
+    every post-payment email; the full claims verbiage lives only in the
+    delivered email. Pickup orders get the check-at-pickup variant instead
+    (the 5696 lesson: once they leave the warehouse, missing items cannot
+    be claimed)."""
+    if (order or {}).get("is_pickup"):
+        return """
+    <div style="background:#FFFBEA;border:1px solid #F0E0A0;border-radius:8px;padding:14px 18px;margin:18px 0;font-size:13px;line-height:1.7;color:#333333;">
+        <strong>&#128230; Please check your order at pickup</strong><br>
+        Use your pick list to check off each SKU and quantity before leaving the warehouse.<br>
+        <strong>Once you leave, missing items cannot be claimed</strong> &mdash; please make sure everything is accounted for.
+    </div>
+    """
+    return """
+    <div style="background:#FFFBEA;border:1px solid #F0E0A0;border-radius:8px;padding:14px 18px;margin:18px 0;font-size:13px;line-height:1.7;color:#333333;">
+        <strong>&#128230; Please inspect your delivery upon arrival</strong><br>
+        Print off the pick list (attached to your invoice email) and use it to check off each SKU and quantity.<br>
+        <strong>Freight damage must be noted on the delivery receipt (BOL) at the time of delivery &mdash; no exceptions.</strong>
     </div>
     """
 
@@ -473,6 +496,7 @@ def _render_payment_confirmation(order: Dict) -> str:
     <p>We've received your payment of <strong>{amount_fmt}</strong> for Order #{order_id}. Thank you!</p>
     {_order_summary_block(order)}
     <p>Your order is now being processed. We'll notify you once your cabinets have shipped.</p>
+    {_inspect_blurb(order)}
     <p>Thanks for your business,<br><strong>William Prince</strong><br>Cabinets For Contractors</p>
     """
     return _wrap_email(_header("Payment Received", f"Order #{order_id}"), body)
@@ -502,7 +526,8 @@ def _render_shipping_notification(order: Dict) -> str:
     <p>Great news! Your cabinets for Order #{order_id} are on their way.</p>
     {tracking_html}
     {_order_summary_block(order)}
-    <p><strong>Delivery tip:</strong> LTL freight requires someone present to receive. The carrier will call ahead to schedule. Inspect all boxes and note any damage on the delivery receipt before signing.</p>
+    <p><strong>Delivery tip:</strong> LTL freight requires someone present to receive. The carrier will call ahead to schedule.</p>
+    {_inspect_blurb(order)}
     <p>Thanks,<br><strong>William Prince</strong><br>Cabinets For Contractors</p>
     """
     return _wrap_email(_header("Your Order Has Shipped!", f"Order #{order_id}"), body)

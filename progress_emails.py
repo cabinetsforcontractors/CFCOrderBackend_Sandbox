@@ -225,6 +225,16 @@ def _notify(order_id: str, kind: str, body: str):
         print(f"[PROGRESS] notify failed: {e}")
 
 
+# The SHORT inspection notice (William 2026-07-29): rides every post-payment
+# email before the delivered one — full claims verbiage lives in the
+# delivered email only.
+INSPECT_NOTE = (
+    "When your order arrives: print off the pick list (attached to your "
+    "invoice email) and use it to check off each SKU and quantity. Any "
+    "freight damage must be noted on the delivery receipt (BOL) at the time "
+    "of delivery - no exceptions.")
+
+
 def _post_payment_body(order: Dict, w: Dict) -> str:
     return (
         f"Hey {_first_name(order)},\n\n"
@@ -237,7 +247,8 @@ def _post_payment_body(order: Dict, w: Dict) -> str:
         f"can expect your order to arrive between {_nice(w['arrive_min'])} and "
         f"{_nice(w['arrive_max'])}.\n\n"
         f"We will send your tracking information as soon as the carrier picks "
-        f"it up.\n\nAny questions, just reply.\n\n{SIGNATURE}")
+        f"it up.\n\n{INSPECT_NOTE}\n\n"
+        f"Any questions, just reply.\n\n{SIGNATURE}")
 
 
 def _delay_body(order: Dict, w: Dict) -> str:
@@ -287,7 +298,7 @@ def _tracking_body(order: Dict) -> str:
         f"{nums}\n\n"
         f"One note: tracking will not show any movement until the carrier "
         f"scans the shipment at pickup - if it looks empty for a day, that is "
-        f"normal.\n\n{SIGNATURE}")
+        f"normal.\n\n{INSPECT_NOTE}\n\n{SIGNATURE}")
 
 
 def _delivery_today_body(order: Dict) -> str:
@@ -298,6 +309,8 @@ def _delivery_today_body(order: Dict) -> str:
         f"When it arrives, please look over the pallet BEFORE signing the "
         f"delivery receipt and note any visible damage on the receipt - that "
         f"protects you if anything needs a claim.\n\n"
+        f"Print off the pick list (attached to your invoice email) and use it "
+        f"to check off each SKU and quantity as you unload.\n\n"
         f"Any questions, just reply.\n\n{SIGNATURE}")
 
 

@@ -188,8 +188,22 @@ def process_rl_delivered(hours_back: int = 48, dry_run: bool = False) -> Dict:
                 to_email = (order.get("email") or "").strip()
                 draft_id = None
                 if html and to_email:
+                    # the pick list rides the delivered email too (William
+                    # 2026-07-29: "ref the pick list and ask that they
+                    # download it and check off each item")
+                    attachments = []
+                    try:
+                        from picklist_pdf import generate_picklist_pdf
+                        pk = generate_picklist_pdf(order)
+                        if pk:
+                            attachments.append(
+                                {"filename": f"CFC-Picklist-{order_id}.pdf",
+                                 "content": pk, "mime": "application/pdf"})
+                    except Exception as e:
+                        print(f"[RL-DELIVERED] picklist failed {order_id}: {e}")
                     from email_sender import create_gmail_draft
-                    res = create_gmail_draft(to_email, subj, html)
+                    res = create_gmail_draft(to_email, subj, html,
+                                             attachments=attachments)
                     draft_id = res.get("draft_id")
                 _alert(
                     order_id,
