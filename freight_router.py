@@ -31,6 +31,10 @@ RESIDENTIAL DETECTION (2026-07-23): `residential` is tri-state.
            Smarty down/unknown -> assume residential (the safe, higher-quote / CYA side).
   True/False -> manual override (skips Smarty).
 `liftgate` stays a manual input (the "need a lift gate?" checkout tic feeds it later).
+COMMERCIAL OVERRIDE (William-ruled 2026-07-30): known warehouse docks
+(config.COMMERCIAL_ADDRESS_OVERRIDES — 561 Keuka Rd = LI's Interlachen
+warehouse) NEVER quote residential, whatever Smarty says. Checked before
+Smarty is even asked.
 
 CA ORIGIN (William-ruled 2026-07-24 round 2): ONE Cabinet & Stone California
 warehouse — Pico Rivera 90660, 7105 Paramount Blvd. The old Paramount 90723
@@ -109,7 +113,16 @@ def _accessorials(residential, liftgate):
 
 def _detect_residential(order, dest_zip):
     """Auto-detect residential via Smarty. Returns (residential_bool, source_str).
-    Smarty down/unknown -> assume residential (the safe, higher-quote side)."""
+    Smarty down/unknown -> assume residential (the safe, higher-quote side).
+    COMMERCIAL OVERRIDE first (William 2026-07-30): known warehouse docks
+    (561 Keuka = LI's warehouse) never quote residential, whatever any
+    classifier says."""
+    try:
+        from config import is_commercial_override
+        if is_commercial_override(order.get("street") or ""):
+            return False, "override:commercial-warehouse"
+    except Exception:
+        pass
     try:
         from checkout import validate_address_full
         v = validate_address_full({
