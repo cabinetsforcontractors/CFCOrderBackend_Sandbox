@@ -17,6 +17,10 @@ Customer touches, ALL created as GMAIL DRAFTS for William to review and send
      DAYLIGHT delivery-day (2026-07-23) rides the same sweep via
      daylight_tracking.poll_daylight_shipments (externalTrace).
 
+HTML LAW (William 2026-07-30): every draft carries an HTML alternative with
+REAL anchor links — bare-text URLs were rendering as google-redirect garbage
+in received mail. Plaintext part stays for text-only clients.
+
 TRACKING TRUTH REPAIR (William 2026-07-18): the DB missed tracking that went
 out in hand-written emails. Two mechanisms:
   - POST /progress/backfill-tracking — one-time sweep of SENT "TRACKING INFO"
@@ -197,21 +201,43 @@ def _first_name(order: Dict) -> str:
     return first if first else "there"
 
 
+def _linkify_html(body: str) -> str:
+    """Plaintext -> simple HTML alternative: escaped text, URLs and www.
+    hosts become REAL anchors, newlines become <br>. (William 2026-07-30:
+    bare-text links render as google-redirect garbage in received mail —
+    every robot draft carries real anchors now.)"""
+    import html as _html
+    esc = _html.escape(body)
+    esc = re.sub(r"(https?://[^\s<]+)", r'<a href="\1">\1</a>', esc)
+    esc = re.sub(r"(?<![\w/=\"'>])(www\.[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+[^\s<]*)",
+                 r'<a href="https://\1">\1</a>', esc)
+    return ("<div style='font-family:Arial,sans-serif;font-size:14px;"
+            "line-height:1.5;'>" + esc.replace("\n", "<br>\n") + "</div>")
+
+
 def _make_draft(to_email: str, subject: str, body: str,
                 attachments: Optional[list] = None) -> Optional[str]:
-    """Plaintext Gmail draft; attachments = [{filename, content(bytes),
-    mime}] (added 2026-07-29 — the delivery-today draft carries the pick
-    list)."""
+    """Gmail draft with a plaintext part AND an HTML alternative carrying
+    real anchor links (HTML law 2026-07-30); attachments = [{filename,
+    content(bytes), mime}] (added 2026-07-29 — the delivery-today draft
+    carries the pick list)."""
     import base64
     from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
     from ghi_inbox import _gmail_post
+
+    alt = MIMEMultipart("alternative")
+    alt.attach(MIMEText(body))
+    try:
+        alt.attach(MIMEText(_linkify_html(body), "html"))
+    except Exception as e:
+        print(f"[PROGRESS] html part failed (plaintext only): {e}")
 
     if attachments:
         from email.mime.base import MIMEBase
-        from email.mime.multipart import MIMEMultipart
         from email import encoders
         mime = MIMEMultipart("mixed")
-        mime.attach(MIMEText(body))
+        mime.attach(alt)
         for att in attachments:
             maintype, _, subtype = (att.get("mime")
                                     or "application/octet-stream").partition("/")
@@ -222,7 +248,7 @@ def _make_draft(to_email: str, subject: str, body: str,
                             filename=att.get("filename") or "attachment")
             mime.attach(part)
     else:
-        mime = MIMEText(body)
+        mime = alt
     mime["To"] = to_email
     mime["Subject"] = subject
     raw = base64.urlsafe_b64encode(mime.as_bytes()).decode()
