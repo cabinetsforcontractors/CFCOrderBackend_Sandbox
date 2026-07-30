@@ -4,6 +4,8 @@ FastAPI router for Shipping: R+L Carriers (direct API), Shippo, RTA Database.
 
 Phase 5: Extracted from main.py
 Phase 5C: require_admin wired to all write/delete endpoints
+2026-07-30: FIRING LAW — BOL doors record full rl_bol_created fires
+            (fire_log.record_bol_fire) + orders.tracking latest copy.
 
 Mount in main.py with:
     from shipping_routes import shipping_router
@@ -276,7 +278,16 @@ def rl_create_bol(request: RLBolRequest, _: bool = Depends(require_admin)):
             pickup_ready_time=request.pickup_ready_time,
             pickup_close_time=request.pickup_close_time,
         )
-        return {"status": "ok", "bol": result}
+        # FIRING LAW (2026-07-30): record the full BOL result + diff vs any
+        # previous BOL fire on this order; orders.tracking = latest copy.
+        # The 5731 lesson: PRO WC3162798 was created and nothing recorded.
+        fire = None
+        try:
+            from fire_log import record_bol_fire
+            fire = record_bol_fire(request.dict(), result)
+        except Exception as fe:
+            print(f"[SHIPPING] fire_log record failed for /rl/bol: {fe}")
+        return {"status": "ok", "bol": result, "fire": fire}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
@@ -571,11 +582,40 @@ def rl_create_order_bol(
             pickup_date=pickup_date,
         )
 
+        # FIRING LAW (2026-07-30): same full record as /rl/bol.
+        fire = None
+        try:
+            from fire_log import record_bol_fire
+            fire = record_bol_fire({
+                "po_number": order_id,
+                "shipper_name": warehouse.get("name"),
+                "shipper_address": warehouse.get("address", ""),
+                "shipper_city": warehouse.get("city"),
+                "shipper_state": warehouse.get("state"),
+                "shipper_zip": warehouse.get("zip"),
+                "consignee_name": company_name,
+                "consignee_address": shipping.get("address", ""),
+                "consignee_city": shipping.get("city", ""),
+                "consignee_state": shipping.get("state", ""),
+                "consignee_zip": shipping.get("zip", ""),
+                "weight_lbs": int(weight),
+                "pieces": pieces,
+                "freight_class": "85",
+                "description": description,
+                "include_pickup": include_pickup,
+                "pickup_date": pickup_date,
+                "pickup_ready_time": "",
+                "pickup_close_time": "",
+            }, result)
+        except Exception as fe:
+            print(f"[SHIPPING] fire_log record failed for create-bol: {fe}")
+
         return {
             "status": "ok",
             "order_id": order_id,
             "warehouse": warehouse_code,
             "bol": result,
+            "fire": fire,
             "shipment_details": {
                 "weight": weight,
                 "pieces": pieces,
