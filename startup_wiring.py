@@ -113,6 +113,16 @@ def wire_all(app: FastAPI) -> dict:
         results["storefront_webhook"] = False
         print(f"[STARTUP] storefront_webhook not found: {e}")
 
+    # Firing-order law (/fire-log/* + /orders/{id}/fires) — full-payload
+    # append-only fires + diff-on-write (William ruled 2026-07-30)
+    try:
+        from fire_log import fire_log_router
+        app.include_router(fire_log_router)
+        results["fire_log"] = True
+    except ImportError as e:
+        results["fire_log"] = False
+        print(f"[STARTUP] fire_log not found: {e}")
+
     loaded = sum(1 for v in results.values() if v)
     print(f"[STARTUP] startup_wiring: {loaded}/{len(results)} modules loaded")
     
