@@ -18,9 +18,15 @@ MONEY STRIP (ruling 5: the one line that stays above the queue):
     awaiting (invoiced-unpaid open orders: total + count) ·
     freight_90d (the rolling billed-vs-charged ledger net)
 
+DONE EVENTS (Phase B fix 7/30): the board's DONE RECENTLY table was 60/60
+b2bwave_sync heartbeat rows — the noise filled the LIMIT before any real
+activity got in. This door serves the same 3-day window with the fire-log
+noise list excluded, so the table shows actual robot work.
+
 Doors [admin]:
   POST /auto-settle/run?dry_run=true
   GET  /queue/money-strip
+  GET  /queue/done-events
 """
 
 import json
@@ -248,6 +254,32 @@ def money_strip() -> Dict:
 
 
 # =============================================================================
+# DONE EVENTS — real robot activity, noise excluded
+# =============================================================================
+
+def done_events(days: int = 3, limit: int = 60) -> Dict:
+    try:
+        from fire_log import NOISE_EVENT_TYPES
+        noise = list(NOISE_EVENT_TYPES)
+    except Exception:
+        noise = ["b2bwave_sync"]
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT order_id, event_type, source, created_at
+                FROM order_events
+                WHERE created_at > NOW() - make_interval(days => %s)
+                  AND NOT (event_type = ANY(%s))
+                ORDER BY created_at DESC LIMIT %s
+            """, (days, noise, limit))
+            events = [{"order_id": str(a), "event_type": b,
+                       "source": c or "",
+                       "at": d.isoformat() if d else ""}
+                      for a, b, c, d in cur.fetchall()]
+    return {"status": "ok", "noise_excluded": noise, "events": events}
+
+
+# =============================================================================
 # DOORS
 # =============================================================================
 
@@ -262,3 +294,11 @@ def auto_settle_run(dry_run: bool = True, _: bool = Depends(require_admin)):
 def get_money_strip(_: bool = Depends(require_admin)):
     """The one line that stays above the queue (ruling 5)."""
     return money_strip()
+
+
+@queue_router.get("/queue/done-events")
+def get_done_events(days: int = 3, limit: int = 60,
+                    _: bool = Depends(require_admin)):
+    """DONE RECENTLY feed [admin]: order_events minus the sync heartbeat
+    noise — what the robot actually DID, not what it polled."""
+    return done_events(days=days, limit=limit)
