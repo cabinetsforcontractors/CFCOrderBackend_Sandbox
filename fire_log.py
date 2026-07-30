@@ -3,8 +3,7 @@ fire_log.py — THE FIRING-ORDER LAW (William's ruling 2026-07-30).
 
 The systemic issue this fixes: the machine fires (quote, BOL, stamp,
 invoice...), overwrites row state, and the previous truth disappears.
-Order 5731 had 936 events — almost all b2bwave_sync noise — while the
-day's real BOL (PRO WC3162798) recorded nothing at all.
+936 events on order 5731 and the day's real BOL wasn't one of them.
 
 THE LAW:
   1. NO FIRE WITHOUT A FULL RECORD — every action writes an append-only
@@ -24,16 +23,17 @@ Every event carries _fire = {seq, prev_at, changes}:
   changes  = {"changed": {field: {"was":..,"now":..}}, "dropped": [...]}
              or "no-change" or None (first fire)
 
+QUOTE-NUMBER LAW (2026-07-30): last_quote_number(order_id) surfaces the
+most recent R+L quote number known for an order — the BOL must carry it
+so the quoted price HOLDS ("if we send a bol out of nowhere the price
+may change").
+
 Doors:
   POST /fire-log/record/{order_id}?kind=&source=   [admin]
        body = the full payload dict. Manual recording / history backfill.
   GET  /orders/{order_id}/fires?kind=&limit=       [admin]
        Clean fire history — noise types (b2bwave_sync) excluded,
        newest first, diffs visible.
-
-Wired in step one: /rl/bol (rl_bol_created + orders.tracking convenience
-copy), checkpoint door (full pre-state payload), payment-unstamp
-(cleared values recorded). Remaining firing paths join in step two.
 """
 
 import json
@@ -117,6 +117,40 @@ def record_fire(order_id: str, kind: str, payload: Dict[str, Any],
 
 
 # =============================================================================
+# QUOTE-NUMBER LAW
+# =============================================================================
+
+def last_quote_number(order_id: str) -> Optional[str]:
+    """The most recent R+L quote number known for an order. Sources,
+    newest first: freight_quoted fires (quote_numbers per leg), then
+    orders.rl_quote_no. The BOL builder attaches this so the quoted
+    price HOLDS (William 2026-07-30)."""
+    with get_db() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """SELECT event_data FROM order_events
+                   WHERE order_id = %s AND event_type = 'freight_quoted'
+                   ORDER BY created_at DESC LIMIT 5""", (order_id,))
+            for row in cur.fetchall():
+                d = row.get("event_data")
+                if isinstance(d, str):
+                    try:
+                        d = json.loads(d)
+                    except Exception:
+                        continue
+                qns = (d or {}).get("quote_numbers") or {}
+                for v in qns.values():
+                    if v:
+                        return str(v)
+            cur.execute("SELECT rl_quote_no FROM orders WHERE order_id = %s",
+                        (order_id,))
+            row = cur.fetchone()
+            if row and row.get("rl_quote_no"):
+                return str(row["rl_quote_no"])
+    return None
+
+
+# =============================================================================
 # BOL FIRE (wired from shipping_routes /rl/bol)
 # =============================================================================
 
@@ -146,6 +180,7 @@ def record_bol_fire(request_dict: Dict[str, Any], result: Dict[str, Any],
         "pro_number": pro,
         "pickup_request_id": (result or {}).get("pickup_request_id"),
         "po_number": po,
+        "quote_number": request_dict.get("quote_number") or None,
         "shipper": f"{request_dict.get('shipper_name')} | "
                    f"{request_dict.get('shipper_address')}, "
                    f"{request_dict.get('shipper_city')} "
