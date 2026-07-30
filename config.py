@@ -79,7 +79,8 @@ SUPPLIER_INFO = {
     'Love-Milestone': {
         'name': 'Love-Milestone',
         'address': '10963 Florida Crown Dr STE 100, Orlando FL 32824',
-        'contact': 'Ireen',
+        # William 2026-07-30: the contact is Bella now, no longer Ireen
+        'contact': 'Bella',
         'email': 'wpjob1@gmail.com'  # SMOKE TEST — restore to lovetoucheskitchen@gmail.com
     },
     'Cabinet & Stone': {
@@ -139,6 +140,27 @@ WAREHOUSE_ZIPS = {
 }
 
 OVERSIZED_KEYWORDS = ['OVEN', 'PANTRY', '96"', '96*', 'X96', '96X', '96H', '96 H']
+
+# =============================================================================
+# COMMERCIAL ADDRESS OVERRIDES (William 2026-07-30)
+# Addresses that ALWAYS quote commercial no matter what Smarty or a carrier
+# classifier says. 561 Keuka Rd = LI's warehouse dock in Interlachen — the
+# 5731/5676 lesson: it LOOKS residential to classifiers, it is a commercial
+# warehouse. Match = case-insensitive substring against the destination
+# street line.
+# =============================================================================
+
+COMMERCIAL_ADDRESS_OVERRIDES = [
+    "561 keuka",
+]
+
+
+def is_commercial_override(street: str) -> bool:
+    """True when the destination street is a known commercial address that
+    must never quote residential (William 2026-07-30)."""
+    s = (street or "").lower()
+    return any(tok in s for tok in COMMERCIAL_ADDRESS_OVERRIDES)
+
 
 # =============================================================================
 # HELPER FUNCTIONS
