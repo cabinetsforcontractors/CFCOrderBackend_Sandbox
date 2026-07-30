@@ -22,6 +22,12 @@ GATES (all must pass, else NO send + a NEEDS-A-HUMAN alert to orders@):
 ON SUCCESS: payment_link_sent stamped, B2BWave -> Awaiting Payment
 checkpoint, payment_link_created + invoice_auto_sent events (the link id
 in the event is what lets a cancel KILL the link).
+
+2026-07-30 FIRING LAW (step 2a): every event here rides
+fire_log.record_fire — full payload + seq + diff-vs-previous. Every quote
+records a freight_quoted fire, so a REQUOTE shows what moved (the 5693
+lesson: charged $748 on an old quote, R+L billed $1,375, and no quote
+history existed to compare).
 """
 
 import json
@@ -35,6 +41,15 @@ INTERNAL_ALERT = os.environ.get("WAREHOUSE_NOTIFICATION_EMAIL",
 
 
 def _event(order_id: str, event_type: str, data: Dict):
+    """FIRING LAW: route through fire_log (seq + diff embedded); the old
+    raw insert stays as the fallback so an auto-invoice never dies over
+    bookkeeping."""
+    try:
+        from fire_log import record_fire
+        record_fire(order_id, event_type, data, "auto_invoice")
+        return
+    except Exception as e:
+        print(f"[AUTO-INVOICE] fire_log failed {order_id}: {e} - falling back")
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
@@ -72,6 +87,17 @@ def auto_shipping(order_id: str, order: Dict) -> Dict:
     ship = round(float(q["order_shipping_total"]) + base_total * (markup / 100.0), 2)
     carriers = {leg.get("warehouse"): leg.get("carrier")
                 for leg in (q.get("legs") or [])}
+    # FIRING LAW: the quote itself is a fire — a later requote diffs
+    # against this one instead of silently replacing it.
+    _event(order_id, "freight_quoted",
+           {"shipping_charged_basis": ship,
+            "carrier_total": round(float(q["order_shipping_total"]), 2),
+            "carrier_base_total": round(base_total, 2),
+            "markup_pct": markup,
+            "carriers": carriers,
+            "residential": q.get("residential"),
+            "residential_source": q.get("residential_source"),
+            "legs": len(q.get("legs") or [])})
     return {"ok": True, "shipping": ship,
             "residential": q.get("residential"),
             "detail": (f"carriers {carriers}, residential="
@@ -226,6 +252,8 @@ def run_auto_invoice(order_id: str, triggered_by: str = "new_order",
             conn.commit()
     _event(order_id, "invoice_auto_sent",
            {"to": res.get("to") or email, "grand_total": grand,
+            "total_items": total, "tariff_amount": tariff,
+            "total_shipping": ship["shipping"],
             "link_id": link["id"] if link else None,
             "pay_by_check": check_account,
             "redirected": (res.get("to") or email) != email})
