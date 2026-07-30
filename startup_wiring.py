@@ -133,6 +133,26 @@ def wire_all(app: FastAPI) -> dict:
         results["dossier"] = False
         print(f"[STARTUP] dossier not found: {e}")
 
+    # Reply composer (/reply/compose + /reply/send) — intent in,
+    # William-voiced reply out; PREVIEW LAW (William ruled 2026-07-30)
+    try:
+        from reply_composer import reply_router
+        app.include_router(reply_router)
+        results["reply_composer"] = True
+    except ImportError as e:
+        results["reply_composer"] = False
+        print(f"[STARTUP] reply_composer not found: {e}")
+
+    # Queue backend (/auto-settle/run + /queue/money-strip) — flags die
+    # when their cause dies + the money strip (William ruled 2026-07-30)
+    try:
+        from queue_api import queue_router
+        app.include_router(queue_router)
+        results["queue_api"] = True
+    except ImportError as e:
+        results["queue_api"] = False
+        print(f"[STARTUP] queue_api not found: {e}")
+
     loaded = sum(1 for v in results.values() if v)
     print(f"[STARTUP] startup_wiring: {loaded}/{len(results)} modules loaded")
     
