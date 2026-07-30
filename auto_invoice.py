@@ -25,9 +25,9 @@ in the event is what lets a cancel KILL the link).
 
 2026-07-30 FIRING LAW (step 2a): every event here rides
 fire_log.record_fire — full payload + seq + diff-vs-previous. Every quote
-records a freight_quoted fire, so a REQUOTE shows what moved (the 5693
-lesson: charged $748 on an old quote, R+L billed $1,375, and no quote
-history existed to compare).
+records a freight_quoted fire — INCLUDING the per-leg R+L quote numbers
+(the quote-number-on-BOL law: the BOL carries the original quote number
+so the quoted price HOLDS).
 """
 
 import json
@@ -87,6 +87,13 @@ def auto_shipping(order_id: str, order: Dict) -> Dict:
     ship = round(float(q["order_shipping_total"]) + base_total * (markup / 100.0), 2)
     carriers = {leg.get("warehouse"): leg.get("carrier")
                 for leg in (q.get("legs") or [])}
+    # QUOTE-NUMBER LAW (2026-07-30): capture every leg's R+L quote number —
+    # the BOL builder reuses it so the quoted price HOLDS.
+    quote_numbers = {}
+    for leg in (q.get("legs") or []):
+        qn = ((leg.get("alternatives") or {}).get("R+L") or {}).get("quote_number")
+        if qn:
+            quote_numbers[leg.get("warehouse")] = qn
     # FIRING LAW: the quote itself is a fire — a later requote diffs
     # against this one instead of silently replacing it.
     _event(order_id, "freight_quoted",
@@ -95,6 +102,7 @@ def auto_shipping(order_id: str, order: Dict) -> Dict:
             "carrier_base_total": round(base_total, 2),
             "markup_pct": markup,
             "carriers": carriers,
+            "quote_numbers": quote_numbers,
             "residential": q.get("residential"),
             "residential_source": q.get("residential_source"),
             "legs": len(q.get("legs") or [])})
