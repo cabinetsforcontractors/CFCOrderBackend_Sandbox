@@ -7,8 +7,10 @@ RULINGS BAKED IN:
   - PREVIEW LAW: /reply/compose NEVER sends — it returns the draft + the
     chain for the preview popup. /reply/send is the button (one-click for
     now; auto later "as it learns").
-  - VOICE: the William way — casual, direct, short sentences, "Hey {first
-    name}", signs "William". No corporate fluff.
+  - VOICE: the William way — casual, direct, short sentences. GREETING
+    RULING 7/30: several people answer supplier boxes (Bella one day,
+    Maria the next), so NEVER guess a name — open exactly
+    "Hey There," / blank line / "-William here." Signs "Thank you, William".
   - Context = the whole thread + the order's dossier facts + the supplier
     playbook, so the reply knows the deal, not just the last message.
 
@@ -205,7 +207,14 @@ LATEST message in the thread below, doing exactly what his instruction says.
 
 WILLIAM'S VOICE — follow it exactly:
 - Casual and direct. Short sentences. Plain words.
-- Greeting: "Hey" plus the first name (or "Good morning" when it fits).
+- NEVER greet by name — several different people answer these supplier
+  inboxes. Open with EXACTLY these two lines, with one blank line between
+  them and one blank line after, then start the message:
+
+Hey There,
+
+-William here.
+
 - Say the thing, then stop. No corporate filler, no "I hope this finds you
   well", no "please don't hesitate".
 - Sign off exactly:
