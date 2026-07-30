@@ -6,7 +6,6 @@ plans: pallet count/dims/weights (the R+L RateQuote payload) plus fee adders.
 Calibration authority (2026-07-15, William-ruled; see
 Desktop\\VERIFIED SOT 6_30_26\\ORDERS_BACKEND_WAREHOUSE_MAP_20260714\\PALLET_CALIBRATION_TRACK_20260715.md):
 - declared pallet cube = carton cube x1.5 (measured 1.40-1.55 across GHI/C&S/ROC/DuraStone)
-- shipment weight = SOT weight x1.08 (our SOT reads -7..-13% vs carrier-certified)
 - over-dimension: any piece >=96in long that is NOT boxable trim (<=5in wide) rides an
   8-ft pallet -> $275 R+L over-dim exposure; composite two-box talls exempt
 - supplier pallet profiles differ (48x40 vs 96x44 8-footers) -> pallet-count breakpoints differ
@@ -14,6 +13,13 @@ Desktop\\VERIFIED SOT 6_30_26\\ORDERS_BACKEND_WAREHOUSE_MAP_20260714\\PALLET_CAL
 - linear-foot/capacity risk on big loads -> flag for TWO quotes / consider split shipment
 - accessorials (residential $75, liftgate $62, notification $13) added when destination requires
 - R+L minimum floor (~$330-355 all-in small shipments) comes back from the RateQuote API itself
+
+WEIGHT MODEL v2 (William-ruled 2026-07-30): the old x1.08 fudge factor is
+RETIRED — real pallet wood is added instead: +40 lb per standard pallet,
++85 lb per 8-footer. Calibration pair PRO I116737533 (order 5693): SOT
+1,004.2 lb, R+L scale 1,218 lb on 2 pieces (one 8-ft + one standard =
+125 lb of wood). Billed-vs-charged tracking (rl_bill_audit) is the tuning
+loop — adjust here when the running average drifts.
 """
 
 import math
@@ -22,7 +28,8 @@ from typing import Dict, List, Optional
 from db_helpers import get_db
 from psycopg2.extras import RealDictCursor
 
-WEIGHT_FACTOR = 1.08      # SOT -> shipped weight
+PALLET_WOOD_STD = 40.0    # lb, 4x4 standard pallet (William 2026-07-30)
+PALLET_WOOD_8FT = 85.0    # lb, 4x8 eight-footer (William 2026-07-30)
 CUBE_MULTIPLIER = 1.5     # carton cube -> declared pallet cube
 PALLETIZE_FEE = 50.0      # per pallet, supplier pass-through
 OVER_DIM_FEE = 275.0      # R+L, any piece >= 96in unboxable
@@ -80,16 +87,23 @@ def plan_shipment(line_items: List[Dict], residential: bool = False,
         if rec.get("requires_long_pallet"):
             long_item = True
 
-    ship_weight = round(sot_weight * WEIGHT_FACTOR, 1)
+    cargo_weight = round(sot_weight, 1)
     profile = PROFILES.get(supplier or "", PROFILES["_default"])
     if long_item and not profile["eight_ft"]:
         profile = EIGHT_FT_PROFILE  # unboxable >=96in piece forces an 8-ft pallet profile
+    wood_each = PALLET_WOOD_8FT if profile["eight_ft"] else PALLET_WOOD_STD
 
+    # Pallet count from the cargo, then pallet wood joins the shipped weight;
+    # if the wood pushes past a weight breakpoint, the count bumps once more.
     pallets = max(
         math.ceil(carton_cube / profile["cap_cube"]) if carton_cube else 0,
-        math.ceil(ship_weight / profile["cap_lb"]) if ship_weight else 0,
-        1 if (carton_cube or ship_weight) else 0,
+        math.ceil(cargo_weight / profile["cap_lb"]) if cargo_weight else 0,
+        1 if (carton_cube or cargo_weight) else 0,
     )
+    ship_weight = round(cargo_weight + wood_each * pallets, 1)
+    while pallets and ship_weight > pallets * profile["cap_lb"]:
+        pallets += 1
+        ship_weight = round(cargo_weight + wood_each * pallets, 1)
 
     handling_units = []
     if pallets:
@@ -118,6 +132,7 @@ def plan_shipment(line_items: List[Dict], residential: bool = False,
     return {
         "supplier": supplier,
         "sot_weight_lb": round(sot_weight, 1),
+        "pallet_wood_lb": round(wood_each * pallets, 1),
         "ship_weight_lb": ship_weight,
         "carton_cube_ft3": round(carton_cube, 1),
         "declared_cube_ft3": round(carton_cube * CUBE_MULTIPLIER, 1),
