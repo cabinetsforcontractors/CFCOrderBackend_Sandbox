@@ -11,12 +11,19 @@ RULINGS BAKED IN:
     RULING 7/30: several people answer supplier boxes (Bella one day,
     Maria the next), so NEVER guess a name — open exactly
     "Hey There," / blank line / "-William here." Signs "Thank you, William".
+  - REPLY-ANCHOR LAW 7/30 ("to make a reply a reply the robot needs to
+    make sure that the email was sent to the address that the email was
+    sent from"): the reply must go back to the OUTSIDE sender. If the
+    anchor message is one of OUR addresses (William forwarded the email to
+    a customer or someone for a look), walk the chain backwards to the
+    newest message from an outside address and reply to THAT.
   - Context = the whole thread + the order's dossier facts + the supplier
     playbook, so the reply knows the deal, not just the last message.
 
 Doors [admin]:
   POST /reply/compose {message_id, intent, order_id?}
-       -> {draft_body, subject, to, order_id, supplier, chain[]}
+       -> {draft_body, subject, to, order_id, supplier, chain[],
+           re_anchored, anchor_from}
   POST /reply/send {message_id, body, to?, subject?}
        -> sends as a real REPLY in the same thread (In-Reply-To/References
           + Gmail threadId so it threads); EMAIL_ALLOWLIST redirect applies
@@ -31,7 +38,7 @@ import urllib.error
 import urllib.request
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Body, Depends, HTTPException
 
@@ -43,6 +50,22 @@ reply_router = APIRouter(tags=["reply-composer"])
 COMPOSER_MODEL = os.environ.get("REPLY_COMPOSER_MODEL",
                                 "claude-sonnet-5").strip()
 _OID_RE = re.compile(r"\b(5\d{3})\b")
+
+# OUR mailboxes — a reply must never be aimed at one of these.
+_OUR_ADDRS = {
+    "orders@cabinetsforcontractors.com",
+    "cabinetsforcontractors@gmail.com",
+    "wpjob1@gmail.com",
+    "contact@allprocabinetsandflooring.com",
+}
+
+
+def _is_ours(addr: str) -> bool:
+    a = (addr or "").lower()
+    safety = os.environ.get("INTERNAL_SAFETY_EMAIL", "").strip().lower()
+    if safety and safety in a:
+        return True
+    return any(x in a for x in _OUR_ADDRS)
 
 
 # =============================================================================
@@ -121,6 +144,20 @@ def fetch_thread(message_id: str) -> Optional[Dict]:
     return {"thread_id": thread_id, "messages": chain,
             "target": next((c for c in chain
                             if c["message_id"] == message_id), chain[-1])}
+
+
+def _reply_anchor(chain: Dict) -> Tuple[Dict, bool]:
+    """REPLY-ANCHOR LAW: the message the reply answers. If the requested
+    message is OURS (a forward William sent out for a look), walk backwards
+    to the newest message from an OUTSIDE address — the reply goes to the
+    person who actually wrote to us, never to one of our own boxes."""
+    target = chain["target"]
+    if not _is_ours(target.get("from", "")):
+        return target, False
+    for c in reversed(chain["messages"]):
+        if not _is_ours(c.get("from", "")):
+            return c, True
+    return target, False
 
 
 # =============================================================================
@@ -244,9 +281,9 @@ def compose_reply(message_id: str, intent: str,
     chain = fetch_thread(message_id)
     if not chain:
         return {"status": "error", "message": "could not fetch thread"}
-    target = chain["target"]
+    anchor, re_anchored = _reply_anchor(chain)
     oid = order_id or _guess_order_id(chain)
-    supplier = _supplier_for(target.get("from", ""), oid)
+    supplier = _supplier_for(anchor.get("from", ""), oid)
 
     chain_txt = "\n\n".join(
         f"--- {c['date']} | from {c['from']}\n{c['text']}"
@@ -281,16 +318,18 @@ def compose_reply(message_id: str, intent: str,
     if not draft:
         return {"status": "error", "message": "model returned nothing"}
 
-    subject = target.get("subject") or ""
+    subject = anchor.get("subject") or ""
     if subject and not subject.lower().startswith("re:"):
         subject = f"Re: {subject}"
-    reply_to = target.get("from", "")
+    reply_to = anchor.get("from", "")
     m = re.search(r"<([^>]+)>", reply_to)
     to_addr = m.group(1) if m else reply_to.strip()
 
     return {"status": "ok", "message_id": message_id,
             "order_id": oid, "supplier": supplier,
             "to": to_addr, "subject": subject,
+            "re_anchored": re_anchored,
+            "anchor_from": anchor.get("from", ""),
             "draft_body": draft,
             "chain": [{"from": c["from"], "date": c["date"],
                        "snippet": (c["text"] or "")[:200]}
@@ -308,13 +347,17 @@ def send_reply(message_id: str, body: str, to: str = "",
     chain = fetch_thread(message_id)
     if not chain:
         return {"status": "error", "message": "could not fetch thread"}
-    target = chain["target"]
+    anchor, re_anchored = _reply_anchor(chain)
 
     if not to:
-        m = re.search(r"<([^>]+)>", target.get("from", ""))
-        to = m.group(1) if m else (target.get("from") or "").strip()
+        m = re.search(r"<([^>]+)>", anchor.get("from", ""))
+        to = m.group(1) if m else (anchor.get("from") or "").strip()
+    if _is_ours(to):
+        return {"status": "error",
+                "message": f"refusing to reply to our own address ({to}) — "
+                           "no outside sender found in this thread"}
     if not subject:
-        subject = target.get("subject") or ""
+        subject = anchor.get("subject") or ""
         if subject and not subject.lower().startswith("re:"):
             subject = f"Re: {subject}"
 
@@ -341,7 +384,7 @@ def send_reply(message_id: str, body: str, to: str = "",
     apply_from(msg)
     msg["To"] = to
     msg["Subject"] = subject
-    rfc_id = target.get("rfc_message_id") or ""
+    rfc_id = anchor.get("rfc_message_id") or ""
     if rfc_id:
         msg["In-Reply-To"] = rfc_id
         msg["References"] = rfc_id
@@ -380,6 +423,8 @@ def send_reply(message_id: str, body: str, to: str = "",
             record_fire(oid, "reply_sent",
                         {"to": to, "original_to": original_to,
                          "redirected": redirected, "subject": subject,
+                         "re_anchored": re_anchored,
+                         "anchor_from": anchor.get("from", ""),
                          "gmail_message_id": sent.get("id"),
                          "in_reply_to_message": message_id,
                          "body_preview": body[:300]},
@@ -390,7 +435,8 @@ def send_reply(message_id: str, body: str, to: str = "",
     return {"status": "ok", "sent_message_id": sent.get("id"),
             "to": to, "redirected": redirected,
             "original_to": original_to, "subject": subject,
-            "order_id": oid}
+            "re_anchored": re_anchored, "order_id": oid,
+            "thread_id": chain.get("thread_id")}
 
 
 # =============================================================================
