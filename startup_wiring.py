@@ -123,6 +123,16 @@ def wire_all(app: FastAPI) -> dict:
         results["fire_log"] = False
         print(f"[STARTUP] fire_log not found: {e}")
 
+    # Order dossier + supplier playbooks (/orders/{id}/dossier, /playbooks)
+    # — the generated mini-md per order (William ruled 2026-07-30)
+    try:
+        from dossier import dossier_router
+        app.include_router(dossier_router)
+        results["dossier"] = True
+    except ImportError as e:
+        results["dossier"] = False
+        print(f"[STARTUP] dossier not found: {e}")
+
     loaded = sum(1 for v in results.values() if v)
     print(f"[STARTUP] startup_wiring: {loaded}/{len(results)} modules loaded")
     
