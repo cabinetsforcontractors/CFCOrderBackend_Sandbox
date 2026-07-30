@@ -6,6 +6,10 @@ Phase 5: Extracted from main.py
 Phase 5C: require_admin wired to all write/delete endpoints
 2026-07-30: FIRING LAW — BOL doors record full rl_bol_created fires
             (fire_log.record_bol_fire) + orders.tracking latest copy.
+2026-07-30 QUOTE-NUMBER LAW (William): a BOL without the original quote
+            number gets re-rated by the carrier — /rl/bol auto-attaches
+            the last known quote number for the PO's order so the quoted
+            price HOLDS, and warns loudly when none exists.
 
 Mount in main.py with:
     from shipping_routes import shipping_router
@@ -47,6 +51,7 @@ NOTE: /proxy/* (rl-quote-sandbox microservice) is handled by rl_quote_proxy.py.
 """
 
 import os
+import re
 from typing import Optional, List
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -248,6 +253,26 @@ def rl_create_bol(request: RLBolRequest, _: bool = Depends(require_admin)):
     if not rl_is_configured():
         raise HTTPException(status_code=503, detail="RL_CARRIERS_API_KEY not configured")
 
+    # QUOTE-NUMBER LAW (William 2026-07-30): a BOL without the original
+    # quote number gets re-rated — the quoted price only HOLDS when the
+    # quote rides the BOL. Auto-attach the last known quote when none given.
+    quote_note = None
+    if not (request.quote_number or "").strip() and (request.po_number or "").strip():
+        try:
+            from fire_log import last_quote_number
+            m = re.search(r"\d{4,6}", request.po_number)
+            if m:
+                qn = last_quote_number(m.group(0))
+                if qn:
+                    request.quote_number = qn
+                    quote_note = f"quote {qn} auto-attached — quoted price holds"
+                else:
+                    quote_note = ("NO PRIOR QUOTE FOUND — BOL will be rated "
+                                  "fresh; the billed price may differ from "
+                                  "what was quoted/charged")
+        except Exception as qe:
+            quote_note = f"quote lookup failed: {qe}"
+
     try:
         from rl_carriers import create_bol
         result = create_bol(
@@ -287,7 +312,9 @@ def rl_create_bol(request: RLBolRequest, _: bool = Depends(require_admin)):
             fire = record_bol_fire(request.dict(), result)
         except Exception as fe:
             print(f"[SHIPPING] fire_log record failed for /rl/bol: {fe}")
-        return {"status": "ok", "bol": result, "fire": fire}
+        return {"status": "ok", "bol": result, "fire": fire,
+                "quote_note": quote_note,
+                "quote_number_used": request.quote_number or None}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
@@ -555,6 +582,13 @@ def rl_create_order_bol(
         quote_number = ""
         if warehouse_shipment.get("quote", {}).get("quote", {}):
             quote_number = warehouse_shipment["quote"]["quote"].get("quote_number", "")
+        if not quote_number:
+            # QUOTE-NUMBER LAW (2026-07-30): reuse the last known quote.
+            try:
+                from fire_log import last_quote_number
+                quote_number = last_quote_number(str(order_id)) or ""
+            except Exception:
+                quote_number = ""
 
         result = create_bol(
             shipper_name=warehouse.get("name"),
@@ -588,6 +622,7 @@ def rl_create_order_bol(
             from fire_log import record_bol_fire
             fire = record_bol_fire({
                 "po_number": order_id,
+                "quote_number": quote_number,
                 "shipper_name": warehouse.get("name"),
                 "shipper_address": warehouse.get("address", ""),
                 "shipper_city": warehouse.get("city"),
@@ -616,6 +651,7 @@ def rl_create_order_bol(
             "warehouse": warehouse_code,
             "bol": result,
             "fire": fire,
+            "quote_number_used": quote_number or None,
             "shipment_details": {
                 "weight": weight,
                 "pieces": pieces,
