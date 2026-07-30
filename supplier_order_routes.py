@@ -3,6 +3,9 @@ supplier_order_routes.py
 Routes for the supplier-order state machine + dispatch engine (see
 supplier_orders.py) and the reply auto-verifier (estimate_verifier.py).
 All admin-gated.
+2026-07-30 FIRING LAW (step 2b): real dispatches record a per-warehouse
+supplier_dispatched:{wh} fire (re-dispatches diff); manual leg-status
+transitions record supplier_leg_status:{wh} fires.
 
   POST /supplier-orders/dispatch/{order_id}?auto_send=true&dry_run=false
        — generate + send every warehouse's order artifact. dry_run returns
@@ -74,10 +77,33 @@ def dispatch(order_id: str, auto_send: bool = True, dry_run: bool = False,
     """Dispatch an order's supplier artifacts [admin]."""
     from supplier_orders import dispatch_order
     try:
-        return dispatch_order(order_id, auto_send=auto_send, dry_run=dry_run,
-                              triggered_by="manual_dispatch")
+        result = dispatch_order(order_id, auto_send=auto_send, dry_run=dry_run,
+                                triggered_by="manual_dispatch")
     except Exception as e:
         return {"status": "error", "message": str(e)}
+    # FIRING LAW (2026-07-30): every REAL dispatch records a fire per
+    # warehouse — kind carries the warehouse so each leg keeps its own
+    # seq/diff chain; a re-dispatch shows what changed.
+    if not dry_run and isinstance(result, dict):
+        try:
+            from fire_log import record_fire
+            for wh, w in (result.get("warehouses") or {}).items():
+                if not isinstance(w, dict):
+                    continue
+                record_fire(order_id, f"supplier_dispatched:{wh}",
+                            {"warehouse": wh, "mode": w.get("mode"),
+                             "artifact": w.get("artifact"),
+                             "attachment": w.get("attachment"),
+                             "status": w.get("status"),
+                             "sent_to": w.get("sent_to"),
+                             "subject": w.get("subject"),
+                             "lines": w.get("lines"),
+                             "units": w.get("units"),
+                             "untranslated": w.get("untranslated")},
+                            "dispatch_door")
+        except Exception as fe:
+            print(f"[SUPPLIER-ORDERS] dispatch fire failed {order_id}: {fe}")
+    return result
 
 
 @supplier_order_router.get("/supplier-orders")
@@ -106,6 +132,19 @@ def update_status(row_id: int, req: StatusUpdate,
                 result["row"]["order_id"])
         except Exception as e:
             result["b2bwave_status"] = {"applied": False, "error": str(e)}
+    # FIRING LAW (2026-07-30): every manual leg transition is a fire.
+    if result.get("status") == "ok":
+        try:
+            from fire_log import record_fire
+            row = result.get("row") or {}
+            record_fire(str(row.get("order_id") or ""),
+                        f"supplier_leg_status:{row.get('warehouse')}",
+                        {"row_id": row_id, "leg_status": req.status,
+                         "note": req.note,
+                         "supplier_doc_ref": req.supplier_doc_ref},
+                        "supplier_status_door")
+        except Exception as fe:
+            print(f"[SUPPLIER-ORDERS] status fire failed row {row_id}: {fe}")
     return result
 
 
