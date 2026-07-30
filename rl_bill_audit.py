@@ -1,7 +1,19 @@
 """
 rl_bill_audit.py — the FREIGHT-BILL AUDITOR (Phase 2, William 2026-07-29
-"proceed to Phase 2"; the underlying ruling is from 2026-07-16: quote vs R+L
-billed with a 10% per-order leeway -> alert beyond, plus a rolling cadence).
+"proceed to Phase 2"; underlying ruling 2026-07-16: quote vs R+L billed).
+
+AUDITOR v2 (William-ruled 2026-07-30, the 5693 lesson):
+  Win some, lose some — small swings are EXPECTED and stay quiet; the
+  running average over time should sit near zero. Only a WAY-OFF shipment
+  screams.
+  - WAY OFF = |charged - billed| beyond min(15% of charged, $75) —
+    whichever bound is SMALLER trips first, either direction (a big WIN
+    means the quote model is off too).
+  - ROLLING 90-DAY LEDGER on every audit email: shipments, total charged,
+    total billed, net margin, average per shipment. A shipment 91+ days
+    old drops off. The ledger reads each order's CURRENT shipping_cost
+    (not the value frozen at stamp time), so backfilling a missing charge
+    heals the average retroactively.
 
 Feed: R+L's BILL2 report emails (reports@rlcarriers.com, subject
 "R&L CARRIERS - BILL2 - C0211X", usually forwarded from Connie's box). The
@@ -21,12 +33,9 @@ Order matching, in order of confidence:
 For each matched row (real mode):
   - order_event `freight_billed` {pro, billed, gross, ship/del dates, status,
     report} — once per (pro, report), re-runs are idempotent;
-  - comparison vs orders.shipping_cost (what the CUSTOMER was charged, which
-    includes markup + pallet fees, so billed should always be LESS): billed
-    >= charged = we lost money -> flagged; billed > 90% of charged = margin
-    thinner than the markup design -> flagged soft.
+  - comparison vs orders.shipping_cost (what the CUSTOMER was charged);
   - one summary email to orders@ with every row in a table (numbers in
-    tables) — flagged rows first.
+    tables) — flagged rows first, 90-day ledger footer always.
 
 Rides the ledger cycle (unprocessed BILL2 ledger rows) + manual door:
   POST /freight/rl-bill-audit/{message_id}?dry_run=true  [admin]
@@ -41,6 +50,10 @@ from typing import Dict, List, Optional
 from db_helpers import get_db
 
 INTERNAL_ALERT = "orders@cabinetsforcontractors.com"
+
+WAY_OFF_PCT = 0.15    # 15% of charged...
+WAY_OFF_ABS = 75.0    # ...or $75 — whichever is SMALLER trips the flag
+LEDGER_DAYS = 90      # rolling window; 91+ days old drops off
 
 _BILL2_SUBJ = re.compile(r"R&L CARRIERS - BILL2", re.I)
 _OID_RE = re.compile(r"\b(5\d{3})\b")
@@ -119,6 +132,71 @@ def _already_stamped(conn, pro: str, report: str) -> bool:
         return bool(cur.fetchone())
 
 
+def way_off_flag(charged: float, billed: float) -> str:
+    """William 2026-07-30: threshold = min(15% of charged, $75) —
+    whichever is smaller trips first; both directions flag."""
+    if charged <= 0:
+        return "no charged-shipping recorded on the order"
+    margin = charged - billed
+    threshold = min(charged * WAY_OFF_PCT, WAY_OFF_ABS)
+    if abs(margin) > threshold:
+        side = "LOSS" if margin < 0 else "WIN"
+        return (f"WAY OFF ({side}) — margin ${margin:,.2f} beyond the "
+                f"±${threshold:,.2f} band (smaller of 15% / $75)")
+    return ""
+
+
+def rolling_ledger(days: int = LEDGER_DAYS) -> Dict:
+    """The win-some-lose-some gauge (William 2026-07-30): every
+    freight_billed shipment from the last `days` days, margin computed
+    against the order's CURRENT shipping_cost (self-healing on backfill),
+    one entry per (pro, report). 91+ days old has dropped off."""
+    from psycopg2.extras import RealDictCursor
+    with get_db() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT e.event_data, e.order_id,
+                       COALESCE(o.shipping_cost, 0) AS charged_now
+                FROM order_events e
+                LEFT JOIN orders o ON o.order_id = e.order_id
+                WHERE e.event_type = 'freight_billed'
+                  AND e.created_at > NOW() - make_interval(days => %s)
+                ORDER BY e.created_at DESC
+            """, (int(days),))
+            rows = cur.fetchall()
+    seen = set()
+    n = 0
+    tot_billed = tot_charged = tot_margin = 0.0
+    unrecorded = 0
+    for row in rows:
+        d = row["event_data"]
+        if isinstance(d, str):
+            try:
+                d = json.loads(d)
+            except Exception:
+                continue
+        d = d or {}
+        key = (d.get("pro"), d.get("report"))
+        if key in seen:
+            continue
+        seen.add(key)
+        billed = float(d.get("billed") or 0)
+        charged = float(row.get("charged_now") or 0)
+        if charged <= 0:
+            unrecorded += 1
+            continue
+        n += 1
+        tot_billed += billed
+        tot_charged += charged
+        tot_margin += (charged - billed)
+    return {"window_days": int(days), "shipments": n,
+            "total_charged": round(tot_charged, 2),
+            "total_billed": round(tot_billed, 2),
+            "net_margin": round(tot_margin, 2),
+            "avg_margin": round(tot_margin / n, 2) if n else 0.0,
+            "unrecorded_charge": unrecorded}
+
+
 def audit_bill2_message(message_id: str, dry_run: bool = True) -> Dict:
     """Parse one BILL2 email's CSV attachment(s), match rows to orders,
     stamp freight_billed events + send the audit summary (real mode)."""
@@ -160,14 +238,7 @@ def audit_bill2_message(message_id: str, dry_run: bool = True) -> Dict:
                 charged = float(row[0] or 0) if row else 0.0
                 r["charged"] = charged
                 r["margin"] = round(charged - r["billed"], 2)
-                if charged > 0 and r["billed"] >= charged:
-                    r["flag"] = "LOSS — billed >= what the customer was charged"
-                elif charged > 0 and r["billed"] > charged * 0.9:
-                    r["flag"] = "thin — margin under 10% of charged"
-                elif charged == 0:
-                    r["flag"] = "no charged-shipping recorded on the order"
-                else:
-                    r["flag"] = ""
+                r["flag"] = way_off_flag(charged, r["billed"])
                 if r["flag"]:
                     out["flagged"] += 1
                 out["rows"].append(r)
@@ -186,6 +257,11 @@ def audit_bill2_message(message_id: str, dry_run: bool = True) -> Dict:
                                 "del_date": r["del_date"],
                                 "status": r["status"], "flag": r["flag"]})))
                         conn.commit()
+
+    try:
+        out["ledger_90d"] = rolling_ledger()
+    except Exception as e:
+        out["ledger_90d"] = {"error": str(e)}
 
     if not dry_run and out["rows"]:
         _send_summary(out)
@@ -218,13 +294,30 @@ def _send_summary(out: Dict):
         f"{u['consignee'].strip()})</li>" for u in out["unmatched"])
     subj = (f"FREIGHT BILL AUDIT - {len(out['rows'])} shipment"
             f"{'s' if len(out['rows']) != 1 else ''}"
-            + (f", {out['flagged']} FLAGGED" if out['flagged'] else " - all ok"))
+            + (f", {out['flagged']} WAY OFF" if out['flagged'] else " - all in band"))
+
+    led = out.get("ledger_90d") or {}
+    ledger_html = ""
+    if led and not led.get("error"):
+        ledger_html = (
+            f"<p style='margin-top:14px'><strong>90-day ledger</strong> "
+            f"(win some / lose some — average should sit near zero):<br>"
+            f"{led['shipments']} shipments &middot; "
+            f"charged ${led['total_charged']:,.2f} &middot; "
+            f"billed ${led['total_billed']:,.2f} &middot; "
+            f"net margin <strong>${led['net_margin']:,.2f}</strong> &middot; "
+            f"average <strong>${led['avg_margin']:,.2f}/shipment</strong>"
+            + (f" &middot; {led['unrecorded_charge']} with no charged-shipping "
+               f"recorded (excluded)" if led.get("unrecorded_charge") else "")
+            + "</p>")
+
     html = (f"<p>R+L BILL2 report processed "
             f"({out.get('subject', '')}).</p>"
             f"<table style='border-collapse:collapse;font-size:13px'>{head}"
             f"{rows_html}</table>"
             + (f"<p><strong>Unmatched rows:</strong><ul>{unmatched}</ul></p>"
-               if unmatched else ""))
+               if unmatched else "")
+            + ledger_html)
     try:
         from supplier_orders import _send_email
         first_oid = next((r.get("order_id") for r in out["rows"]
