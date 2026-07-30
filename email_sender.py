@@ -6,6 +6,9 @@ Sends emails via Gmail API using existing OAuth credentials from gmail_sync.py.
 For the payment_link template, also generates and attaches a PDF invoice.
 
 All sends are logged to order_events with proper source tagging.
+2026-07-30 FIRING LAW (step 2b): email events, payment-link creation and
+invoice drafts ride fire_log.record_fire — full payload + seq + diff — with
+the raw insert kept as fallback so a send never dies over bookkeeping.
 
 CRITICAL: System-generated emails (lifecycle templates) are tagged with
 source='system_generated' so the lifecycle engine excludes them from
@@ -46,6 +49,27 @@ CFC_SENDER_NAME = os.environ.get(
 # DELETED (GoDaddy M365 cleanup, marketing-lane note) — mail to them bounces.
 CFC_SENDER_EMAIL = (os.environ.get("EMAIL_FROM_ADDRESS", "").strip()
                     or "orders@cabinetsforcontractors.com")
+
+
+def _record(order_id, kind, payload, source):
+    """FIRING LAW writer with raw-insert fallback."""
+    try:
+        from fire_log import record_fire
+        record_fire(order_id, kind, payload, source)
+        return
+    except Exception as e:
+        print(f"[EMAIL] fire_log failed {order_id}/{kind}: {e} - falling back")
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO order_events
+                       (order_id, event_type, event_data, source)
+                       VALUES (%s, %s, %s, %s)""",
+                    (order_id, kind, json.dumps(payload, default=str), source))
+            conn.commit()
+    except Exception as e:
+        print(f"[EMAIL] event fallback failed {order_id}/{kind}: {e}")
 
 
 def send_order_email(
@@ -362,18 +386,12 @@ def create_invoice_draft(
             link_info = create_payment_link(order_id, grand)
             square_link = link_info["url"]
             # event = the kill-switch registry: cancel deletes every link
-            # recorded here (William 2026-07-27)
-            with get_db() as conn:
-                with conn.cursor() as cur:
-                    cur.execute("""INSERT INTO order_events
-                                   (order_id, event_type, event_data, source)
-                                   VALUES (%s, 'payment_link_created', %s,
-                                           'invoice_draft')""",
-                                (order_id, json.dumps(
-                                    {"link_id": link_info["id"],
-                                     "url": link_info["url"],
-                                     "amount": grand, "auto": True})))
-                    conn.commit()
+            # recorded here (William 2026-07-27). FIRING LAW: rides
+            # record_fire, payload keys unchanged (kill_order_links reads
+            # link_id).
+            _record(order_id, "payment_link_created",
+                    {"link_id": link_info["id"], "url": link_info["url"],
+                     "amount": grand, "auto": True}, "invoice_draft")
         except Exception as e:
             link_error = str(e)
             print(f"[EMAIL] draft-invoice auto-link failed for {order_id}: {e}")
@@ -452,6 +470,17 @@ def create_invoice_draft(
     _log_email_event(order_id=order_id, template_id="payment_link",
                      to_email=to_email, subject=subject, message_id=draft_id,
                      triggered_by="draft_invoice", source="invoice_draft")
+    # FIRING LAW: the draft itself is a fire — totals + link + attachments;
+    # a re-draft diffs against this one.
+    _record(order_id, "invoice_drafted",
+            {"draft_id": draft_id, "to": to_email,
+             "total_items": subtotal, "tariff_amount": tariff,
+             "total_shipping": shipping, "grand_total": grand,
+             "pay_by_check": bool(order_data.get("pay_by_check")),
+             "payment_link_id": (link_info or {}).get("id"),
+             "pdf_attached": pdf_bytes is not None,
+             "picklist_attached": picklist_bytes is not None},
+            "invoice_draft")
     print(f"[EMAIL] invoice DRAFT created for {order_id} -> {to_email} "
           f"(draft={draft_id}, pdf={pdf_bytes is not None})")
     out = {"success": True, "draft_id": draft_id, "to": to_email,
@@ -539,18 +568,9 @@ def _log_email_event(
     if error:
         event_data["error"] = error
 
-    try:
-        with get_db() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO order_events (order_id, event_type, event_data, source)
-                    VALUES (%s, %s, %s, %s)
-                    """,
-                    (order_id, event_type, json.dumps(event_data), source),
-                )
-    except Exception as e:
-        print(f"[EMAIL] Failed to log event for order {order_id}: {e}")
+    # FIRING LAW: ride record_fire (seq + diff); _record falls back to the
+    # raw insert if fire_log is unavailable.
+    _record(order_id, event_type, event_data, source)
 
 
 def get_email_history(order_id: str) -> list:
