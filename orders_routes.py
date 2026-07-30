@@ -7,6 +7,11 @@ Phase 5: Extracted from main.py (was ~900 lines inline)
 Phase 5C: require_admin wired to all write/delete endpoints
 Phase 5C: run-check + reactivate endpoints added
 Phase 9: sent_to_warehouse checkpoint fires supplier poll for each shipment
+2026-07-30 FIRING LAW (step 2b): checkpoint, payment-unstamp and the field
+update door record full PRE-STATE fires via fire_log.record_fire — what was
+believed before, what changed, who fired it (the 5707 wrong-stamp lesson).
+payment-unstamp now clears shipping_cost too (stamp computes it from the
+payment, so unstamp must take it back — the 5707 phantom-$1,231.21 bug).
 
 Mount in main.py with:
     from orders_routes import orders_router, is_trusted_customer
@@ -73,6 +78,27 @@ except ImportError:
 orders_router = APIRouter(tags=["orders"])
 
 
+def _fire(order_id, kind, payload, source="api"):
+    """FIRING LAW writer with fallback: never let bookkeeping kill a door."""
+    try:
+        from fire_log import record_fire
+        return record_fire(order_id, kind, payload, source)
+    except Exception as e:
+        print(f"[ORDERS] fire_log failed {order_id}/{kind}: {e} - falling back")
+        try:
+            with get_db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""INSERT INTO order_events
+                                   (order_id, event_type, event_data, source)
+                                   VALUES (%s, %s, %s, %s)""",
+                                (order_id, kind,
+                                 json.dumps(payload, default=str), source))
+                conn.commit()
+        except Exception as e2:
+            print(f"[ORDERS] event fallback failed {order_id}/{kind}: {e2}")
+        return None
+
+
 # =============================================================================
 # PYDANTIC MODELS
 # =============================================================================
@@ -93,6 +119,10 @@ class OrderUpdate(BaseModel):
     supplier_order_no: Optional[str] = None
     warehouse_1: Optional[str] = None
     warehouse_2: Optional[str] = None
+    # 2026-07-30: charged-shipping is auditable data (the freight-bill
+    # auditor reads it) — it must be settable/correctable through the door.
+    shipping_cost: Optional[float] = None
+    pro_number: Optional[str] = None
 
 
 class CheckpointUpdate(BaseModel):
@@ -432,30 +462,38 @@ def get_supplier_sheet_data(order_id: str):
 
 @orders_router.patch("/orders/{order_id}")
 def update_order(order_id: str, update: OrderUpdate, _: bool = Depends(require_admin)):
-    """Update order fields. [admin]"""
+    """Update order fields. [admin] FIRING LAW: previous values of every
+    changed field ride the order_fields_updated fire."""
+    changes = {f: v for f, v in update.dict(exclude_unset=True).items()
+               if v is not None}
+    if not changes:
+        raise HTTPException(status_code=400, detail="No fields to update")
+
     with get_db() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                f"SELECT {', '.join(changes.keys())} FROM orders "
+                f"WHERE order_id = %s", (order_id,))
+            prev_row = cur.fetchone()
+            if not prev_row:
+                raise HTTPException(status_code=404, detail="Order not found")
+
         with conn.cursor() as cur:
-            fields = []
-            values = []
-
-            for field, value in update.dict(exclude_unset=True).items():
-                if value is not None:
-                    fields.append(f"{field} = %s")
-                    values.append(value)
-
-            if not fields:
-                raise HTTPException(status_code=400, detail="No fields to update")
-
+            fields = [f"{f} = %s" for f in changes.keys()]
+            values = list(changes.values())
             fields.append("updated_at = NOW()")
             values.append(order_id)
-
             query = f"UPDATE orders SET {', '.join(fields)} WHERE order_id = %s"
             cur.execute(query, values)
-
             if cur.rowcount == 0:
                 raise HTTPException(status_code=404, detail="Order not found")
 
-            return {"status": "ok", "message": "Order updated"}
+    _fire(order_id, "order_fields_updated",
+          {"fields": {f: {"was": prev_row.get(f), "now": v}
+                      for f, v in changes.items()}},
+          source="update_order_door")
+    return {"status": "ok", "message": "Order updated",
+            "changed": sorted(changes.keys())}
 
 
 @orders_router.patch("/orders/{order_id}/checkpoint")
@@ -465,6 +503,9 @@ def update_checkpoint(order_id: str, update: CheckpointUpdate, _: bool = Depends
 
     Phase 9: When checkpoint = 'sent_to_warehouse', automatically fires
     supplier polling emails to all shipments for this order.
+    FIRING LAW (2026-07-30): the checkpoint event carries the full
+    PRE-STATE (what the row believed before this fire) — the 5707
+    wrong-stamp becomes fully reconstructable.
     """
     valid_checkpoints = [
         "payment_link_sent",
@@ -489,6 +530,21 @@ def update_checkpoint(order_id: str, update: CheckpointUpdate, _: bool = Depends
                 else "completed_at"
             )
 
+            # PRE-STATE for the fire (FIRING LAW)
+            cur.execute(
+                f"""SELECT {update.checkpoint}, {timestamp_field},
+                           payment_amount, shipping_cost
+                    FROM orders WHERE order_id = %s""", (order_id,))
+            pre = cur.fetchone()
+            if not pre:
+                raise HTTPException(status_code=404, detail="Order not found")
+            prev_state = {
+                "checkpoint_was": bool(pre[0]),
+                "checkpoint_at_was": str(pre[1]) if pre[1] else None,
+                "payment_amount_was": float(pre[2]) if pre[2] is not None else None,
+                "shipping_cost_was": float(pre[3]) if pre[3] is not None else None,
+            }
+
             set_parts = [
                 f"{update.checkpoint} = TRUE",
                 f"{timestamp_field} = NOW()",
@@ -496,6 +552,7 @@ def update_checkpoint(order_id: str, update: CheckpointUpdate, _: bool = Depends
             ]
             params = []
 
+            shipping_set = None
             if update.checkpoint == "payment_received" and update.payment_amount:
                 set_parts.append("payment_amount = %s")
                 params.append(update.payment_amount)
@@ -508,6 +565,7 @@ def update_checkpoint(order_id: str, update: CheckpointUpdate, _: bool = Depends
                     shipping = update.payment_amount - float(row[0])
                     set_parts.append("shipping_cost = %s")
                     params.append(shipping)
+                    shipping_set = round(shipping, 2)
 
             params.append(order_id)
 
@@ -516,23 +574,6 @@ def update_checkpoint(order_id: str, update: CheckpointUpdate, _: bool = Depends
 
             if cur.rowcount == 0:
                 raise HTTPException(status_code=404, detail="Order not found")
-
-            cur.execute(
-                """
-                INSERT INTO order_events (order_id, event_type, event_data, source)
-                VALUES (%s, %s, %s, %s)
-                """,
-                (
-                    order_id,
-                    update.checkpoint,
-                    json.dumps(
-                        {"payment_amount": update.payment_amount}
-                        if update.payment_amount
-                        else {}
-                    ),
-                    update.source,
-                ),
-            )
 
             # Phase 9: fire supplier poll for each shipment when sent to warehouse
             polls_fired = []
@@ -561,11 +602,19 @@ def update_checkpoint(order_id: str, update: CheckpointUpdate, _: bool = Depends
                 except Exception as poll_err:
                     print(f"[ORDERS] Supplier poll failed for order {order_id}: {poll_err}")
 
-            return {
-                "status": "ok",
-                "checkpoint": update.checkpoint,
-                "supplier_polls": polls_fired if polls_fired else None,
-            }
+    # FIRING LAW: full payload + pre-state, event_type stays the checkpoint
+    # name so existing consumers (rundown payments board etc.) keep working.
+    _fire(order_id, update.checkpoint,
+          {"payment_amount": update.payment_amount,
+           "shipping_cost_set": shipping_set,
+           "prev": prev_state},
+          source=update.source or "api")
+
+    return {
+        "status": "ok",
+        "checkpoint": update.checkpoint,
+        "supplier_polls": polls_fired if polls_fired else None,
+    }
 
 
 @orders_router.post("/debug/purge-test-order/{order_id}")
@@ -703,30 +752,52 @@ def tombstone_order(order_id: str, reason: str = "",
 
 @orders_router.post("/orders/{order_id}/payment-unstamp")
 def payment_unstamp(order_id: str, reason: str, b2bwave_status: int = 0,
-                    source: str = "admin", _: bool = Depends(require_admin)):
+                    source: str = "admin", clear_shipping: bool = True,
+                    _: bool = Depends(require_admin)):
     """Reverse a WRONG payment stamp. [admin]
 
     Built 2026-07-29 (the Gerald triple-stamp: one Square payment stamped
-    three orders). Clears payment_received/_at/_amount, logs a
-    payment_unstamped event, and — when b2bwave_status is passed — FORCE-sets
-    the B2BWave status to it (the ladder never downgrades, so a wrongly
-    reached Being Prepared needs this explicit push back; readback-verified).
-    """
+    three orders). Clears payment_received/_at/_amount AND (2026-07-30, the
+    5707 phantom-$1,231.21 lesson) shipping_cost — the stamp computes
+    shipping from the payment, so the unstamp takes it back
+    (clear_shipping=false preserves it). FIRING LAW: the cleared values
+    ride the payment_unstamped fire, so the mistake stays reconstructable.
+    When b2bwave_status is passed, FORCE-sets the B2BWave status (the
+    ladder never downgrades; readback-verified)."""
     with get_db() as conn:
         with conn.cursor() as cur:
-            cur.execute("""UPDATE orders SET payment_received = FALSE,
-                           payment_received_at = NULL, payment_amount = NULL,
-                           updated_at = NOW() WHERE order_id = %s""",
-                        (order_id,))
-            if cur.rowcount == 0:
+            cur.execute("""SELECT payment_amount, payment_received_at,
+                                  shipping_cost, payment_received
+                           FROM orders WHERE order_id = %s""", (order_id,))
+            pre = cur.fetchone()
+            if not pre:
                 raise HTTPException(status_code=404, detail="Order not found")
-            cur.execute("""INSERT INTO order_events
-                           (order_id, event_type, event_data, source)
-                           VALUES (%s, 'payment_unstamped', %s, %s)""",
-                        (order_id, json.dumps({"reason": reason}), source))
+            cleared = {
+                "payment_amount_was": float(pre[0]) if pre[0] is not None else None,
+                "payment_received_at_was": str(pre[1]) if pre[1] else None,
+                "shipping_cost_was": float(pre[2]) if pre[2] is not None else None,
+                "payment_received_was": bool(pre[3]),
+            }
+            if clear_shipping:
+                cur.execute("""UPDATE orders SET payment_received = FALSE,
+                               payment_received_at = NULL, payment_amount = NULL,
+                               shipping_cost = NULL,
+                               updated_at = NOW() WHERE order_id = %s""",
+                            (order_id,))
+            else:
+                cur.execute("""UPDATE orders SET payment_received = FALSE,
+                               payment_received_at = NULL, payment_amount = NULL,
+                               updated_at = NOW() WHERE order_id = %s""",
+                            (order_id,))
+
+    _fire(order_id, "payment_unstamped",
+          {"reason": reason, "cleared": cleared,
+           "shipping_cost_cleared": bool(clear_shipping)},
+          source=source)
 
     out = {"status": "ok", "order_id": order_id, "unstamped": True,
-           "reason": reason}
+           "reason": reason, "cleared": cleared,
+           "shipping_cost_cleared": bool(clear_shipping)}
     if b2bwave_status:
         import os as _os
         if _os.environ.get("B2BWAVE_MUTATIONS_ENABLED", "true").lower() == "false":
@@ -1290,14 +1361,14 @@ def get_rl_quote_data(shipment_id: str):
                             shipment_weight = allocated_weight
                             weight_note = (
                                 f"Sales-allocated ({round(pct * 100, 1)}% of order)"
-                                f" \u26a0\ufe0f Not production-ready \u2014 verify before use"
+                                f" ⚠️ Not production-ready — verify before use"
                             )
                         else:
                             needs_manual = True
-                            weight_note = "Multi-warehouse \u2014 enter weight for this shipment"
+                            weight_note = "Multi-warehouse — enter weight for this shipment"
                     else:
                         needs_manual = True
-                        weight_note = "Multi-warehouse \u2014 no total weight on order"
+                        weight_note = "Multi-warehouse — no total weight on order"
                 else:
                     needs_manual = True
                     weight_note = "No weight data available"
