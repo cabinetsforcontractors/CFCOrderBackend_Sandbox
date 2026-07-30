@@ -198,13 +198,14 @@ def _playbook_text(supplier: Optional[str]) -> str:
 # COMPOSE
 # =============================================================================
 
+# NOTE: literal braces are doubled — this template goes through .format().
 COMPOSE_PROMPT = """You write emails AS William Prince of Cabinets For \
 Contractors (a wholesale RTA cabinet business). Write his reply to the \
 LATEST message in the thread below, doing exactly what his instruction says.
 
 WILLIAM'S VOICE — follow it exactly:
 - Casual and direct. Short sentences. Plain words.
-- Greeting: "Hey {first name}," (or "Good morning" when it fits).
+- Greeting: "Hey" plus the first name (or "Good morning" when it fits).
 - Say the thing, then stop. No corporate filler, no "I hope this finds you
   well", no "please don't hesitate".
 - Sign off exactly:
@@ -241,11 +242,14 @@ def compose_reply(message_id: str, intent: str,
     chain_txt = "\n\n".join(
         f"--- {c['date']} | from {c['from']}\n{c['text']}"
         for c in chain["messages"][-8:])
-    prompt = COMPOSE_PROMPT.format(
-        intent=intent.strip(),
-        playbook=_playbook_text(supplier) or "(none on file)",
-        order_context=_order_context(oid) or "(none)",
-        chain=chain_txt[:14000])
+    try:
+        prompt = COMPOSE_PROMPT.format(
+            intent=intent.strip(),
+            playbook=_playbook_text(supplier) or "(none on file)",
+            order_context=_order_context(oid) or "(none)",
+            chain=chain_txt[:14000])
+    except Exception as e:
+        return {"status": "error", "message": f"prompt build failed: {e}"}
 
     payload = {"model": COMPOSER_MODEL, "max_tokens": 700,
                "messages": [{"role": "user", "content": prompt}]}
@@ -393,8 +397,11 @@ def reply_compose(payload: Dict = Body(...), _: bool = Depends(require_admin)):
     if not message_id or not intent:
         raise HTTPException(status_code=400,
                             detail="message_id and intent are required")
-    return compose_reply(message_id, intent,
-                         (payload or {}).get("order_id"))
+    try:
+        return compose_reply(message_id, intent,
+                             (payload or {}).get("order_id"))
+    except Exception as e:
+        return {"status": "error", "message": f"compose crashed: {e}"}
 
 
 @reply_router.post("/reply/send")
@@ -406,6 +413,9 @@ def reply_send(payload: Dict = Body(...), _: bool = Depends(require_admin)):
     if not message_id or not body:
         raise HTTPException(status_code=400,
                             detail="message_id and body are required")
-    return send_reply(message_id, body,
-                      to=(payload or {}).get("to", ""),
-                      subject=(payload or {}).get("subject", ""))
+    try:
+        return send_reply(message_id, body,
+                          to=(payload or {}).get("to", ""),
+                          subject=(payload or {}).get("subject", ""))
+    except Exception as e:
+        return {"status": "error", "message": f"send crashed: {e}"}
