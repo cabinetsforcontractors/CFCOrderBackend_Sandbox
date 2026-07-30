@@ -21,7 +21,10 @@ MONEY STRIP (ruling 5: the one line that stays above the queue):
 DONE EVENTS (Phase B fix 7/30): the board's DONE RECENTLY table was 60/60
 b2bwave_sync heartbeat rows — the noise filled the LIMIT before any real
 activity got in. This door serves the same 3-day window with the fire-log
-noise list excluded, so the table shows actual robot work.
+noise list excluded, so the table shows actual robot work. Each row also
+carries a `detail` line — William's law 7/30: a redirected send must SAY
+it was redirected ("reply_sent" alone read like the email reached the
+supplier when it really landed in the safety inbox).
 
 Doors [admin]:
   POST /auto-settle/run?dry_run=true
@@ -254,8 +257,42 @@ def money_strip() -> Dict:
 
 
 # =============================================================================
-# DONE EVENTS — real robot activity, noise excluded
+# DONE EVENTS — real robot activity, noise excluded, honest details
 # =============================================================================
+
+def _event_detail(data) -> str:
+    """One honest line per event. William's law: a redirected send must
+    SAY so — 'reply_sent' alone reads like the email reached the supplier."""
+    if isinstance(data, str):
+        try:
+            data = json.loads(data)
+        except Exception:
+            return ""
+    if not isinstance(data, dict):
+        return ""
+    if data.get("redirected"):
+        meant = data.get("original_to") or "?"
+        return f"⚠ SAFETY REDIRECT — landed in {data.get('to') or '?'}, MEANT FOR {meant}"
+    to = data.get("to") or data.get("to_email")
+    if to:
+        return f"to {to}"
+    amt = data.get("payment_amount")
+    if amt:
+        try:
+            return f"${float(amt):,.2f}"
+        except Exception:
+            pass
+    fields = data.get("fields")
+    if isinstance(fields, dict) and fields:
+        parts = []
+        for k, v in list(fields.items())[:3]:
+            if isinstance(v, dict) and "was" in v:
+                parts.append(f"{k}: {v.get('was')} → {v.get('now')}")
+            else:
+                parts.append(str(k))
+        return ", ".join(parts)
+    return ""
+
 
 def done_events(days: int = 3, limit: int = 60) -> Dict:
     try:
@@ -266,7 +303,7 @@ def done_events(days: int = 3, limit: int = 60) -> Dict:
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT order_id, event_type, source, created_at
+                SELECT order_id, event_type, source, created_at, event_data
                 FROM order_events
                 WHERE created_at > NOW() - make_interval(days => %s)
                   AND NOT (event_type = ANY(%s))
@@ -274,8 +311,9 @@ def done_events(days: int = 3, limit: int = 60) -> Dict:
             """, (days, noise, limit))
             events = [{"order_id": str(a), "event_type": b,
                        "source": c or "",
-                       "at": d.isoformat() if d else ""}
-                      for a, b, c, d in cur.fetchall()]
+                       "at": d.isoformat() if d else "",
+                       "detail": _event_detail(e)}
+                      for a, b, c, d, e in cur.fetchall()]
     return {"status": "ok", "noise_excluded": noise, "events": events}
 
 
@@ -300,5 +338,6 @@ def get_money_strip(_: bool = Depends(require_admin)):
 def get_done_events(days: int = 3, limit: int = 60,
                     _: bool = Depends(require_admin)):
     """DONE RECENTLY feed [admin]: order_events minus the sync heartbeat
-    noise — what the robot actually DID, not what it polled."""
+    noise — what the robot actually DID, not what it polled. Rows carry a
+    detail line; redirected sends say so in plain words."""
     return done_events(days=days, limit=limit)
