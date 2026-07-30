@@ -1,5 +1,5 @@
 """
-queue_api.py — QUEUE BACKEND, Phase A (William-ruled 2026-07-30).
+queue_api.py — QUEUE BACKEND, Phase A+B (William-ruled 2026-07-30).
 
 AUTO-SETTLE (ruling 4: leave a "robot settled this because X" trace for
 now; silent mode later "as it learns"): flags DIE when their cause dies —
@@ -13,23 +13,28 @@ Settling = the alert thread is marked read (the board derives from unread)
 + a handled note lands in task_board_items: "[robot settled: X]".
 
 MONEY STRIP (ruling 5: the one line that stays above the queue):
-  GET /queue/money-strip ->
-    landed_today (payment_received fires, 24h) ·
-    awaiting (invoiced-unpaid open orders: total + count) ·
-    freight_90d (the rolling billed-vs-charged ledger net)
+  GET /queue/money-strip
 
-DONE EVENTS (Phase B fix 7/30): the board's DONE RECENTLY table was 60/60
-b2bwave_sync heartbeat rows — the noise filled the LIMIT before any real
-activity got in. This door serves the same 3-day window with the fire-log
-noise list excluded, so the table shows actual robot work. Each row also
-carries a `detail` line — William's law 7/30: a redirected send must SAY
-it was redirected ("reply_sent" alone read like the email reached the
-supplier when it really landed in the safety inbox).
+DONE EVENTS (7/30): order_events minus the sync heartbeat noise, each row
+with a `detail` line — a redirected send SAYS it was redirected.
+
+AWAITING REPLY (William's law 7/30: "read is not replied" — he forwards an
+email to a customer for a look, the thread goes read, but the sender is
+still waiting on an answer): threads from the email ledger where the LAST
+outside message has NO reply from us after it — read state irrelevant.
+  - settles ITSELF when a real reply lands in the thread (ledger sent-row
+    newer than the last inbound)
+  - explicit dismiss door for "no reply needed" — but a NEW inbound after
+    the dismissal RESURFACES the thread (dismissals only cover what had
+    arrived by then)
+  - noise senders (receipts, newsletters, robots) filtered out
 
 Doors [admin]:
   POST /auto-settle/run?dry_run=true
   GET  /queue/money-strip
   GET  /queue/done-events
+  GET  /queue/awaiting-reply
+  POST /queue/awaiting-reply/dismiss {thread_id, order_id?, note?}
 """
 
 import json
@@ -37,7 +42,7 @@ import re
 import urllib.request
 from typing import Dict, List
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Body, Depends
 
 from auth import require_admin
 from db_helpers import get_db
@@ -51,6 +56,21 @@ ALERT_SUBJECTS = ('subject:"AUTO-INVOICE NEEDS A HUMAN" OR '
                   'subject:"CONFIRM DISPATCH" OR '
                   'subject:"UPLOAD NEEDED" OR '
                   'subject:"REPLACEMENT REQUEST"')
+
+# Senders that never deserve a reply — receipts, newsletters, robots.
+_NOISE_SENDER_RE = re.compile(
+    r"no-?reply|noreply|notifications?@|mailer-daemon|do-?not-?reply|"
+    r"@welcome\.|billtrust\.com|pirateship\.com|americanexpress\.com|"
+    r"linkedin\.com|squareup\.com|@square\.com|messaging\.squareup|"
+    r"@bottomline\.com|calendly\.com|@vercel\.com|@render\.com|"
+    r"@github\.com|b2bemailservice|@dylt\.|@rlc\.com|billing@|"
+    r"receipts?@|invoice@intuit|@close\.com", re.I)
+
+# OUR boxes — an inbox row from ourselves (robot alerts) is not someone
+# waiting on a reply.
+_OUR_ADDR_RE = re.compile(
+    r"orders@cabinetsforcontractors\.com|cabinetsforcontractors@gmail\.com|"
+    r"wpjob1@gmail\.com|contact@allprocabinetsandflooring\.com", re.I)
 
 
 def _mark_thread_read(thread_id: str) -> bool:
@@ -74,8 +94,8 @@ def _mark_thread_read(thread_id: str) -> bool:
         return False
 
 
-def _handled_note(task_key: str, order_id: str, reason: str):
-    """The trace (ruling 4): the board shows WHY the robot settled it."""
+def _handled_note(task_key: str, order_id: str, note: str):
+    """Upsert a handled row — the trace the board shows."""
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
@@ -88,11 +108,10 @@ def _handled_note(task_key: str, order_id: str, reason: str):
                     SET status = 'handled',
                         note = EXCLUDED.note,
                         note_at = NOW(), updated_at = NOW()
-                """, (task_key, order_id or None,
-                      f"[robot settled: {reason}]"))
+                """, (task_key, order_id or None, note))
             conn.commit()
     except Exception as e:
-        print(f"[AUTO-SETTLE] note failed {task_key}: {e}")
+        print(f"[QUEUE] note failed {task_key}: {e}")
 
 
 def _order_is_dead(conn, order_id: str) -> str:
@@ -188,7 +207,8 @@ def run_auto_settle(dry_run: bool = True) -> Dict:
                         "reason": reason}
                 if not dry_run:
                     _mark_thread_read(tid)
-                    _handled_note(f"thread:{tid}", oid, reason)
+                    _handled_note(f"thread:{tid}", oid,
+                                  f"[robot settled: {reason}]")
                 out["settled"].append(item)
             except Exception as e:
                 out["errors"].append(f"{m.get('id')}: {e}")
@@ -318,6 +338,72 @@ def done_events(days: int = 3, limit: int = 60) -> Dict:
 
 
 # =============================================================================
+# AWAITING REPLY — read is not replied (William's law 7/30)
+# =============================================================================
+
+def awaiting_reply(days: int = 14) -> Dict:
+    """Threads where the last OUTSIDE word has no answer from us — from the
+    email ledger, so read/forwarded state changes nothing. Self-healing:
+    a real reply (ledger sent-row after the inbound) drops the card; a
+    dismissal only covers inbounds that existed when it was made."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                WITH t AS (
+                    SELECT thread_id,
+                           MAX(email_date) FILTER (WHERE folder = 'sent')  AS last_sent,
+                           MAX(email_date) FILTER (WHERE folder = 'inbox') AS last_in
+                    FROM email_ledger
+                    WHERE thread_id IS NOT NULL
+                    GROUP BY thread_id
+                ),
+                waiting AS (
+                    SELECT thread_id, last_in, last_sent FROM t
+                    WHERE last_in IS NOT NULL
+                      AND last_in > NOW() - make_interval(days => %s)
+                      AND (last_sent IS NULL OR last_in > last_sent)
+                )
+                SELECT w.thread_id, w.last_in, w.last_sent,
+                       l.message_id, l.from_addr, l.subject, l.order_ids
+                FROM waiting w
+                JOIN LATERAL (
+                    SELECT message_id, from_addr, subject, order_ids
+                    FROM email_ledger
+                    WHERE thread_id = w.thread_id AND folder = 'inbox'
+                    ORDER BY email_date DESC LIMIT 1
+                ) l ON TRUE
+                LEFT JOIN task_board_items d
+                  ON d.task_key = 'needsreply:' || w.thread_id
+                 AND d.status = 'handled'
+                 AND d.note_at > w.last_in
+                WHERE d.task_key IS NULL
+                ORDER BY w.last_in ASC
+                LIMIT 100
+            """, (days,))
+            rows = cur.fetchall()
+
+    cards = []
+    for tid, last_in, last_sent, mid, frm, subj, oids in rows:
+        f = frm or ""
+        if _NOISE_SENDER_RE.search(f) or _OUR_ADDR_RE.search(f):
+            continue
+        oid = None
+        if oids:
+            m = _OID_RE.search(str(oids))
+            oid = m.group(1) if m else None
+        cards.append({
+            "thread_id": tid,
+            "message_id": mid,
+            "from": f,
+            "subject": subj or "(no subject)",
+            "order_id": oid,
+            "last_inbound": last_in.isoformat() if last_in else "",
+            "ever_answered": last_sent is not None,
+        })
+    return {"status": "ok", "count": len(cards), "cards": cards}
+
+
+# =============================================================================
 # DOORS
 # =============================================================================
 
@@ -341,3 +427,23 @@ def get_done_events(days: int = 3, limit: int = 60,
     noise — what the robot actually DID, not what it polled. Rows carry a
     detail line; redirected sends say so in plain words."""
     return done_events(days=days, limit=limit)
+
+
+@queue_router.get("/queue/awaiting-reply")
+def get_awaiting_reply(days: int = 14, _: bool = Depends(require_admin)):
+    """Conversations waiting on OUR word [admin] — read is not replied."""
+    return awaiting_reply(days=days)
+
+
+@queue_router.post("/queue/awaiting-reply/dismiss")
+def dismiss_awaiting_reply(payload: Dict = Body(...),
+                           _: bool = Depends(require_admin)):
+    """No reply needed [admin]. Covers only what has arrived so far — a
+    NEW inbound on the thread resurfaces the card."""
+    tid = (payload or {}).get("thread_id", "").strip()
+    if not tid:
+        return {"status": "error", "message": "thread_id required"}
+    note = (payload or {}).get("note", "").strip() or "no reply needed"
+    _handled_note(f"needsreply:{tid}", (payload or {}).get("order_id"),
+                  f"[William: {note}]")
+    return {"status": "ok", "thread_id": tid, "note": note}
