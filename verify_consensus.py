@@ -187,7 +187,7 @@ def second_reader(order_id: str, supplier: str, doc_text: str,
         order_id=order_id, supplier=supplier,
         sent=sent_txt[:8000], doc=(doc_text or "")[:24000])
 
-    payload = {"model": CONSENSUS_MODEL, "max_tokens": 1500,
+    payload = {"model": CONSENSUS_MODEL, "max_tokens": 2500,
                "messages": [{"role": "user", "content": prompt}]}
     req = urllib.request.Request(
         "https://api.anthropic.com/v1/messages",
@@ -198,13 +198,17 @@ def second_reader(order_id: str, supplier: str, doc_text: str,
     try:
         with urllib.request.urlopen(req, timeout=90) as r:
             result = json.loads(r.read().decode())
-        text = (result.get("content") or [{}])[0].get("text", "").strip()
+        # the response can carry multiple content blocks (and the first may
+        # not be text) — join every text block
+        text = "".join(b.get("text", "") for b in (result.get("content") or [])
+                       if isinstance(b, dict)).strip()
         m = re.search(r"\{.*\}", text, re.S)
         parsed = json.loads(m.group(0)) if m else None
         if not parsed or parsed.get("verdict") not in ("clean", "flag",
                                                        "unreadable"):
             return {"verdict": "unavailable", "findings": [],
-                    "note": f"reader returned unparseable output: {text[:150]}"}
+                    "note": f"reader returned unparseable output "
+                            f"(stop={result.get('stop_reason')}): {text[:150]}"}
         parsed["findings"] = (parsed.get("findings") or [])[:20]
         return parsed
     except urllib.error.HTTPError as e:
@@ -308,6 +312,7 @@ def consensus_drill(message_id: str, _: bool = Depends(require_admin)):
                          "doc_ref": r.get("doc_ref"),
                          "parser_ok": parser_ok,
                          "reader_verdict": ((b or {}).get("reader") or {}).get("verdict"),
+                         "reader_note": ((b or {}).get("reader") or {}).get("note"),
                          "reader_findings": ((b or {}).get("reader") or {}).get("findings"),
                          "consensus": cv})
 
