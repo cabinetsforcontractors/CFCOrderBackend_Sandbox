@@ -1,22 +1,20 @@
 """
-order_analysis.py — FULL ANALYSIS, reconnected (William 2026-07-31: "I need
-a full analysis rundown, there is this logic in the orders portion of the
-app but its disconnected now" + "I need to see the email I sent and the
-response, just 1 back — the words I sent and their reply").
+order_analysis.py — FULL ANALYSIS + THE LAST EXCHANGE (William 2026-07-31:
+"I need a full analysis rundown... I need to see the email I sent and the
+response, just 1 back — the words I sent and their reply" + the queue-card
+ruling: "email summary, always the last two messages until archived...
+and under that the tell-the-robot box — receive all the relevant info and
+respond, set a future task, or tell the robot to do something").
 
-The app's Full Analysis tab has always called
-POST /orders/{id}/comprehensive-summary — the old ai_summary backend was
-retired 7/28 and the tab 404'd. This module rebuilds THAT EXACT DOOR on
-today's machinery, so the existing Generate button just works:
-
-  - THE LAST EXCHANGE, VERBATIM, FIRST: the newest email each direction on
-    this order (his words + their reply), pulled live from Gmail via the
-    ledger's message ids. One back — never the whole 20-reply chain.
-  - Then the AI rundown built from: dossier facts + the fire-log story +
-    supplier legs + the supplier playbook (hand rules + distilled lessons).
-
-Door [admin]:
+Doors [admin]:
   POST /orders/{order_id}/comprehensive-summary -> {"summary": markdown}
+       (the app's Full Analysis Generate button — exchange verbatim first,
+        then the AI rundown from dossier + fires + legs + playbooks)
+  GET  /orders/{order_id}/last-exchange
+  POST /queue/exchanges {"order_ids": [...]} -> {"exchanges": {oid: {...}}}
+       (batch feed for the queue cards; bodies come from the email body
+        cache — each Gmail message is fetched ONCE ever, then served from
+        the table, so the board load stays fast)
 """
 
 import json
@@ -26,7 +24,7 @@ import urllib.error
 import urllib.request
 from typing import Dict, List, Optional, Tuple
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Body, Depends
 
 from auth import require_admin
 from db_helpers import get_db
@@ -34,6 +32,71 @@ from db_helpers import get_db
 analysis_router = APIRouter(tags=["analysis"])
 
 ANALYSIS_MODEL = os.environ.get("ANALYSIS_MODEL", "claude-sonnet-5").strip()
+
+
+# =============================================================================
+# EMAIL BODY CACHE (bodies are immutable — fetch once, keep forever)
+# =============================================================================
+
+def _ensure_body_cache(conn):
+    with conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS email_body_cache (
+                message_id VARCHAR(120) PRIMARY KEY,
+                body TEXT,
+                fetched_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            )
+        """)
+        conn.commit()
+
+
+def _fetch_body(message_id: str) -> str:
+    if not message_id:
+        return ""
+    try:
+        with get_db() as conn:
+            _ensure_body_cache(conn)
+            with conn.cursor() as cur:
+                cur.execute("SELECT body FROM email_body_cache "
+                            "WHERE message_id = %s", (message_id,))
+                row = cur.fetchone()
+                if row is not None:
+                    return row[0] or ""
+    except Exception:
+        pass
+    body = ""
+    try:
+        from reply_composer import _gmail_get, _body_text
+        msg = _gmail_get(f"messages/{message_id}?format=full")
+        if msg:
+            body = _body_text(msg.get("payload")) or ""
+    except Exception:
+        body = ""
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO email_body_cache (message_id, body)
+                    VALUES (%s, %s) ON CONFLICT (message_id) DO NOTHING
+                """, (message_id, body))
+            conn.commit()
+    except Exception:
+        pass
+    return body
+
+
+def _strip_quoted(text: str) -> str:
+    lines = []
+    for ln in (text or "").splitlines():
+        s = ln.strip()
+        if s.startswith(">"):
+            continue
+        if re.match(r"On .{5,80} wrote:\s*$", s):
+            break
+        if s.startswith("-----Original Message-----"):
+            break
+        lines.append(ln)
+    return "\n".join(lines).strip()
 
 
 # =============================================================================
@@ -64,31 +127,6 @@ def _latest_ledger_msgs(order_id: str) -> Tuple[Optional[Dict], Optional[Dict]]:
     return latest["inbox"], latest["sent"]
 
 
-def _fetch_body(message_id: str) -> str:
-    try:
-        from reply_composer import _gmail_get, _body_text
-        msg = _gmail_get(f"messages/{message_id}?format=full")
-        if not msg:
-            return ""
-        return _body_text(msg.get("payload"))
-    except Exception:
-        return ""
-
-
-def _strip_quoted(text: str) -> str:
-    lines = []
-    for ln in (text or "").splitlines():
-        s = ln.strip()
-        if s.startswith(">"):
-            continue
-        if re.match(r"On .{5,80} wrote:\s*$", s):
-            break
-        if s.startswith("-----Original Message-----"):
-            break
-        lines.append(ln)
-    return "\n".join(lines).strip()
-
-
 def last_exchange(order_id: str) -> Dict:
     """The newest message each direction, bodies included, quoted history
     stripped — 'the words I sent and their reply', nothing more."""
@@ -96,6 +134,7 @@ def last_exchange(order_id: str) -> Dict:
     out = {"has_exchange": bool(inbox or sent)}
     if sent:
         out["you"] = {
+            "message_id": sent["message_id"],
             "at": sent["email_date"].isoformat() if sent.get("email_date") else "",
             "to": sent.get("to_addr") or "",
             "subject": sent.get("subject") or "",
@@ -103,16 +142,20 @@ def last_exchange(order_id: str) -> Dict:
         }
     if inbox:
         out["them"] = {
+            "message_id": inbox["message_id"],
             "at": inbox["email_date"].isoformat() if inbox.get("email_date") else "",
             "from": inbox.get("from_addr") or "",
             "subject": inbox.get("subject") or "",
             "body": _strip_quoted(_fetch_body(inbox["message_id"]))[:2500],
         }
+    # the composer anchor: the newest OUTSIDE message wins; fall back to ours
+    out["anchor_id"] = ((inbox or {}).get("message_id")
+                        or (sent or {}).get("message_id"))
     return out
 
 
 def _exchange_md(ex: Dict) -> str:
-    """Render the exchange verbatim, newest last, clearly labeled."""
+    """Render the exchange verbatim, chronological, clearly labeled."""
     if not ex.get("has_exchange"):
         return ("## THE LAST EXCHANGE\n\n_No emails on record for this "
                 "order yet._\n")
@@ -126,7 +169,7 @@ def _exchange_md(ex: Dict) -> str:
         body = (m.get("body") or "").strip() or "_(empty body)_"
         blocks.append((m.get("at") or "", f"{label} — {when} — {who}\n\n"
                        f"> {body.replace(chr(10), chr(10) + '> ')}\n"))
-    blocks.sort(key=lambda b: b[0])  # chronological: your send, their reply
+    blocks.sort(key=lambda b: b[0])
     return "## THE LAST EXCHANGE (one back, verbatim)\n\n" + \
         "\n".join(b[1] for b in blocks)
 
@@ -263,14 +306,14 @@ def comprehensive_summary(order_id: str) -> Dict:
 
 
 # =============================================================================
-# DOOR — the exact URL the app's Generate button has always called
+# DOORS
 # =============================================================================
 
 @analysis_router.post("/orders/{order_id}/comprehensive-summary")
 def order_comprehensive_summary(order_id: str,
                                 _: bool = Depends(require_admin)):
-    """Full Analysis for the app's panel tab [admin]: THE LAST EXCHANGE
-    verbatim first, then the AI rundown from dossier + fires + playbooks."""
+    """Full Analysis [admin]: THE LAST EXCHANGE verbatim first, then the AI
+    rundown from dossier + fires + playbooks. The app's Generate button."""
     try:
         return comprehensive_summary(order_id)
     except Exception as e:
@@ -285,3 +328,18 @@ def order_last_exchange(order_id: str, _: bool = Depends(require_admin)):
                 **last_exchange(order_id)}
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
+
+@analysis_router.post("/queue/exchanges")
+def queue_exchanges(payload: Dict = Body(...),
+                    _: bool = Depends(require_admin)):
+    """Batch last-exchange feed for the queue cards [admin]. Bodies ride
+    the cache — each Gmail message is fetched once ever."""
+    ids = [str(i) for i in ((payload or {}).get("order_ids") or [])][:60]
+    out = {}
+    for oid in ids:
+        try:
+            out[oid] = last_exchange(oid)
+        except Exception as e:
+            out[oid] = {"has_exchange": False, "error": str(e)[:100]}
+    return {"status": "ok", "exchanges": out}
