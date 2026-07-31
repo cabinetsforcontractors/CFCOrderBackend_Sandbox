@@ -171,6 +171,16 @@ def wire_all(app: FastAPI) -> dict:
         results["learn_harvest"] = False
         print(f"[STARTUP] learn_harvest not found: {e}")
 
+    # The distiller (/learn/distill) — harvest pairs -> plain-English
+    # lessons in the playbooks (William ruled 2026-07-31 "run the distiller")
+    try:
+        from learn_distill import distill_router
+        app.include_router(distill_router)
+        results["learn_distill"] = True
+    except ImportError as e:
+        results["learn_distill"] = False
+        print(f"[STARTUP] learn_distill not found: {e}")
+
     # The fallback law (/consensus/drill) — two checkers must agree
     # (William blessed 2026-07-31)
     try:
