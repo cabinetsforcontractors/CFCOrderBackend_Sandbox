@@ -153,6 +153,17 @@ def wire_all(app: FastAPI) -> dict:
         results["queue_api"] = False
         print(f"[STARTUP] queue_api not found: {e}")
 
+    # Learning machine (/learn/*) — read-only @gmail connection for the
+    # reply-harvest pipeline (William ruled 2026-07-31: "build a machine
+    # that will learn... sweep the @gmail account and see my replies")
+    try:
+        from learn_gmail import learn_router
+        app.include_router(learn_router)
+        results["learn_gmail"] = True
+    except ImportError as e:
+        results["learn_gmail"] = False
+        print(f"[STARTUP] learn_gmail not found: {e}")
+
     loaded = sum(1 for v in results.values() if v)
     print(f"[STARTUP] startup_wiring: {loaded}/{len(results)} modules loaded")
     
