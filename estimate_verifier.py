@@ -15,6 +15,14 @@ against what we sent, and flips the supplier_orders state row:
                     Internal-table alert only as fallback when no actionable
                     revision can be composed.
 
+THE FALLBACK LAW (William-blessed 2026-07-31): every verdict now runs TWO
+checkers — this module's grammar parser (Checker A) AND verify_consensus's
+independent AI reader (Checker B). Both must agree clean or the row goes
+DISCREPANCY: either flags anything, they disagree, or B is unreadable/
+unavailable -> human eyes, nothing auto-approves. Consensus detail rides
+the supplier_reply_verified fire. Env VERIFY_CONSENSUS_ENABLED=false is
+the no-deploy rollback to parser-only.
+
 GHI EXCEPTION (William 2026-07-18): GHI's channel is a HUMAN reply — their
 "review and approve for processing" step. Instead of an auto revision request,
 every GHI verdict (clean or flagged) produces an approval REPLY DRAFT in the
@@ -402,12 +410,25 @@ def _tbl(rows, headers) -> str:
             f"margin:4px 0 14px 0;'><tr>{th}</tr>{trs}</table>")
 
 
-def _internal_discrepancy_html(order_id, supplier, doc_ref, r) -> str:
+def _internal_discrepancy_html(order_id, supplier, doc_ref, r,
+                               consensus: Dict = None) -> str:
     parts = [f"<div style='font-family:Arial,sans-serif;font-size:14px;'>"
              f"<h2 style='margin:0 0 2px 0;'>Discrepancy &mdash; Order #{order_id}</h2>"
              f"<p style='margin:0 0 14px 0;color:#666;'>{supplier} &middot; "
              f"document {doc_ref or '?'} &middot; no actionable revision — "
              f"needs a human</p>"]
+    if consensus:
+        cv = consensus.get("consensus") or {}
+        parts.append(f"<p style='margin:0 0 8px 0;'><strong>Two-checker verdict:"
+                     f"</strong> {cv.get('reason') or ''} "
+                     f"(AI reader: {consensus.get('verdict')})</p>")
+        finds = consensus.get("findings") or []
+        if finds:
+            parts.append("<p style='margin:0;'><strong>AI reader findings</strong></p>")
+            parts.append(_tbl([(f.get("issue"), f.get("sku"),
+                                (f.get("detail") or "")[:90])
+                               for f in finds[:10]],
+                              ("Issue", "SKU", "Detail")))
     unres = r.get("unresolved_supplier_lines") or []
     if unres:
         parts.append("<p style='margin:0;'><strong>Document lines we couldn't resolve</strong></p>")
@@ -459,14 +480,25 @@ def _mark_alert_sent(order_id: str, supplier: str, report_hash: str):
 
 
 def _apply_verdict(order_id: str, supplier: str, verdict_ok: bool,
-                   doc_ref: str, report: Dict, message_id: str) -> str:
+                   doc_ref: str, report: Dict, message_id: str,
+                   consensus: Dict = None) -> str:
     """Flip (or create) the supplier_orders row; on discrepancy, email the
     SUPPLIER a revision request (CC us) and start the escalation clock.
-    GHI instead gets an approval REPLY DRAFT (draft-first, William 2026-07-18)."""
+    GHI instead gets an approval REPLY DRAFT (draft-first, William 2026-07-18).
+    verdict_ok is the CONSENSUS verdict (fallback law 2026-07-31); consensus
+    detail rides the fire."""
     from config import SUPPLIER_INFO
     from supplier_orders import ensure_supplier_orders_table, _send_email
 
     status = "confirmed" if verdict_ok else "discrepancy"
+    cons_summary = None
+    if consensus:
+        cons_summary = {
+            "reader_verdict": consensus.get("verdict"),
+            "reader_findings": len(consensus.get("findings") or []),
+            "reason": (consensus.get("consensus") or {}).get("reason"),
+            "agree": (consensus.get("consensus") or {}).get("agree"),
+        }
     with get_db() as conn:
         ensure_supplier_orders_table(conn)
         with conn.cursor() as cur:
@@ -487,7 +519,9 @@ def _apply_verdict(order_id: str, supplier: str, verdict_ok: bool,
                     note = EXCLUDED.note,
                     updated_at = NOW()
             """, (order_id, supplier, status, doc_ref,
-                  None if verdict_ok else json.dumps(report, default=str)[:6000],
+                  None if verdict_ok else json.dumps(
+                      {"report": report, "consensus": cons_summary}
+                      if cons_summary else report, default=str)[:6000],
                   status, f"auto-verified from Gmail msg {message_id}"))
             cur.execute("""
                 INSERT INTO order_events (order_id, event_type, event_data, source)
@@ -495,6 +529,7 @@ def _apply_verdict(order_id: str, supplier: str, verdict_ok: bool,
             """, (order_id, json.dumps({
                 "supplier": supplier, "doc_ref": doc_ref, "verdict": status,
                 "message_id": message_id,
+                "consensus": cons_summary,
                 "summary": {k: len(report.get(k) or [])
                             for k in ("matched", "qty_mismatch", "missing_at_supplier",
                                       "unexpected_from_supplier",
@@ -520,12 +555,16 @@ def _apply_verdict(order_id: str, supplier: str, verdict_ok: bool,
         return status
 
     report_hash = hashlib.sha1(
-        json.dumps({"o": order_id, "s": supplier, "d": doc_ref, "r": report},
+        json.dumps({"o": order_id, "s": supplier, "d": doc_ref, "r": report,
+                    "c": cons_summary},
                    sort_keys=True, default=str).encode()).hexdigest()[:16]
     if _alert_already_sent(order_id, report_hash):
         print(f"[VERIFY] revision request throttled order={order_id} hash={report_hash}")
         return status
 
+    # The revision request rides Checker A's concrete line asks. When A was
+    # clean and the discrepancy came from Checker B (or B unavailable), there
+    # is nothing line-actionable to send the supplier -> internal alert path.
     revision = build_revision_request(order_id, supplier, doc_ref, report)
     supplier_email = (SUPPLIER_INFO.get(supplier) or {}).get("email", "")
     sent_ok = False
@@ -552,7 +591,8 @@ def _apply_verdict(order_id: str, supplier: str, verdict_ok: bool,
                              f"DISCREPANCY (needs human): {supplier} doc for "
                              f"order #{order_id}",
                              _internal_discrepancy_html(order_id, supplier,
-                                                        doc_ref, report),
+                                                        doc_ref, report,
+                                                        consensus=consensus),
                              triggered_by="estimate_verifier")
         sent_ok = result.get("success", False)
     if sent_ok:
@@ -674,9 +714,22 @@ def process_message(message_id: str, force: bool = False,
             results.append({"attachment": att["filename"], "supplier": sup,
                             "error": str(e)})
             continue
+        # raw text for Checker B (fallback law 2026-07-31)
+        try:
+            from verify_consensus import pdf_text
+            v["_doc_text"] = pdf_text(att["data"])
+        except Exception:
+            v["_doc_text"] = ""
         results.append(v)
 
     html = msg.get("html") or ""
+    html_doc_text = None
+    if html:
+        try:
+            from verify_consensus import html_text
+            html_doc_text = html_text(html)
+        except Exception:
+            html_doc_text = ""
 
     if html and "#SO" in html and "netsuite" in html.lower():
         try:
@@ -689,6 +742,7 @@ def process_message(message_id: str, force: bool = False,
                     except Exception:
                         pass
                 v = verify_ds_html(sdp_parsed["po"], html)
+                v["_doc_text"] = html_doc_text
                 results.append(v)
         except Exception as e:
             results.append({"supplier": "DuraStone", "error": str(e)})
@@ -701,6 +755,7 @@ def process_message(message_id: str, force: bool = False,
                 if pre.get("po") and pre.get("lines"):
                     order_key = "".join(c for c in str(pre["po"]) if c.isdigit())
                     v = verify_roc_html(order_key, html)
+                    v["_doc_text"] = html_doc_text
                     results.append(v)
         except Exception as e:
             results.append({"supplier": "ROC", "error": str(e)})
@@ -714,6 +769,7 @@ def process_message(message_id: str, force: bool = False,
                 if pre.get("po") and pre.get("lines"):
                     order_key = "".join(c for c in str(pre["po"]) if c.isdigit())
                     v = verify_dl_html(order_key, html, subject)
+                    v["_doc_text"] = html_doc_text
                     results.append(v)
         except Exception as e:
             results.append({"supplier": "DL", "error": str(e)})
@@ -754,14 +810,36 @@ def process_message(message_id: str, force: bool = False,
             continue
         order_id = str(v["po"]).lstrip("0")
         order_key = "".join(c for c in order_id if c.isdigit()) or order_id
-        status = _apply_verdict(order_key, v["supplier"],
-                                bool(v["report"].get("ok")), v.get("doc_ref"),
-                                v["report"], message_id)
+        # THE FALLBACK LAW (2026-07-31): parser verdict + AI reader verdict
+        # must AGREE clean, or the row goes discrepancy.
+        parser_ok = bool(v["report"].get("ok"))
+        final_ok = parser_ok
+        consensus = None
+        try:
+            from verify_consensus import second_reader, consensus_verdict
+            consensus = second_reader(order_key, v["supplier"],
+                                      v.get("_doc_text") or "", v["report"])
+            cv = consensus_verdict(parser_ok, consensus)
+            consensus["consensus"] = cv
+            final_ok = cv["final_ok"]
+        except Exception as e:
+            consensus = {"verdict": "unavailable", "findings": [],
+                         "consensus": {"final_ok": False, "agree": False,
+                                       "reason": f"second reader crashed: "
+                                                 f"{str(e)[:120]}"}}
+            final_ok = False
+        status = _apply_verdict(order_key, v["supplier"], final_ok,
+                                v.get("doc_ref"), v["report"], message_id,
+                                consensus=consensus)
         v["verdict"] = status
         v["order_id"] = order_key
         processed.append({k: v[k] for k in
                           ("supplier", "doc_ref", "order_id", "verdict",
-                           "line_count", "sent_count")})
+                           "line_count", "sent_count")}
+                         | {"parser_ok": parser_ok,
+                            "reader_verdict": (consensus or {}).get("verdict"),
+                            "consensus_reason":
+                                ((consensus or {}).get("consensus") or {}).get("reason")})
         _record_scan(message_id, order_key, v["supplier"], v.get("doc_ref"),
                      status, v["report"])
 
