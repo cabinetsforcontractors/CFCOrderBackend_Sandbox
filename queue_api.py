@@ -12,18 +12,12 @@ now; silent mode later "as it learns"): flags DIE when their cause dies —
 Settling = the alert thread is marked read (the board derives from unread)
 + a handled note lands in task_board_items: "[robot settled: X]".
 
-MONEY STRIP (ruling 5: the one line that stays above the queue):
-  GET /queue/money-strip
-
-DONE EVENTS (7/30): order_events minus the sync heartbeat noise, each row
-with a `detail` line — a redirected send SAYS it was redirected.
-
-AWAITING REPLY (William's law 7/30: "read is not replied"): threads where
-the last outside word has no answer from us — read state irrelevant.
-
-ORDER ACTIONS (William 7/31: "add all options including cancel"): the
-queue dropdown fires ANY of the six checkpoints or a full lifecycle
-CANCEL — the same proven paths the orders screen uses.
+MONEY STRIP (ruling 5): GET /queue/money-strip
+DONE EVENTS (7/30): honest robot activity, redirects confessed.
+AWAITING REPLY (7/30): read is not replied.
+ORDER ACTIONS (7/31): the full dropdown — six checkpoints + CANCEL with
+the notify-or-quiet choice (William: "when we do CANCEL we need to have a
+choose, notify or not notify the cust").
 
 Doors [admin]:
   POST /auto-settle/run?dry_run=true
@@ -31,10 +25,11 @@ Doors [admin]:
   GET  /queue/done-events
   GET  /queue/awaiting-reply
   POST /queue/awaiting-reply/dismiss {thread_id, order_id?, note?}
-  POST /queue/order-action {action, order_id?, task_key?}
+  POST /queue/order-action {action, order_id?, task_key?, notify?}
 """
 
 import json
+import os
 import re
 import urllib.request
 from typing import Dict, List
@@ -80,7 +75,7 @@ _OUR_ADDR_RE = re.compile(
 
 # ORDER ACTIONS — the full dropdown (William 7/31). Checkpoints ride
 # orders_routes.update_checkpoint; cancel rides lifecycle_engine (the
-# proven path that canceled the test orders, B2BWave status 7 quiet).
+# proven path, B2BWave status 7) with an optional customer notification.
 ORDER_ACTIONS = {
     "payment_link_sent":   "Invoice / payment link sent",
     "payment_received":    "Payment received",
@@ -472,15 +467,17 @@ def dismiss_awaiting_reply(payload: Dict = Body(...),
 def queue_order_action(payload: Dict = Body(...),
                        _: bool = Depends(require_admin)):
     """The full dropdown [admin] (William 7/31 'add all options including
-    cancel'): any of the six checkpoints, or a lifecycle CANCEL — the same
-    proven paths the orders screen uses. Explicit pick only; typed words
-    never fire anything (NOTES ARE PURE stays the law)."""
+    cancel' + 'when we do CANCEL we need a choose, notify or not notify'):
+    any of the six checkpoints, or a lifecycle CANCEL — quiet by default,
+    notify=true sends B2BWave's status-change email to the customer.
+    Explicit pick only; typed words never fire anything."""
     action = (payload or {}).get("action", "").strip()
     if action not in ORDER_ACTIONS:
         return {"status": "error",
                 "message": f"action must be one of {sorted(ORDER_ACTIONS)}"}
     task_key = (payload or {}).get("task_key", "").strip()
     order_id = str((payload or {}).get("order_id") or "").strip()
+    notify = bool((payload or {}).get("notify"))
     if not order_id and task_key:
         with get_db() as conn:
             with conn.cursor() as cur:
@@ -494,8 +491,32 @@ def queue_order_action(payload: Dict = Body(...),
 
     try:
         if action == "cancel_order":
+            if notify:
+                # customer notification: one change_status PATCH with the
+                # notify flag BEFORE the quiet lifecycle path runs (its own
+                # PATCH re-sets the same status silently — harmless)
+                try:
+                    import lifecycle_engine as le
+                    import requests as _rq
+                    canceled_id = int(os.environ.get(
+                        "B2BWAVE_CANCELED_STATUS_ID", "7"))
+                    nres = _rq.patch(
+                        f"{le.B2BWAVE_URL}/api/orders/{order_id}/change_status",
+                        json={"status_order_id": canceled_id,
+                              "notify_customer": True},
+                        headers={"Content-Type": "application/json",
+                                 "Accept": "application/json"},
+                        auth=(le.B2BWAVE_USERNAME, le.B2BWAVE_API_KEY),
+                        timeout=30)
+                    print(f"[QUEUE] notify-cancel PATCH {order_id}: "
+                          f"{nres.status_code}")
+                except Exception as ne:
+                    print(f"[QUEUE] notify-cancel patch failed: {ne}")
             from lifecycle_engine import cancel_order
-            result = cancel_order(order_id, reason="queue dropdown (William)")
+            result = cancel_order(
+                order_id,
+                reason=f"queue dropdown (William"
+                       f"{', customer notified' if notify else ', quiet'})")
         else:
             from orders_routes import update_checkpoint, CheckpointUpdate
             update_checkpoint(order_id,
@@ -507,7 +528,10 @@ def queue_order_action(payload: Dict = Body(...),
                 "message": f"{action} failed: {e}"}
 
     if task_key:
-        _handled_note(task_key, order_id,
-                      f"[{ORDER_ACTIONS[action]}] via queue dropdown")
+        label = ORDER_ACTIONS[action]
+        if action == "cancel_order":
+            label += " — customer notified" if notify else " — quiet"
+        _handled_note(task_key, order_id, f"[{label}] via queue dropdown")
     return {"status": "ok", "order_id": order_id, "fired": action,
+            "notify": notify if action == "cancel_order" else None,
             "label": ORDER_ACTIONS[action], "result": result}
