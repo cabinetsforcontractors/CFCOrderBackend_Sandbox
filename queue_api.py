@@ -27,7 +27,9 @@ outside message has NO reply from us after it — read state irrelevant.
   - explicit dismiss door for "no reply needed" — but a NEW inbound after
     the dismissal RESURFACES the thread (dismissals only cover what had
     arrived by then)
-  - noise senders (receipts, newsletters, robots) filtered out
+  - noise senders (receipts, newsletters, robots, marketing) filtered out
+    at the source — recurring marketing would resurface on every campaign,
+    so the dismiss button can never stick for those
 
 Doors [admin]:
   POST /auto-settle/run?dry_run=true
@@ -59,8 +61,9 @@ ALERT_SUBJECTS = ('subject:"AUTO-INVOICE NEEDS A HUMAN" OR '
 
 # Senders that never deserve a reply — receipts, newsletters, robots,
 # carrier tracking, automated supplier confirmations (the verifier eats
-# those). Expanded 7/31 after the first live sweep let UPS / R+L trackers,
-# ROC weborders@ and freight-AR robots through.
+# those), and marketing blasts (they recur every campaign, so filtering is
+# the only cure — a dismissal would just resurface). Expanded 7/31 across
+# two live sweeps.
 _NOISE_SENDER_RE = re.compile(
     r"no-?reply|noreply|notifications?@|mailer-daemon|do-?not-?reply|"
     r"@welcome\.|billtrust\.com|pirateship\.com|americanexpress\.com|"
@@ -68,13 +71,17 @@ _NOISE_SENDER_RE = re.compile(
     r"@bottomline\.com|calendly\.com|@vercel\.com|@render\.com|"
     r"@github\.com|b2bemailservice|@dylt\.|@rlc\.com|rlcarriers\.com|"
     r"@ups\.com|@fedex\.com|weborders@|whitewaterfreight\.com|billing@|"
-    r"receipts?@|invoice@intuit|@close\.com", re.I)
+    r"receipts?@|invoice@intuit|@close\.com|success@email\.|"
+    r"marketing@|marketing\.|@alignable\.com|membersuccess@|"
+    r"ifttt\.com|cloudhq\.net|randstadusa\.com|@eq\.intuit\.com|"
+    r"emails\.dlcabinetry\.com", re.I)
 
-# OUR boxes — an inbox row from ourselves (robot alerts) is not someone
-# waiting on a reply.
+# OUR boxes — an inbox row from ourselves (robot alerts, William's own
+# forwards from his personal gmail) is not someone waiting on a reply.
 _OUR_ADDR_RE = re.compile(
     r"orders@cabinetsforcontractors\.com|cabinetsforcontractors@gmail\.com|"
-    r"wpjob1@gmail\.com|contact@allprocabinetsandflooring\.com", re.I)
+    r"wpjob1@gmail\.com|contact@allprocabinetsandflooring\.com|"
+    r"4wprince@gmail\.com", re.I)
 
 
 def _mark_thread_read(thread_id: str) -> bool:
