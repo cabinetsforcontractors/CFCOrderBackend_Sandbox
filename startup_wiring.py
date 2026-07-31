@@ -171,6 +171,16 @@ def wire_all(app: FastAPI) -> dict:
         results["learn_harvest"] = False
         print(f"[STARTUP] learn_harvest not found: {e}")
 
+    # The fallback law (/consensus/drill) — two checkers must agree
+    # (William blessed 2026-07-31)
+    try:
+        from verify_consensus import consensus_router
+        app.include_router(consensus_router)
+        results["verify_consensus"] = True
+    except ImportError as e:
+        results["verify_consensus"] = False
+        print(f"[STARTUP] verify_consensus not found: {e}")
+
     loaded = sum(1 for v in results.values() if v)
     print(f"[STARTUP] startup_wiring: {loaded}/{len(results)} modules loaded")
     
