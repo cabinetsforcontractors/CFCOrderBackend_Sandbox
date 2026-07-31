@@ -5,27 +5,20 @@ thank you' and fire it off... a pop up shows me the email chain").
 
 RULINGS BAKED IN:
   - PREVIEW LAW: /reply/compose NEVER sends — it returns the draft + the
-    chain for the preview popup. /reply/send is the button (one-click for
-    now; auto later "as it learns").
-  - VOICE: the William way — casual, direct, short sentences. GREETING
-    RULING 7/30: never guess a name — open exactly
-    "Hey There," / blank line / "-William here." Signs "Thank you, William".
-  - REPLY-ANCHOR LAW 7/30: the reply must go back to the OUTSIDE sender —
-    if the anchor message is OURS (a forward), walk the chain backwards to
-    the newest outside message.
-  - SEND-TO RESOLUTION 7/31 ("send to the email address or the person's
-    name typed here — if I type 'send to li' that sends to Li's box; if I
-    put 4wprince it matches me at 4wprince@gmail.com"): the intent can name
-    the recipient; the CONTACT_BOOK resolves names, raw addresses win
-    as-is, and the preview popup states the override plainly. An explicit
-    recipient survives the send (the anchor law only steers DERIVED
-    recipients).
-  - PLAYBOOK LESSONS 7/31: supplier playbook (hand rules + distilled
-    LEARNED section) rides every compose; non-suppliers get CUSTOMERS.
+    chain for the preview popup. /reply/send is the button.
+  - VOICE: the William way; greeting "Hey There," / "-William here."
+  - REPLY-ANCHOR LAW 7/30: replies go back to the OUTSIDE sender.
+  - SEND-TO RESOLUTION 7/31: the intent (or the send_to field from the
+    board's contact picker) names the recipient; CONTACT_BOOK resolves
+    names, raw addresses win, partial addresses like "wpjob1@gmail" get
+    completed, no-match warns loudly. Explicit recipients survive the send.
+  - PLAYBOOK LESSONS 7/31: supplier playbook rides every compose;
+    non-suppliers get CUSTOMERS.
 
 Doors [admin]:
-  POST /reply/compose {message_id, intent, order_id?}
+  POST /reply/compose {message_id, intent, order_id?, send_to?}
   POST /reply/send {message_id, body, to?, subject?}
+  GET  /reply/contacts — the picker list for the board
 """
 
 import base64
@@ -65,6 +58,8 @@ CONTACT_BOOK = {
     "li":               "cabinetrydistribution@gmail.com",
     "yang":             "cabinetrydistribution@gmail.com",
     "4wprince":         "4wprince@gmail.com",
+    "william":          "4wprince@gmail.com",
+    "wpjob1":           "wpjob1@gmail.com",
     "bella":            "csr4@milestonecabinetry.com",
     "thany":            "csr4@milestonecabinetry.com",
     "maria":            "csr4@milestonecabinetry.com",
@@ -87,38 +82,80 @@ CONTACT_BOOK = {
     "pacific coast":    "office@pacificcoastcabinetry.com",
 }
 
+# Labels for the board's picker (type a few letters, the list shrinks).
+CONTACT_LABELS = [
+    {"label": "William — 4wprince@gmail.com", "email": "4wprince@gmail.com"},
+    {"label": "Safety inbox — wpjob1@gmail.com", "email": "wpjob1@gmail.com"},
+    {"label": "Li Yang (LI / Cabinetry Distribution)", "email": "cabinetrydistribution@gmail.com"},
+    {"label": "Milestone CSR (Bella / Thany / Maria)", "email": "csr4@milestonecabinetry.com"},
+    {"label": "GHI orders (Kathryn — orders@ only)", "email": "orders@ghicabinets.com"},
+    {"label": "Todd Gertz (GHI)", "email": "tgertz@ghicabinets.com"},
+    {"label": "Jennifer (Cabinet & Stone)", "email": "jennifer@cabinetstonellc.com"},
+    {"label": "ROC CSR (Liliexis)", "email": "csr05@roccabinetry.com"},
+    {"label": "Gerald Thomas (G&B Wood Creations)", "email": "gbwoodcreations@gmail.com"},
+    {"label": "Dominic Gugliotti (Nationwide)", "email": "dgugliotti@nationwidecustomhomes.com"},
+    {"label": "Connie Prince", "email": "connie.prince08@gmail.com"},
+    {"label": "Bill Rhoads", "email": "wrhodes@aol.com"},
+    {"label": "Janine (Pacific Coast Cabinetry)", "email": "office@pacificcoastcabinetry.com"},
+]
+
 _SEND_TO_RE = re.compile(
     r"\bsend\s+(?:it\s+|this\s+|that\s+|a\s+copy\s+)?to\s+"
     r"([A-Za-z0-9@._%+&'\- ]{2,45})", re.I)
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 
 
-def _resolve_send_to(intent: str) -> Optional[Dict]:
-    """'send to X' in the intent -> a real address, or a loud no-match."""
-    m = _SEND_TO_RE.search(intent or "")
-    if not m:
+def _complete_partial_email(word: str) -> Optional[str]:
+    """'wpjob1@gmail' -> 'wpjob1@gmail.com' when that makes a valid address."""
+    if "@" not in word:
         return None
-    token = m.group(1)
-    for stop in (",", ".", ";", " and ", " - ", " then "):
-        if stop in token:
-            token = token.split(stop)[0]
-    token = token.strip()
+    if _EMAIL_RE.fullmatch(word):
+        return word.lower()
+    candidate = word + ".com"
+    if _EMAIL_RE.fullmatch(candidate):
+        return candidate.lower()
+    return None
+
+
+def _resolve_token(token: str) -> Optional[Dict]:
+    """One token/phrase -> a real address, or a loud no-match."""
+    token = (token or "").strip()
     if not token:
         return None
     em = _EMAIL_RE.search(token)
     if em:
         return {"to": em.group(0).lower(), "matched": token,
                 "via": "address typed"}
+    words = token.lower().split()
+    if words:
+        completed = _complete_partial_email(words[0])
+        if completed:
+            return {"to": completed, "matched": token,
+                    "via": "address completed"}
     tl = token.lower()
     for k in sorted(CONTACT_BOOK, key=len, reverse=True):
         if tl == k or tl.startswith(k + " "):
             return {"to": CONTACT_BOOK[k], "matched": token,
                     "via": f"contact '{k}'"}
-    first = tl.split()[0] if tl.split() else ""
+    first = words[0] if words else ""
     if first in CONTACT_BOOK:
         return {"to": CONTACT_BOOK[first], "matched": token,
                 "via": f"contact '{first}'"}
     return {"error": True, "matched": token}
+
+
+def _resolve_send_to(intent: str, send_to: str = "") -> Optional[Dict]:
+    """The picker field wins; else 'send to X' inside the intent."""
+    if (send_to or "").strip():
+        return _resolve_token(send_to)
+    m = _SEND_TO_RE.search(intent or "")
+    if not m:
+        return None
+    token = m.group(1)
+    for stop in (",", ".", ";", " and ", " - ", " then ", "?"):
+        if stop in token:
+            token = token.split(stop)[0]
+    return _resolve_token(token)
 
 
 def _is_ours(addr: str) -> bool:
@@ -337,7 +374,8 @@ commentary, no markdown)."""
 
 
 def compose_reply(message_id: str, intent: str,
-                  order_id: Optional[str] = None) -> Dict:
+                  order_id: Optional[str] = None,
+                  send_to: str = "") -> Dict:
     if not ANTHROPIC_API_KEY:
         return {"status": "error", "message": "ANTHROPIC_API_KEY not set"}
     chain = fetch_thread(message_id)
@@ -394,8 +432,9 @@ def compose_reply(message_id: str, intent: str,
     m = re.search(r"<([^>]+)>", reply_to)
     to_addr = m.group(1) if m else reply_to.strip()
 
-    # SEND-TO RESOLUTION (7/31): the intent can name the recipient.
-    override = _resolve_send_to(intent)
+    # SEND-TO RESOLUTION (7/31): the picker field or the intent can name
+    # the recipient.
+    override = _resolve_send_to(intent, send_to)
     override_note = None
     explicit_to = False
     if override:
@@ -545,7 +584,8 @@ def reply_compose(payload: Dict = Body(...), _: bool = Depends(require_admin)):
                             detail="message_id and intent are required")
     try:
         return compose_reply(message_id, intent,
-                             (payload or {}).get("order_id"))
+                             (payload or {}).get("order_id"),
+                             send_to=(payload or {}).get("send_to", "") or "")
     except Exception as e:
         return {"status": "error", "message": f"compose crashed: {e}"}
 
@@ -565,3 +605,10 @@ def reply_send(payload: Dict = Body(...), _: bool = Depends(require_admin)):
                           subject=(payload or {}).get("subject", ""))
     except Exception as e:
         return {"status": "error", "message": f"send crashed: {e}"}
+
+
+@reply_router.get("/reply/contacts")
+def reply_contacts(_: bool = Depends(require_admin)):
+    """The contact picker list [admin] — type a few letters, the board's
+    datalist shrinks (William 7/31)."""
+    return {"status": "ok", "contacts": CONTACT_LABELS}
