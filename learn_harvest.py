@@ -18,8 +18,12 @@ learn_gmail's separate token) and stores one row per William reply:
     order_ids — any 5xxx numbers seen in subject/bodies
     harvested_at
 
+  learn_skips: messages judged NOT-A-LESSON (self-forwards, notes to our
+    own boxes). Remembered so batches never re-read them — without this
+    the sweep stalls on thick blocks of self-forwards (7/31 stall bug).
+
 Batches are small on purpose (Render request timeout) — call the door
-repeatedly; each run picks up where the last left off via PK dedupe.
+repeatedly; each run picks up where the last left off via the dedupe.
 
 Doors [admin]:
   POST /learn/harvest?max_messages=100&dry_run=false
@@ -49,7 +53,7 @@ _OUR_RE = re.compile(
 
 
 # =============================================================================
-# TABLE
+# TABLES
 # =============================================================================
 
 def _ensure_table(conn):
@@ -74,6 +78,13 @@ def _ensure_table(conn):
         """)
         cur.execute("""CREATE INDEX IF NOT EXISTS idx_learn_pairs_domain
                        ON learn_pairs(counterparty_domain)""")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS learn_skips (
+                msg_id VARCHAR(120) PRIMARY KEY,
+                reason VARCHAR(60),
+                at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            )
+        """)
         conn.commit()
 
 
@@ -144,13 +155,16 @@ def harvest_batch(max_messages: int = 100, dry_run: bool = False) -> Dict:
         return {"status": "error", "message": "GMAIL_LEARN_* not configured"}
 
     out = {"status": "ok", "dry_run": dry_run, "scanned": 0, "stored": 0,
-           "skipped_known": 0, "no_inbound": 0, "errors": []}
+           "not_lesson": 0, "skipped_known": 0, "no_inbound": 0,
+           "errors": []}
 
     with get_db() as conn:
         _ensure_table(conn)
         with conn.cursor() as cur:
             cur.execute("SELECT reply_msg_id FROM learn_pairs")
             known = {r[0] for r in cur.fetchall()}
+            cur.execute("SELECT msg_id FROM learn_skips")
+            known |= {r[0] for r in cur.fetchall()}
 
         page_token = None
         processed = 0
@@ -182,6 +196,16 @@ def harvest_batch(max_messages: int = 100, dry_run: bool = False) -> Dict:
                 try:
                     row = _build_pair(mid)
                     if row is None:
+                        # judged, remembered, never re-read
+                        out["not_lesson"] += 1
+                        if not dry_run:
+                            with conn.cursor() as cur:
+                                cur.execute("""
+                                    INSERT INTO learn_skips (msg_id, reason)
+                                    VALUES (%s, 'not-a-lesson')
+                                    ON CONFLICT (msg_id) DO NOTHING
+                                """, (mid,))
+                        known.add(mid)
                         continue
                     if not row["has_inbound"]:
                         out["no_inbound"] += 1
@@ -298,7 +322,7 @@ def _store(conn, row: Dict):
 def learn_harvest(max_messages: int = 100, dry_run: bool = False,
                   _: bool = Depends(require_admin)):
     """Sweep a batch of @gmail SENT history into learn_pairs [admin].
-    Resumable — re-running skips rows already stored."""
+    Resumable — re-running skips rows already stored or judged."""
     if max_messages > 300:
         max_messages = 300
     return harvest_batch(max_messages=max_messages, dry_run=dry_run)
@@ -315,6 +339,8 @@ def learn_harvest_status(_: bool = Depends(require_admin)):
                                   MIN(reply_date), MAX(reply_date)
                            FROM learn_pairs""")
             total, paired, oldest, newest = cur.fetchone()
+            cur.execute("SELECT COUNT(*) FROM learn_skips")
+            skips = cur.fetchone()[0]
             cur.execute("""
                 SELECT counterparty_domain, COUNT(*)
                 FROM learn_pairs
@@ -324,6 +350,7 @@ def learn_harvest_status(_: bool = Depends(require_admin)):
             domains = [{"domain": d, "replies": n} for d, n in cur.fetchall()]
     return {"status": "ok", "total_replies": total,
             "with_inbound_pair": paired,
+            "judged_not_lessons": skips,
             "oldest": oldest.isoformat() if oldest else None,
             "newest": newest.isoformat() if newest else None,
             "by_domain": domains}
