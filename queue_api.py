@@ -1,5 +1,5 @@
 """
-queue_api.py — QUEUE BACKEND, Phase A+B (William-ruled 2026-07-30).
+queue_api.py — QUEUE BACKEND, Phase A+B (William-ruled 2026-07-30/31).
 
 AUTO-SETTLE (ruling 4: leave a "robot settled this because X" trace for
 now; silent mode later "as it learns"): flags DIE when their cause dies —
@@ -18,18 +18,12 @@ MONEY STRIP (ruling 5: the one line that stays above the queue):
 DONE EVENTS (7/30): order_events minus the sync heartbeat noise, each row
 with a `detail` line — a redirected send SAYS it was redirected.
 
-AWAITING REPLY (William's law 7/30: "read is not replied" — he forwards an
-email to a customer for a look, the thread goes read, but the sender is
-still waiting on an answer): threads from the email ledger where the LAST
-outside message has NO reply from us after it — read state irrelevant.
-  - settles ITSELF when a real reply lands in the thread (ledger sent-row
-    newer than the last inbound)
-  - explicit dismiss door for "no reply needed" — but a NEW inbound after
-    the dismissal RESURFACES the thread (dismissals only cover what had
-    arrived by then)
-  - noise senders (receipts, newsletters, robots, marketing) filtered out
-    at the source — recurring marketing would resurface on every campaign,
-    so the dismiss button can never stick for those
+AWAITING REPLY (William's law 7/30: "read is not replied"): threads where
+the last outside word has no answer from us — read state irrelevant.
+
+ORDER ACTIONS (William 7/31: "add all options including cancel"): the
+queue dropdown fires ANY of the six checkpoints or a full lifecycle
+CANCEL — the same proven paths the orders screen uses.
 
 Doors [admin]:
   POST /auto-settle/run?dry_run=true
@@ -37,6 +31,7 @@ Doors [admin]:
   GET  /queue/done-events
   GET  /queue/awaiting-reply
   POST /queue/awaiting-reply/dismiss {thread_id, order_id?, note?}
+  POST /queue/order-action {action, order_id?, task_key?}
 """
 
 import json
@@ -82,6 +77,19 @@ _OUR_ADDR_RE = re.compile(
     r"orders@cabinetsforcontractors\.com|cabinetsforcontractors@gmail\.com|"
     r"wpjob1@gmail\.com|contact@allprocabinetsandflooring\.com|"
     r"4wprince@gmail\.com", re.I)
+
+# ORDER ACTIONS — the full dropdown (William 7/31). Checkpoints ride
+# orders_routes.update_checkpoint; cancel rides lifecycle_engine (the
+# proven path that canceled the test orders, B2BWave status 7 quiet).
+ORDER_ACTIONS = {
+    "payment_link_sent":   "Invoice / payment link sent",
+    "payment_received":    "Payment received",
+    "sent_to_warehouse":   "Sent to warehouse",
+    "warehouse_confirmed": "Warehouse confirmed",
+    "bol_sent":            "BOL sent",
+    "is_complete":         "Picked up / delivered / complete",
+    "cancel_order":        "CANCEL order",
+}
 
 
 def _mark_thread_read(thread_id: str) -> bool:
@@ -458,3 +466,48 @@ def dismiss_awaiting_reply(payload: Dict = Body(...),
     _handled_note(f"needsreply:{tid}", (payload or {}).get("order_id"),
                   f"[William: {note}]")
     return {"status": "ok", "thread_id": tid, "note": note}
+
+
+@queue_router.post("/queue/order-action")
+def queue_order_action(payload: Dict = Body(...),
+                       _: bool = Depends(require_admin)):
+    """The full dropdown [admin] (William 7/31 'add all options including
+    cancel'): any of the six checkpoints, or a lifecycle CANCEL — the same
+    proven paths the orders screen uses. Explicit pick only; typed words
+    never fire anything (NOTES ARE PURE stays the law)."""
+    action = (payload or {}).get("action", "").strip()
+    if action not in ORDER_ACTIONS:
+        return {"status": "error",
+                "message": f"action must be one of {sorted(ORDER_ACTIONS)}"}
+    task_key = (payload or {}).get("task_key", "").strip()
+    order_id = str((payload or {}).get("order_id") or "").strip()
+    if not order_id and task_key:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT order_id FROM task_board_items "
+                            "WHERE task_key = %s", (task_key,))
+                row = cur.fetchone()
+                if row and row[0]:
+                    order_id = str(row[0])
+    if not order_id:
+        return {"status": "error", "message": "no order id"}
+
+    try:
+        if action == "cancel_order":
+            from lifecycle_engine import cancel_order
+            result = cancel_order(order_id, reason="queue dropdown (William)")
+        else:
+            from orders_routes import update_checkpoint, CheckpointUpdate
+            update_checkpoint(order_id,
+                              CheckpointUpdate(checkpoint=action,
+                                               source="queue_dropdown"), True)
+            result = {"checkpoint": action}
+    except Exception as e:
+        return {"status": "error", "order_id": order_id,
+                "message": f"{action} failed: {e}"}
+
+    if task_key:
+        _handled_note(task_key, order_id,
+                      f"[{ORDER_ACTIONS[action]}] via queue dropdown")
+    return {"status": "ok", "order_id": order_id, "fired": action,
+            "label": ORDER_ACTIONS[action], "result": result}
