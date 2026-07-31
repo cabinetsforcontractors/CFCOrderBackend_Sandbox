@@ -57,13 +57,17 @@ ALERT_SUBJECTS = ('subject:"AUTO-INVOICE NEEDS A HUMAN" OR '
                   'subject:"UPLOAD NEEDED" OR '
                   'subject:"REPLACEMENT REQUEST"')
 
-# Senders that never deserve a reply — receipts, newsletters, robots.
+# Senders that never deserve a reply — receipts, newsletters, robots,
+# carrier tracking, automated supplier confirmations (the verifier eats
+# those). Expanded 7/31 after the first live sweep let UPS / R+L trackers,
+# ROC weborders@ and freight-AR robots through.
 _NOISE_SENDER_RE = re.compile(
     r"no-?reply|noreply|notifications?@|mailer-daemon|do-?not-?reply|"
     r"@welcome\.|billtrust\.com|pirateship\.com|americanexpress\.com|"
     r"linkedin\.com|squareup\.com|@square\.com|messaging\.squareup|"
     r"@bottomline\.com|calendly\.com|@vercel\.com|@render\.com|"
-    r"@github\.com|b2bemailservice|@dylt\.|@rlc\.com|billing@|"
+    r"@github\.com|b2bemailservice|@dylt\.|@rlc\.com|rlcarriers\.com|"
+    r"@ups\.com|@fedex\.com|weborders@|whitewaterfreight\.com|billing@|"
     r"receipts?@|invoice@intuit|@close\.com", re.I)
 
 # OUR boxes — an inbox row from ourselves (robot alerts) is not someone
