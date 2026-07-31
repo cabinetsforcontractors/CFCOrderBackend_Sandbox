@@ -17,8 +17,11 @@ RULINGS BAKED IN:
     anchor message is one of OUR addresses (William forwarded the email to
     a customer or someone for a look), walk the chain backwards to the
     newest message from an outside address and reply to THAT.
-  - Context = the whole thread + the order's dossier facts + the supplier
-    playbook, so the reply knows the deal, not just the last message.
+  - PLAYBOOK LESSONS 7/31: the supplier's playbook (hand rules + distilled
+    LEARNED FROM HISTORY section) rides every compose; when the
+    counterparty is NOT a supplier, the CUSTOMERS playbook rides instead.
+  - Context = the whole thread + the order's dossier facts + the playbook,
+    so the reply knows the deal, not just the last message.
 
 Doors [admin]:
   POST /reply/compose {message_id, intent, order_id?}
@@ -261,7 +264,7 @@ William
 
 WILLIAM'S INSTRUCTION (what the reply must accomplish): {intent}
 
-SUPPLIER PLAYBOOK (rules for dealing with this company):
+PLAYBOOK (how William handles this counterparty — follow it):
 {playbook}
 
 ORDER CONTEXT:
@@ -285,13 +288,19 @@ def compose_reply(message_id: str, intent: str,
     oid = order_id or _guess_order_id(chain)
     supplier = _supplier_for(anchor.get("from", ""), oid)
 
+    # supplier playbook when we know the supplier; the distilled CUSTOMERS
+    # playbook otherwise (7/31 — customer emails get lessons too)
+    playbook = _playbook_text(supplier)
+    if not playbook:
+        playbook = _playbook_text("CUSTOMERS")
+
     chain_txt = "\n\n".join(
         f"--- {c['date']} | from {c['from']}\n{c['text']}"
         for c in chain["messages"][-8:])
     try:
         prompt = COMPOSE_PROMPT.format(
             intent=intent.strip(),
-            playbook=_playbook_text(supplier) or "(none on file)",
+            playbook=playbook or "(none on file)",
             order_context=_order_context(oid) or "(none)",
             chain=chain_txt[:14000])
     except Exception as e:
@@ -308,7 +317,8 @@ def compose_reply(message_id: str, intent: str,
     try:
         with urllib.request.urlopen(req, timeout=60) as r:
             result = json.loads(r.read().decode())
-        draft = (result.get("content") or [{}])[0].get("text", "").strip()
+        draft = "".join(b.get("text", "") for b in (result.get("content") or [])
+                        if isinstance(b, dict)).strip()
     except urllib.error.HTTPError as e:
         return {"status": "error",
                 "message": f"compose failed: {e.code} "
