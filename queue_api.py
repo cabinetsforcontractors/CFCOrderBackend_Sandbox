@@ -16,8 +16,11 @@ MONEY STRIP (ruling 5): GET /queue/money-strip
 DONE EVENTS (7/30): honest robot activity, redirects confessed.
 AWAITING REPLY (7/30): read is not replied.
 ORDER ACTIONS (7/31): the full dropdown — six checkpoints + CANCEL with
-the notify-or-quiet choice (William: "when we do CANCEL we need to have a
-choose, notify or not notify the cust").
+the notify-or-quiet choice.
+HANDLED (7/31): "we get a response that is the end of what we think needs
+to be done" — the button moves the task to HANDLED, marks the thread read,
+and a NEW email on the thread brings it BACK as a NEEDS REPLY card (the
+same comeback law as 'No reply needed').
 
 Doors [admin]:
   POST /auto-settle/run?dry_run=true
@@ -26,6 +29,7 @@ Doors [admin]:
   GET  /queue/awaiting-reply
   POST /queue/awaiting-reply/dismiss {thread_id, order_id?, note?}
   POST /queue/order-action {action, order_id?, task_key?, notify?}
+  POST /queue/handled {task_key?, thread_id?, order_id?}
 """
 
 import json
@@ -461,6 +465,31 @@ def dismiss_awaiting_reply(payload: Dict = Body(...),
     _handled_note(f"needsreply:{tid}", (payload or {}).get("order_id"),
                   f"[William: {note}]")
     return {"status": "ok", "thread_id": tid, "note": note}
+
+
+@queue_router.post("/queue/handled")
+def queue_handled(payload: Dict = Body(...),
+                  _: bool = Depends(require_admin)):
+    """The HANDLED button [admin] (William 7/31: "we get a response that is
+    the end of what we think needs to be done"). Marks the task handled,
+    marks the email thread read, and stamps the comeback clock — a NEW
+    email on the thread RETURNS it to the queue as a NEEDS REPLY card,
+    exactly like 'No reply needed'."""
+    task_key = (payload or {}).get("task_key", "").strip()
+    thread_id = (payload or {}).get("thread_id", "").strip()
+    order_id = (payload or {}).get("order_id") or None
+    if not task_key and not thread_id:
+        return {"status": "error",
+                "message": "task_key or thread_id required"}
+    if task_key:
+        _handled_note(task_key, order_id, "[William: HANDLED]")
+    if thread_id:
+        _mark_thread_read(thread_id)
+        _handled_note(f"needsreply:{thread_id}", order_id,
+                      "[William: HANDLED]")
+    return {"status": "ok", "task_key": task_key, "thread_id": thread_id,
+            "comeback": "a new email on this thread returns it as "
+                        "NEEDS REPLY"}
 
 
 @queue_router.post("/queue/order-action")
