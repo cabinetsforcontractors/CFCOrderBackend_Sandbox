@@ -191,6 +191,16 @@ def wire_all(app: FastAPI) -> dict:
         results["verify_consensus"] = False
         print(f"[STARTUP] verify_consensus not found: {e}")
 
+    # Full Analysis (POST /orders/{id}/comprehensive-summary — the app's
+    # Generate button) + GET /orders/{id}/last-exchange (William 2026-07-31)
+    try:
+        from order_analysis import analysis_router
+        app.include_router(analysis_router)
+        results["order_analysis"] = True
+    except ImportError as e:
+        results["order_analysis"] = False
+        print(f"[STARTUP] order_analysis not found: {e}")
+
     loaded = sum(1 for v in results.values() if v)
     print(f"[STARTUP] startup_wiring: {loaded}/{len(results)} modules loaded")
     
