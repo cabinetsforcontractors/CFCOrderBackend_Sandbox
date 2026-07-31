@@ -15,12 +15,10 @@ Settling = the alert thread is marked read (the board derives from unread)
 MONEY STRIP (ruling 5): GET /queue/money-strip
 DONE EVENTS (7/30): honest robot activity, redirects confessed.
 AWAITING REPLY (7/30): read is not replied.
-ORDER ACTIONS (7/31): the full dropdown — six checkpoints + CANCEL with
-the notify-or-quiet choice.
-HANDLED (7/31): "we get a response that is the end of what we think needs
-to be done" — the button moves the task to HANDLED, marks the thread read,
-and a NEW email on the thread brings it BACK as a NEEDS REPLY card (the
-same comeback law as 'No reply needed').
+ORDER ACTIONS (7/31): six checkpoints + CANCEL (notify-or-quiet).
+HANDLED (7/31): the loop is closed; a NEW email brings it back.
+THREAD ACTIONS (7/31): Read/Archive/Delete for ledger-born NEEDS REPLY
+cards — "I need delete to parse out the spam newsletters and the like".
 
 Doors [admin]:
   POST /auto-settle/run?dry_run=true
@@ -30,6 +28,7 @@ Doors [admin]:
   POST /queue/awaiting-reply/dismiss {thread_id, order_id?, note?}
   POST /queue/order-action {action, order_id?, task_key?, notify?}
   POST /queue/handled {task_key?, thread_id?, order_id?}
+  POST /queue/thread-action {thread_id, action: read|archive|trash}
 """
 
 import json
@@ -91,25 +90,28 @@ ORDER_ACTIONS = {
 }
 
 
-def _mark_thread_read(thread_id: str) -> bool:
+def _gmail_thread_call(path: str, body: Dict = None) -> bool:
     try:
         from gmail_sync import get_gmail_access_token
         token = get_gmail_access_token()
         if not token:
             return False
         req = urllib.request.Request(
-            f"https://gmail.googleapis.com/gmail/v1/users/me/threads/"
-            f"{thread_id}/modify",
-            data=json.dumps({"removeLabelIds": ["UNREAD"]}).encode(),
-            method="POST")
+            f"https://gmail.googleapis.com/gmail/v1/users/me/{path}",
+            data=json.dumps(body or {}).encode(), method="POST")
         req.add_header("Authorization", f"Bearer {token}")
         req.add_header("Content-Type", "application/json")
         with urllib.request.urlopen(req, timeout=30) as r:
             r.read()
         return True
     except Exception as e:
-        print(f"[AUTO-SETTLE] mark read failed {thread_id}: {e}")
+        print(f"[QUEUE] gmail thread call {path} failed: {e}")
         return False
+
+
+def _mark_thread_read(thread_id: str) -> bool:
+    return _gmail_thread_call(f"threads/{thread_id}/modify",
+                              {"removeLabelIds": ["UNREAD"]})
 
 
 def _handled_note(task_key: str, order_id: str, note: str):
@@ -456,8 +458,8 @@ def get_awaiting_reply(days: int = 14, _: bool = Depends(require_admin)):
 @queue_router.post("/queue/awaiting-reply/dismiss")
 def dismiss_awaiting_reply(payload: Dict = Body(...),
                            _: bool = Depends(require_admin)):
-    """No reply needed [admin]. Covers only what has arrived so far — a
-    NEW inbound on the thread resurfaces the card."""
+    """No reply needed / HANDLED for a ledger card [admin]. Covers only
+    what has arrived so far — a NEW inbound resurfaces the card."""
     tid = (payload or {}).get("thread_id", "").strip()
     if not tid:
         return {"status": "error", "message": "thread_id required"}
@@ -490,6 +492,35 @@ def queue_handled(payload: Dict = Body(...),
     return {"status": "ok", "task_key": task_key, "thread_id": thread_id,
             "comeback": "a new email on this thread returns it as "
                         "NEEDS REPLY"}
+
+
+@queue_router.post("/queue/thread-action")
+def queue_thread_action(payload: Dict = Body(...),
+                        _: bool = Depends(require_admin)):
+    """Read / Archive / Delete straight on a Gmail thread [admin] — for
+    the ledger-born NEEDS REPLY cards (William 7/31: "I need delete to
+    parse out the spam newsletters and the like"). trash = Gmail Trash
+    (30-day recovery). Archive/trash also stamp the card settled so it
+    leaves the queue; a brand-new email later still resurfaces it."""
+    tid = (payload or {}).get("thread_id", "").strip()
+    action = (payload or {}).get("action", "").strip()
+    order_id = (payload or {}).get("order_id") or None
+    if not tid or action not in ("read", "archive", "trash"):
+        return {"status": "error",
+                "message": "thread_id + action (read|archive|trash) required"}
+    if action == "trash":
+        ok = _gmail_thread_call(f"threads/{tid}/trash")
+    elif action == "archive":
+        ok = _gmail_thread_call(f"threads/{tid}/modify",
+                                {"removeLabelIds": ["UNREAD", "INBOX"]})
+    else:
+        ok = _mark_thread_read(tid)
+    if not ok:
+        return {"status": "error", "message": f"gmail {action} failed"}
+    if action in ("archive", "trash"):
+        _handled_note(f"needsreply:{tid}", order_id,
+                      f"[William: {action}]")
+    return {"status": "ok", "thread_id": tid, "action": action}
 
 
 @queue_router.post("/queue/order-action")
