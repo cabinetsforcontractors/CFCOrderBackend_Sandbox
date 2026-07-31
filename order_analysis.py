@@ -1,10 +1,5 @@
 """
-order_analysis.py — FULL ANALYSIS + THE LAST EXCHANGE (William 2026-07-31:
-"I need a full analysis rundown... I need to see the email I sent and the
-response, just 1 back — the words I sent and their reply" + the queue-card
-ruling: "email summary, always the last two messages until archived...
-and under that the tell-the-robot box — receive all the relevant info and
-respond, set a future task, or tell the robot to do something").
+order_analysis.py — FULL ANALYSIS + THE LAST EXCHANGE (William 2026-07-31).
 
 Doors [admin]:
   POST /orders/{order_id}/comprehensive-summary -> {"summary": markdown}
@@ -12,9 +7,9 @@ Doors [admin]:
         then the AI rundown from dossier + fires + legs + playbooks)
   GET  /orders/{order_id}/last-exchange
   POST /queue/exchanges {"order_ids": [...]} -> {"exchanges": {oid: {...}}}
-       (batch feed for the queue cards; bodies come from the email body
-        cache — each Gmail message is fetched ONCE ever, then served from
-        the table, so the board load stays fast)
+       (batch feed for the queue cards; each entry carries the last
+        exchange AND the order facts — customer, door prefixes,
+        warehouses — for the collapsed-card identifiers)
 """
 
 import json
@@ -97,6 +92,37 @@ def _strip_quoted(text: str) -> str:
             break
         lines.append(ln)
     return "\n".join(lines).strip()
+
+
+# =============================================================================
+# ORDER FACTS — the collapsed-card identifiers (customer · door · warehouse)
+# =============================================================================
+
+def _order_facts(order_id: str) -> Dict:
+    facts = {"customer": None, "warehouses": [], "prefixes": []}
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""SELECT company_name, customer_name
+                               FROM orders WHERE order_id = %s""",
+                            (str(order_id),))
+                row = cur.fetchone()
+                if row:
+                    facts["customer"] = row[0] or row[1]
+                cur.execute("""SELECT DISTINCT warehouse
+                               FROM order_line_items
+                               WHERE order_id = %s AND warehouse IS NOT NULL
+                               ORDER BY warehouse""", (str(order_id),))
+                facts["warehouses"] = [r[0] for r in cur.fetchall()][:3]
+                cur.execute("""SELECT DISTINCT split_part(sku, '-', 1)
+                               FROM order_line_items
+                               WHERE order_id = %s AND sku IS NOT NULL
+                               ORDER BY 1""", (str(order_id),))
+                facts["prefixes"] = [r[0] for r in cur.fetchall()
+                                     if r[0]][:3]
+    except Exception as e:
+        print(f"[FACTS] {order_id}: {e}")
+    return facts
 
 
 # =============================================================================
@@ -333,13 +359,16 @@ def order_last_exchange(order_id: str, _: bool = Depends(require_admin)):
 @analysis_router.post("/queue/exchanges")
 def queue_exchanges(payload: Dict = Body(...),
                     _: bool = Depends(require_admin)):
-    """Batch last-exchange feed for the queue cards [admin]. Bodies ride
-    the cache — each Gmail message is fetched once ever."""
+    """Batch feed for the queue cards [admin]: last exchange + the order
+    facts (customer · door prefixes · warehouses — the collapsed-card
+    identifiers, William 7/31). Bodies ride the once-ever cache."""
     ids = [str(i) for i in ((payload or {}).get("order_ids") or [])][:60]
     out = {}
     for oid in ids:
         try:
-            out[oid] = last_exchange(oid)
+            entry = last_exchange(oid)
         except Exception as e:
-            out[oid] = {"has_exchange": False, "error": str(e)[:100]}
+            entry = {"has_exchange": False, "error": str(e)[:100]}
+        entry["facts"] = _order_facts(oid)
+        out[oid] = entry
     return {"status": "ok", "exchanges": out}
