@@ -8,29 +8,24 @@ RULINGS BAKED IN:
     chain for the preview popup. /reply/send is the button (one-click for
     now; auto later "as it learns").
   - VOICE: the William way — casual, direct, short sentences. GREETING
-    RULING 7/30: several people answer supplier boxes (Bella one day,
-    Maria the next), so NEVER guess a name — open exactly
+    RULING 7/30: never guess a name — open exactly
     "Hey There," / blank line / "-William here." Signs "Thank you, William".
-  - REPLY-ANCHOR LAW 7/30 ("to make a reply a reply the robot needs to
-    make sure that the email was sent to the address that the email was
-    sent from"): the reply must go back to the OUTSIDE sender. If the
-    anchor message is one of OUR addresses (William forwarded the email to
-    a customer or someone for a look), walk the chain backwards to the
-    newest message from an outside address and reply to THAT.
-  - PLAYBOOK LESSONS 7/31: the supplier's playbook (hand rules + distilled
-    LEARNED FROM HISTORY section) rides every compose; when the
-    counterparty is NOT a supplier, the CUSTOMERS playbook rides instead.
-  - Context = the whole thread + the order's dossier facts + the playbook,
-    so the reply knows the deal, not just the last message.
+  - REPLY-ANCHOR LAW 7/30: the reply must go back to the OUTSIDE sender —
+    if the anchor message is OURS (a forward), walk the chain backwards to
+    the newest outside message.
+  - SEND-TO RESOLUTION 7/31 ("send to the email address or the person's
+    name typed here — if I type 'send to li' that sends to Li's box; if I
+    put 4wprince it matches me at 4wprince@gmail.com"): the intent can name
+    the recipient; the CONTACT_BOOK resolves names, raw addresses win
+    as-is, and the preview popup states the override plainly. An explicit
+    recipient survives the send (the anchor law only steers DERIVED
+    recipients).
+  - PLAYBOOK LESSONS 7/31: supplier playbook (hand rules + distilled
+    LEARNED section) rides every compose; non-suppliers get CUSTOMERS.
 
 Doors [admin]:
   POST /reply/compose {message_id, intent, order_id?}
-       -> {draft_body, subject, to, order_id, supplier, chain[],
-           re_anchored, anchor_from}
   POST /reply/send {message_id, body, to?, subject?}
-       -> sends as a real REPLY in the same thread (In-Reply-To/References
-          + Gmail threadId so it threads); EMAIL_ALLOWLIST redirect applies
-          exactly like every other send; records a reply_sent fire.
 """
 
 import base64
@@ -54,13 +49,76 @@ COMPOSER_MODEL = os.environ.get("REPLY_COMPOSER_MODEL",
                                 "claude-sonnet-5").strip()
 _OID_RE = re.compile(r"\b(5\d{3})\b")
 
-# OUR mailboxes — a reply must never be aimed at one of these.
+# OUR mailboxes — a DERIVED reply must never be aimed at one of these
+# (an EXPLICIT "send to 4wprince" is allowed — that's William's own call).
 _OUR_ADDRS = {
     "orders@cabinetsforcontractors.com",
     "cabinetsforcontractors@gmail.com",
     "wpjob1@gmail.com",
     "contact@allprocabinetsandflooring.com",
 }
+
+# CONTACT BOOK — names William types resolve to real boxes (7/31 ruling).
+# Longest keys are tried first; a raw email address in the intent wins.
+CONTACT_BOOK = {
+    "li yang":          "cabinetrydistribution@gmail.com",
+    "li":               "cabinetrydistribution@gmail.com",
+    "yang":             "cabinetrydistribution@gmail.com",
+    "4wprince":         "4wprince@gmail.com",
+    "bella":            "csr4@milestonecabinetry.com",
+    "thany":            "csr4@milestonecabinetry.com",
+    "maria":            "csr4@milestonecabinetry.com",
+    "milestone":        "csr4@milestonecabinetry.com",
+    "lm":               "csr4@milestonecabinetry.com",
+    "kathryn":          "orders@ghicabinets.com",
+    "ghi":              "orders@ghicabinets.com",
+    "todd":             "tgertz@ghicabinets.com",
+    "jennifer":         "jennifer@cabinetstonellc.com",
+    "cabinet & stone":  "jennifer@cabinetstonellc.com",
+    "c&s":              "jennifer@cabinetstonellc.com",
+    "roc":              "csr05@roccabinetry.com",
+    "gerald":           "gbwoodcreations@gmail.com",
+    "dominic":          "dgugliotti@nationwidecustomhomes.com",
+    "dom":              "dgugliotti@nationwidecustomhomes.com",
+    "connie":           "connie.prince08@gmail.com",
+    "bill rhoads":      "wrhodes@aol.com",
+    "bill":             "wrhodes@aol.com",
+    "janine":           "office@pacificcoastcabinetry.com",
+    "pacific coast":    "office@pacificcoastcabinetry.com",
+}
+
+_SEND_TO_RE = re.compile(
+    r"\bsend\s+(?:it\s+|this\s+|that\s+|a\s+copy\s+)?to\s+"
+    r"([A-Za-z0-9@._%+&'\- ]{2,45})", re.I)
+_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+
+
+def _resolve_send_to(intent: str) -> Optional[Dict]:
+    """'send to X' in the intent -> a real address, or a loud no-match."""
+    m = _SEND_TO_RE.search(intent or "")
+    if not m:
+        return None
+    token = m.group(1)
+    for stop in (",", ".", ";", " and ", " - ", " then "):
+        if stop in token:
+            token = token.split(stop)[0]
+    token = token.strip()
+    if not token:
+        return None
+    em = _EMAIL_RE.search(token)
+    if em:
+        return {"to": em.group(0).lower(), "matched": token,
+                "via": "address typed"}
+    tl = token.lower()
+    for k in sorted(CONTACT_BOOK, key=len, reverse=True):
+        if tl == k or tl.startswith(k + " "):
+            return {"to": CONTACT_BOOK[k], "matched": token,
+                    "via": f"contact '{k}'"}
+    first = tl.split()[0] if tl.split() else ""
+    if first in CONTACT_BOOK:
+        return {"to": CONTACT_BOOK[first], "matched": token,
+                "via": f"contact '{first}'"}
+    return {"error": True, "matched": token}
 
 
 def _is_ours(addr: str) -> bool:
@@ -152,8 +210,7 @@ def fetch_thread(message_id: str) -> Optional[Dict]:
 def _reply_anchor(chain: Dict) -> Tuple[Dict, bool]:
     """REPLY-ANCHOR LAW: the message the reply answers. If the requested
     message is OURS (a forward William sent out for a look), walk backwards
-    to the newest message from an OUTSIDE address — the reply goes to the
-    person who actually wrote to us, never to one of our own boxes."""
+    to the newest message from an OUTSIDE address."""
     target = chain["target"]
     if not _is_ours(target.get("from", "")):
         return target, False
@@ -257,6 +314,8 @@ Hey There,
 
 - Say the thing, then stop. No corporate filler, no "I hope this finds you
   well", no "please don't hesitate".
+- If the instruction says to SEND TO a particular person, that part is
+  routing — do not repeat it in the email body.
 - Sign off exactly:
 
 Thank you,
@@ -335,11 +394,29 @@ def compose_reply(message_id: str, intent: str,
     m = re.search(r"<([^>]+)>", reply_to)
     to_addr = m.group(1) if m else reply_to.strip()
 
+    # SEND-TO RESOLUTION (7/31): the intent can name the recipient.
+    override = _resolve_send_to(intent)
+    override_note = None
+    explicit_to = False
+    if override:
+        if override.get("to"):
+            to_addr = override["to"]
+            explicit_to = True
+            override_note = (f"recipient set by your instruction: "
+                             f"'{override['matched']}' → {to_addr} "
+                             f"({override['via']})")
+        else:
+            override_note = (f"⚠ couldn't match '{override.get('matched')}' "
+                             f"to a known contact — using the thread's "
+                             f"sender {to_addr}")
+
     return {"status": "ok", "message_id": message_id,
             "order_id": oid, "supplier": supplier,
             "to": to_addr, "subject": subject,
             "re_anchored": re_anchored,
             "anchor_from": anchor.get("from", ""),
+            "explicit_to": explicit_to,
+            "override_note": override_note,
             "draft_body": draft,
             "chain": [{"from": c["from"], "date": c["date"],
                        "snippet": (c["text"] or "")[:200]}
@@ -359,10 +436,13 @@ def send_reply(message_id: str, body: str, to: str = "",
         return {"status": "error", "message": "could not fetch thread"}
     anchor, re_anchored = _reply_anchor(chain)
 
+    explicit_to = bool((to or "").strip())
     if not to:
         m = re.search(r"<([^>]+)>", anchor.get("from", ""))
         to = m.group(1) if m else (anchor.get("from") or "").strip()
-    if _is_ours(to):
+    # DERIVED recipients must never be our own box; an EXPLICIT one may be
+    # (William deliberately sending to himself/4wprince).
+    if _is_ours(to) and not explicit_to:
         return {"status": "error",
                 "message": f"refusing to reply to our own address ({to}) — "
                            "no outside sender found in this thread"}
@@ -434,6 +514,7 @@ def send_reply(message_id: str, body: str, to: str = "",
                         {"to": to, "original_to": original_to,
                          "redirected": redirected, "subject": subject,
                          "re_anchored": re_anchored,
+                         "explicit_to": explicit_to,
                          "anchor_from": anchor.get("from", ""),
                          "gmail_message_id": sent.get("id"),
                          "in_reply_to_message": message_id,
@@ -445,8 +526,8 @@ def send_reply(message_id: str, body: str, to: str = "",
     return {"status": "ok", "sent_message_id": sent.get("id"),
             "to": to, "redirected": redirected,
             "original_to": original_to, "subject": subject,
-            "re_anchored": re_anchored, "order_id": oid,
-            "thread_id": chain.get("thread_id")}
+            "re_anchored": re_anchored, "explicit_to": explicit_to,
+            "order_id": oid, "thread_id": chain.get("thread_id")}
 
 
 # =============================================================================
