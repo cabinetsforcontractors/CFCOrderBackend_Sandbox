@@ -201,6 +201,17 @@ def wire_all(app: FastAPI) -> dict:
         results["order_analysis"] = False
         print(f"[STARTUP] order_analysis not found: {e}")
 
+    # THE DO-BOX (/do/preview + /do/execute) — typed actions fire real
+    # machinery from the tasks tab, preview-then-fire, stated overrides
+    # (William law change 2026-08-01)
+    try:
+        from do_box import do_router
+        app.include_router(do_router)
+        results["do_box"] = True
+    except ImportError as e:
+        results["do_box"] = False
+        print(f"[STARTUP] do_box not found: {e}")
+
     loaded = sum(1 for v in results.values() if v)
     print(f"[STARTUP] startup_wiring: {loaded}/{len(results)} modules loaded")
     
