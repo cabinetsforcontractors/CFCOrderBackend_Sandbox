@@ -8,6 +8,18 @@ lifecycle: open -> handled (note saved) -> reopened, or -> gone (source
 vanished). Layout ruling: ONE Tasks tab, TWO boards stacked — ORDER TASKS
 (anything order-flavored) then OTHER TASKS (everything else + Add-a-task).
 
+STICKY INCREMENTAL SWEEP (William 8/1): every sweep lands in sweep_log;
+the next sweep searches Gmail back to the last CLEAN sweep minus 3 hours
+(fast). The timestamp only advances on a clean sweep — a half-failed run
+re-covers its own ground. A FULL sweep (the old 7d/10d windows) fires
+automatically when the last full sweep is 20+ hours old — the nightly
+catch-all net — or on demand (POST /tasks/sweep?deep=true, optional
+days=N for the one-time backlog catch-up). STICKY: email-born cards
+(unread-*, robot-flag, no-reply, info) NEVER age out — they leave only by
+William's action, the reply-heal, or robot settle. State-born cards
+(unpaid-order, supplier-action, shipment-watch, draft-waiting) still
+clear when their source state resolves — that IS the action being done.
+
 Task sources:
   ORDER board: unpaid orders, supplier-order actions, Daylight watches,
     unread customer/supplier mail, robot flags, drafts awaiting review,
@@ -81,6 +93,20 @@ ORDER_TYPES = {"unpaid-order", "supplier-action", "shipment-watch",
                "unread-customer", "unread-supplier", "unread-website",
                "unread-payment", "robot-flag", "draft-waiting", "info"}
 
+# STICKY LAW (William 8/1): email-born cards leave only by action/heal.
+# State-born cards clear when their source state resolves (gone-sweep),
+# and only when that section swept clean this run.
+GONE_SWEEP_SECTIONS = {"unpaid": "unpaid-order",
+                       "supplier": "supplier-action",
+                       "daylight": "shipment-watch",
+                       "drafts": "draft-waiting"}
+
+# Full-sweep windows (hours) — also the ceiling for incremental windows.
+FULL_UNREAD_H = 7 * 24
+FULL_FLAGS_H = 3 * 24
+FULL_NOREPLY_H = 10 * 24
+DEEP_EVERY_H = 20   # a full sweep at least once per day, riding the cycle
+
 _table_ready = False
 
 
@@ -128,6 +154,19 @@ def _ensure_tables(conn):
                 note       TEXT NOT NULL,
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
                 updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            )
+        """)
+        # STICKY INCREMENTAL SWEEP (8/1): the sweep's own memory — windows
+        # derive from the last CLEAN row, so a failed sweep never advances
+        # the clock past mail it did not read.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS sweep_log (
+                id SERIAL PRIMARY KEY,
+                mode VARCHAR(12) NOT NULL,
+                started_at  TIMESTAMP WITH TIME ZONE NOT NULL,
+                finished_at TIMESTAMP WITH TIME ZONE,
+                clean BOOLEAN DEFAULT FALSE,
+                swept INT DEFAULT 0
             )
         """)
         # v3 (William approved 2026-07-29): keyword-learning rules — the
@@ -236,14 +275,16 @@ def _valid_oid(oid, known_ids):
     return oid if oid in known_ids else None
 
 
-def _sweep_unread(order_emails, known_ids, kw_rules=()):
+def _sweep_unread(order_emails, known_ids, kw_rules=(), hours=FULL_UNREAD_H,
+                  cap=40):
     """Beat 5 (2026-07-27): ONE task per THREAD (the Nationwide collapse —
     a long conversation is one board item, '3 unread in thread', not three
     rows) and LEDGER-FED metadata: messages already in the email ledger cost
     zero Gmail fetches; only unledgered ids fall back to a live fetch.
     Gmail's unread search returns newest first, so the first message seen
     per thread titles the task."""
-    msgs = search_emails("is:unread in:inbox newer_than:7d", 40)[:30]
+    msgs = search_emails(f"is:unread in:inbox newer_than:{int(hours)}h",
+                         cap)[:max(int(cap * 3 // 4), 10)]
     ids = [m["id"] for m in msgs if m.get("id")]
     meta = {}
     if ids:
@@ -412,9 +453,10 @@ def is_own_automation_subject(subject: str) -> bool:
         return False
 
 
-def _sweep_robot_flags(known_ids):
+def _sweep_robot_flags(known_ids, hours=FULL_FLAGS_H, cap=20):
     tasks = []
-    for m in search_emails(f"in:sent to:{FLAG_INBOX} newer_than:3d", 20):
+    for m in search_emails(f"in:sent to:{FLAG_INBOX} "
+                           f"newer_than:{int(hours)}h", cap):
         c = get_email_content(m["id"])
         if not c:
             continue
@@ -520,17 +562,17 @@ def _sweep_daylight(cur):
     return tasks
 
 
-def _sweep_no_reply(known_ids):
+def _sweep_no_reply(known_ids, hours=FULL_NOREPLY_H, cap=40, thread_cap=25):
     """Our outbound threads with no answer for >= NO_REPLY_BUSINESS_DAYS."""
     from business_days import business_days_since
     tasks = []
     seen_threads = set()
-    for m in search_emails("in:sent newer_than:10d", 40):
+    for m in search_emails(f"in:sent newer_than:{int(hours)}h", cap):
         tid = m.get("threadId")
         if not tid or tid in seen_threads:
             continue
         seen_threads.add(tid)
-        if len(seen_threads) > 25:
+        if len(seen_threads) > thread_cap:
             break
         th = gmail_api_request(f"threads/{tid}", {"format": "metadata"})
         if not th or not th.get("messages"):
@@ -573,9 +615,47 @@ def _sweep_no_reply(known_ids):
 # THE SWEEP (materializer)
 # =============================================================================
 
-def run_task_sweep(conn) -> dict:
+def _sweep_windows(conn, deep: bool, days: int) -> dict:
+    """The sweep's clock (William 8/1). Incremental = back to the last
+    CLEAN sweep minus 3 hours. Deep = the full windows (or days*24 for the
+    backlog catch-up). Auto-deep when there is no clean sweep yet, or the
+    last clean DEEP sweep is DEEP_EVERY_H+ old — the nightly net rides the
+    first sweep of the new day."""
+    last_clean = last_deep = None
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT MAX(started_at) FROM sweep_log WHERE clean")
+            last_clean = (cur.fetchone() or [None])[0]
+            cur.execute("""SELECT MAX(started_at) FROM sweep_log
+                           WHERE clean AND mode = 'deep'""")
+            last_deep = (cur.fetchone() or [None])[0]
+    except Exception:
+        conn.rollback()
+    now = datetime.now(timezone.utc)
+    if not deep:
+        deep = (last_clean is None or last_deep is None
+                or (now - last_deep).total_seconds() > DEEP_EVERY_H * 3600)
+    if deep:
+        d_h = int(days) * 24 if days else 0
+        return {"mode": "deep",
+                "unread_h": max(d_h, FULL_UNREAD_H),
+                "flags_h": max(d_h, FULL_FLAGS_H),
+                "noreply_h": max(d_h, FULL_NOREPLY_H),
+                "unread_cap": 120, "flags_cap": 40,
+                "noreply_cap": 80, "noreply_threads": 50}
+    hours = int((now - last_clean).total_seconds() // 3600) + 4
+    return {"mode": "incremental",
+            "unread_h": min(hours, FULL_UNREAD_H),
+            "flags_h": min(hours, FULL_FLAGS_H),
+            "noreply_h": min(hours, FULL_NOREPLY_H),
+            "unread_cap": 40, "flags_cap": 20,
+            "noreply_cap": 40, "noreply_threads": 25}
+
+
+def run_task_sweep(conn, deep: bool = False, days: int = 0) -> dict:
     _ensure_tables(conn)
     sweep_start = datetime.now(timezone.utc)
+    win = _sweep_windows(conn, deep, days)
     errors = {}
     tasks = []
     with conn.cursor() as cur:
@@ -604,11 +684,15 @@ def run_task_sweep(conn) -> dict:
         kw_rules, errors["keywords"] = (), str(e)
         conn.rollback()
     for name, fn, args in [("unread", _sweep_unread,
-                            (order_emails, known_ids, kw_rules)),
+                            (order_emails, known_ids, kw_rules,
+                             win["unread_h"], win["unread_cap"])),
                            ("info", _sweep_info, (known_ids, kw_rules)),
-                           ("flags", _sweep_robot_flags, (known_ids,)),
+                           ("flags", _sweep_robot_flags,
+                            (known_ids, win["flags_h"], win["flags_cap"])),
                            ("drafts", _sweep_drafts, (known_ids,)),
-                           ("noreply", _sweep_no_reply, (known_ids,))]:
+                           ("noreply", _sweep_no_reply,
+                            (known_ids, win["noreply_h"],
+                             win["noreply_cap"], win["noreply_threads"]))]:
         try:
             tasks.extend(fn(*args))
         except Exception as e:
@@ -643,27 +727,23 @@ def run_task_sweep(conn) -> dict:
             FROM task_board_notes n
             WHERE i.task_key = n.task_key AND i.note IS NULL
         """)
-        # source-derived tasks that vanished -> gone (manual/plaud never swept away)
-        cur.execute("""
-            UPDATE task_board_items
-            SET status = 'gone', updated_at = NOW()
-            WHERE type NOT IN ('manual', 'plaud', 'follow-up', 'info')
-              AND status = 'open'
-              AND last_seen < %s
-        """, (sweep_start,))
-        # UNTOUCHED info tasks age out with the source window (also the
-        # one-time cleanup of the round-3 flood); a note or due date = William
-        # engaged -> the task persists until Done.
-        cur.execute("""
-            UPDATE task_board_items
-            SET status = 'handled',
-                note = '[aged out of the info window]',
-                note_at = NOW(), updated_at = NOW()
-            WHERE type = 'info' AND status = 'open'
-              AND last_seen < %s
-              AND note IS NULL AND due_date IS NULL
-        """, (sweep_start,))
-        gone = cur.rowcount
+        # STICKY LAW (William 8/1): email-born cards never age out — the
+        # gone-sweep covers ONLY state-derived types whose source resolving
+        # IS the action (order got paid, supplier leg moved, draft sent),
+        # and only for sections that swept clean this run (a failed section
+        # must not erase its own cards).
+        gone = 0
+        gone_types = [t for sec, t in GONE_SWEEP_SECTIONS.items()
+                      if sec not in errors]
+        if gone_types:
+            cur.execute("""
+                UPDATE task_board_items
+                SET status = 'gone', updated_at = NOW()
+                WHERE type = ANY(%s)
+                  AND status = 'open'
+                  AND last_seen < %s
+            """, (gone_types, sweep_start))
+            gone = cur.rowcount
         # REPLY-AWARENESS (William approved 2026-07-29, the 5696 case):
         # when the LAST word on a thread is OURS (ledger sent-folder newer
         # than the last inbound), the thread task settles itself with a
@@ -697,6 +777,34 @@ def run_task_sweep(conn) -> dict:
         except Exception as e:
             errors["replied"] = str(e)
             conn.rollback()
+        # NO-REPLY HEAL (8/1, sticky companion): a no-reply card settles the
+        # moment THEY answer — the inbound takes over as a NEEDS REPLY card.
+        answered = 0
+        try:
+            cur.execute("""
+                WITH latest AS (
+                    SELECT thread_id,
+                           MAX(email_date) FILTER (WHERE folder = 'sent') AS last_sent,
+                           MAX(email_date) FILTER (WHERE folder = 'inbox') AS last_in
+                    FROM email_ledger
+                    WHERE thread_id IS NOT NULL
+                    GROUP BY thread_id
+                )
+                UPDATE task_board_items i
+                SET status = 'handled',
+                    note = COALESCE(i.note || ' · ', '')
+                           || '[they answered ' || to_char(l.last_in, 'MM/DD HH24:MI') || ']',
+                    note_at = NOW(), updated_at = NOW()
+                FROM latest l
+                WHERE i.task_key = 'noreply:' || l.thread_id
+                  AND i.status = 'open'
+                  AND l.last_in IS NOT NULL
+                  AND (l.last_sent IS NULL OR l.last_in > l.last_sent)
+            """)
+            answered = cur.rowcount
+        except Exception as e:
+            errors["answered"] = str(e)
+            conn.rollback()
         # ARCHIVE PURGE (William approved 2026-07-29): completed tasks are
         # kept 3 months in the Archive, then deleted.
         purged = 0
@@ -711,8 +819,25 @@ def run_task_sweep(conn) -> dict:
             errors["purge"] = str(e)
             conn.rollback()
     conn.commit()
-    return {"status": "ok", "swept": upserted, "gone": gone,
-            "replied_settled": replied, "purged": purged,
+    clean = not errors
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO sweep_log (mode, started_at, finished_at,
+                                       clean, swept)
+                VALUES (%s, %s, NOW(), %s, %s)
+            """, (win["mode"], sweep_start, clean, upserted))
+        conn.commit()
+    except Exception as e:
+        print(f"[TASKS] sweep_log write failed: {e}")
+        conn.rollback()
+    return {"status": "ok", "mode": win["mode"], "clean": clean,
+            "windows_h": {"unread": win["unread_h"],
+                          "flags": win["flags_h"],
+                          "noreply": win["noreply_h"]},
+            "swept": upserted, "gone": gone,
+            "replied_settled": replied, "answered_settled": answered,
+            "purged": purged,
             "errors": errors or None,
             "at": sweep_start.isoformat()}
 
@@ -780,8 +905,16 @@ def get_tasks(_: bool = Depends(require_admin)):
             """)
             events = [{"order_id": str(a), "event_type": b, "source": c or "",
                        "at": d.isoformat() if d else ""} for a, b, c, d in cur.fetchall()]
-            cur.execute("SELECT MAX(last_seen) FROM task_board_items WHERE type NOT IN ('manual','plaud')")
-            last_sweep = cur.fetchone()[0]
+            # the board clock = the last sweep that actually ran clean
+            last_sweep = None
+            try:
+                cur.execute("SELECT MAX(started_at) FROM sweep_log WHERE clean")
+                last_sweep = (cur.fetchone() or [None])[0]
+            except Exception:
+                conn.rollback()
+            if last_sweep is None:
+                cur.execute("SELECT MAX(last_seen) FROM task_board_items WHERE type NOT IN ('manual','plaud')")
+                last_sweep = cur.fetchone()[0]
 
     for r in rows:
         for k in ("due_date", "note_at", "last_seen"):
@@ -802,9 +935,14 @@ def get_tasks(_: bool = Depends(require_admin)):
 
 
 @task_router.post("/tasks/sweep")
-def sweep_now(_: bool = Depends(require_admin)):
+def sweep_now(deep: bool = False, days: int = 0,
+              _: bool = Depends(require_admin)):
+    """Sweep [admin]. Default = incremental (last clean sweep − 3h; auto-
+    upgrades to a full sweep when the last full one is 20h+ old). deep=true
+    forces the full windows; days=N widens them for the one-time backlog
+    catch-up (e.g. deep=true&days=30)."""
     with get_db() as conn:
-        return run_task_sweep(conn)
+        return run_task_sweep(conn, deep=deep, days=days)
 
 
 @task_router.get("/tasks/archive")
