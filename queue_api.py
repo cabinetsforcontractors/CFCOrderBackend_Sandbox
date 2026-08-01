@@ -149,11 +149,13 @@ def _handled_note(task_key: str, order_id: str, note: str) -> bool:
 
 def resolve_supplier_ref(text: str):
     """Map supplier numbers in a subject/body back to OUR order id.
-    Sources: supplier_orders.supplier_doc_ref (ROC 000041258 style, leading
-    zeros ignored), PRO numbers on order_shipments/orders, and the order
-    event history (supplier confirmations record their numbers even when
-    no supplier_orders row carries them). Returns the order id ONLY when
-    exactly one order matches — never guesses."""
+    Tiers: supplier_orders.supplier_doc_ref (leading zeros ignored) ->
+    PRO numbers on order_shipments/orders -> the order event history ->
+    SIBLING EMAILS (another ledger message carrying the same supplier
+    number already attributed to an order — the 7/28 ROC confirmation
+    carried both PO 5737 and order 000041258, so the 7/30 BOL request
+    naming 41258 inherits 5737). Returns the order id ONLY when exactly
+    one order matches — never guesses."""
     text = text or ""
     m = _OID_RE.search(text)
     if m:
@@ -164,6 +166,7 @@ def resolve_supplier_ref(text: str):
     if not tokens and not pros:
         return None
     hits = set()
+    like = [f"%{t}%" for t in (pros | tokens) if len(t) >= 5]
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
@@ -186,21 +189,32 @@ def resolve_supplier_ref(text: str):
                         WHERE pro_number = ANY(%s) OR tracking = ANY(%s)
                     """, (probe, probe))
                     hits.update(str(r[0]) for r in cur.fetchall())
-                if not hits:
-                    # last resort: the event history — supplier docs record
-                    # their numbers (ROC 000041258 on 5737) even when no
-                    # supplier_orders row carries them
-                    like = [f"%{t}%" for t in (pros | tokens) if len(t) >= 5]
-                    if like:
-                        clauses = " OR ".join(
-                            ["event_data::text ILIKE %s"] * len(like))
-                        cur.execute(f"""
-                            SELECT DISTINCT order_id FROM order_events
-                            WHERE created_at > NOW() - INTERVAL '120 days'
-                              AND ({clauses})
-                            LIMIT 5
-                        """, like)
-                        hits.update(str(r[0]) for r in cur.fetchall())
+                if not hits and like:
+                    # the event history — supplier docs record their numbers
+                    # even when no supplier_orders row carries them
+                    clauses = " OR ".join(
+                        ["event_data::text ILIKE %s"] * len(like))
+                    cur.execute(f"""
+                        SELECT DISTINCT order_id FROM order_events
+                        WHERE created_at > NOW() - INTERVAL '120 days'
+                          AND ({clauses})
+                        LIMIT 5
+                    """, like)
+                    hits.update(str(r[0]) for r in cur.fetchall())
+                if not hits and like:
+                    # sibling emails: another ledger message with this same
+                    # supplier number was already attributed to an order
+                    clauses = " OR ".join(["subject ILIKE %s"] * len(like))
+                    cur.execute(f"""
+                        SELECT DISTINCT order_ids FROM email_ledger
+                        WHERE order_ids IS NOT NULL AND order_ids <> ''
+                          AND ({clauses})
+                        LIMIT 10
+                    """, like)
+                    for (oids,) in cur.fetchall():
+                        m2 = _OID_RE.search(str(oids))
+                        if m2:
+                            hits.add(m2.group(1))
     except Exception as e:
         print(f"[QUEUE] supplier-ref resolve failed: {e}")
         return None
