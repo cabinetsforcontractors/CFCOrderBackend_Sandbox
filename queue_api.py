@@ -114,24 +114,29 @@ def _mark_thread_read(thread_id: str) -> bool:
                               {"removeLabelIds": ["UNREAD"]})
 
 
-def _handled_note(task_key: str, order_id: str, note: str):
-    """Upsert a handled row — the trace the board shows."""
+def _handled_note(task_key: str, order_id: str, note: str) -> bool:
+    """Upsert a handled row — the trace the board shows. Ledger-born cards
+    (needsreply:*) have no pre-existing row, so the INSERT must carry
+    every NOT NULL column of task_board_items (board/type/title)."""
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
                     INSERT INTO task_board_items
-                        (task_key, order_id, status, note, note_at,
-                         updated_at)
-                    VALUES (%s, %s, 'handled', %s, NOW(), NOW())
+                        (task_key, board, type, title, order_id, status,
+                         note, note_at, updated_at)
+                    VALUES (%s, 'other', 'dismissal', %s, %s, 'handled',
+                            %s, NOW(), NOW())
                     ON CONFLICT (task_key) DO UPDATE
                     SET status = 'handled',
                         note = EXCLUDED.note,
                         note_at = NOW(), updated_at = NOW()
-                """, (task_key, order_id or None, note))
+                """, (task_key, note, order_id or None, note))
             conn.commit()
+        return True
     except Exception as e:
         print(f"[QUEUE] note failed {task_key}: {e}")
+        return False
 
 
 def _order_is_dead(conn, order_id: str) -> str:
@@ -464,8 +469,11 @@ def dismiss_awaiting_reply(payload: Dict = Body(...),
     if not tid:
         return {"status": "error", "message": "thread_id required"}
     note = (payload or {}).get("note", "").strip() or "no reply needed"
-    _handled_note(f"needsreply:{tid}", (payload or {}).get("order_id"),
-                  f"[William: {note}]")
+    if not _handled_note(f"needsreply:{tid}", (payload or {}).get("order_id"),
+                         f"[William: {note}]"):
+        return {"status": "error",
+                "message": "settle write failed — the card will stay; "
+                           "check server logs"}
     return {"status": "ok", "thread_id": tid, "note": note}
 
 
@@ -483,12 +491,17 @@ def queue_handled(payload: Dict = Body(...),
     if not task_key and not thread_id:
         return {"status": "error",
                 "message": "task_key or thread_id required"}
+    ok = True
     if task_key:
-        _handled_note(task_key, order_id, "[William: HANDLED]")
+        ok = _handled_note(task_key, order_id, "[William: HANDLED]") and ok
     if thread_id:
         _mark_thread_read(thread_id)
-        _handled_note(f"needsreply:{thread_id}", order_id,
-                      "[William: HANDLED]")
+        ok = _handled_note(f"needsreply:{thread_id}", order_id,
+                           "[William: HANDLED]") and ok
+    if not ok:
+        return {"status": "error",
+                "message": "settle write failed — the card will stay; "
+                           "check server logs"}
     return {"status": "ok", "task_key": task_key, "thread_id": thread_id,
             "comeback": "a new email on this thread returns it as "
                         "NEEDS REPLY"}
@@ -518,8 +531,11 @@ def queue_thread_action(payload: Dict = Body(...),
     if not ok:
         return {"status": "error", "message": f"gmail {action} failed"}
     if action in ("archive", "trash"):
-        _handled_note(f"needsreply:{tid}", order_id,
-                      f"[William: {action}]")
+        if not _handled_note(f"needsreply:{tid}", order_id,
+                             f"[William: {action}]"):
+            return {"status": "error",
+                    "message": f"gmail {action} done but the card settle "
+                               "write failed — check server logs"}
     return {"status": "ok", "thread_id": tid, "action": action}
 
 
