@@ -6,10 +6,16 @@ Doors [admin]:
        (the app's Full Analysis Generate button — exchange verbatim first,
         then the AI rundown from dossier + fires + legs + playbooks)
   GET  /orders/{order_id}/last-exchange
-  POST /queue/exchanges {"order_ids": [...]} -> {"exchanges": {oid: {...}}}
+  POST /queue/exchanges {"order_ids": [...], "thread_ids": [...]}
+       -> {"exchanges": {oid: {...}, "thread:{tid}": {...}}}
        (batch feed for the queue cards; each entry carries the last
         exchange AND the order facts — customer, door prefixes,
-        warehouses — for the collapsed-card identifiers)
+        warehouses — for the collapsed-card identifiers. thread_ids
+        serve the orderless cards: same exchange shape, no facts —
+        William 8/1: "all cards need to carry the last two messages")
+  POST /threads/{thread_id}/analysis -> {"summary": markdown}
+       (Full Analysis for a thread with no order — William 8/1: "all
+        non order emails are to be treated the same as order emails")
 """
 
 import json
@@ -153,10 +159,31 @@ def _latest_ledger_msgs(order_id: str) -> Tuple[Optional[Dict], Optional[Dict]]:
     return latest["inbox"], latest["sent"]
 
 
-def last_exchange(order_id: str) -> Dict:
-    """The newest message each direction, bodies included, quoted history
-    stripped — 'the words I sent and their reply', nothing more."""
-    inbox, sent = _latest_ledger_msgs(order_id)
+def _latest_thread_msgs(thread_id: str) -> Tuple[Optional[Dict], Optional[Dict]]:
+    """Newest inbox row + newest sent row on a thread — no order needed."""
+    from psycopg2.extras import RealDictCursor
+    latest = {"inbox": None, "sent": None}
+    with get_db() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT message_id, folder, from_addr, to_addr, subject,
+                       email_date
+                FROM email_ledger
+                WHERE thread_id = %s
+                  AND folder IN ('inbox', 'sent')
+                ORDER BY email_date DESC
+                LIMIT 40
+            """, (str(thread_id),))
+            for r in cur.fetchall():
+                f = r["folder"]
+                if latest.get(f) is None:
+                    latest[f] = dict(r)
+                if latest["inbox"] and latest["sent"]:
+                    break
+    return latest["inbox"], latest["sent"]
+
+
+def _exchange_from_pair(inbox: Optional[Dict], sent: Optional[Dict]) -> Dict:
     out = {"has_exchange": bool(inbox or sent)}
     if sent:
         out["you"] = {
@@ -178,6 +205,20 @@ def last_exchange(order_id: str) -> Dict:
     out["anchor_id"] = ((inbox or {}).get("message_id")
                         or (sent or {}).get("message_id"))
     return out
+
+
+def last_exchange(order_id: str) -> Dict:
+    """The newest message each direction, bodies included, quoted history
+    stripped — 'the words I sent and their reply', nothing more."""
+    inbox, sent = _latest_ledger_msgs(order_id)
+    return _exchange_from_pair(inbox, sent)
+
+
+def thread_exchange(thread_id: str) -> Dict:
+    """Same shape as last_exchange, keyed by thread — the orderless cards
+    carry the last two messages too (William 8/1)."""
+    inbox, sent = _latest_thread_msgs(thread_id)
+    return _exchange_from_pair(inbox, sent)
 
 
 def _exchange_md(ex: Dict) -> str:
@@ -250,6 +291,25 @@ THE LAST EMAIL EXCHANGE:
 {exchange}
 
 Answer with ONLY the markdown sections, max ~70 lines."""
+
+
+_THREAD_PROMPT = """You are the operations analyst for Cabinets For \
+Contractors (wholesale RTA cabinets). This email thread carries NO linked \
+order — analyze the conversation itself for William, the owner. He is \
+dyslexic: plain detailed English, short lines, any numbers in simple \
+markdown tables. Never invent — only what the evidence below supports.
+
+Use these sections (markdown ## headers):
+WHAT THIS THREAD IS — two or three plain sentences: who they are, what
+they want
+WHERE IT STANDS — has anyone answered, what was promised, what is waiting
+WHAT NEEDS A HUMAN NEXT — numbered, most urgent first (say NONE if none)
+RISKS — anything that smells like money loss, a missed order, or a mistake
+
+THE THREAD (newest messages, verbatim):
+{exchange}
+
+Answer with ONLY the markdown sections, max ~40 lines."""
 
 
 def _call_model(prompt: str) -> Optional[str]:
@@ -331,6 +391,42 @@ def comprehensive_summary(order_id: str) -> Dict:
             "summary": f"{exchange_block}\n\n---\n\n{rundown}"}
 
 
+def thread_summary(thread_id: str) -> Dict:
+    """Full Analysis for an orderless thread — the exchange verbatim first,
+    then the AI read of the conversation itself."""
+    try:
+        ex = thread_exchange(thread_id)
+    except Exception as e:
+        ex = {"has_exchange": False, "error": str(e)}
+    exchange_block = _exchange_md(ex)
+
+    ex_for_ai = ""
+    for key in ("you", "them"):
+        m = ex.get(key) or {}
+        if m:
+            who = m.get("to") or m.get("from") or ""
+            ex_for_ai += (f"{'WILLIAM SENT' if key == 'you' else 'THEY SAID'} "
+                          f"({(m.get('at') or '')[:16]}, {who}): "
+                          f"subject: {m.get('subject') or ''}\n"
+                          f"{(m.get('body') or '')[:1200]}\n\n")
+
+    prompt = _THREAD_PROMPT.format(
+        exchange=ex_for_ai or "(no ledger rows for this thread)")
+
+    try:
+        rundown = _call_model(prompt)
+    except urllib.error.HTTPError as e:
+        body = e.read().decode()[:200] if e.fp else ""
+        rundown = f"_AI rundown failed: {e.code} {body}_"
+    except Exception as e:
+        rundown = f"_AI rundown failed: {e}_"
+    if not rundown:
+        rundown = "_AI rundown unavailable (ANTHROPIC_API_KEY not set?)_"
+
+    return {"status": "ok", "thread_id": str(thread_id),
+            "summary": f"{exchange_block}\n\n---\n\n{rundown}"}
+
+
 # =============================================================================
 # DOORS
 # =============================================================================
@@ -342,6 +438,16 @@ def order_comprehensive_summary(order_id: str,
     rundown from dossier + fires + playbooks. The app's Generate button."""
     try:
         return comprehensive_summary(order_id)
+    except Exception as e:
+        return {"status": "error", "summary": f"analysis crashed: {e}"}
+
+
+@analysis_router.post("/threads/{thread_id}/analysis")
+def thread_full_analysis(thread_id: str, _: bool = Depends(require_admin)):
+    """Full Analysis for an orderless thread [admin] (William 8/1: all
+    non-order emails treated the same as order emails)."""
+    try:
+        return thread_summary(thread_id)
     except Exception as e:
         return {"status": "error", "summary": f"analysis crashed: {e}"}
 
@@ -361,8 +467,11 @@ def queue_exchanges(payload: Dict = Body(...),
                     _: bool = Depends(require_admin)):
     """Batch feed for the queue cards [admin]: last exchange + the order
     facts (customer · door prefixes · warehouses — the collapsed-card
-    identifiers, William 7/31). Bodies ride the once-ever cache."""
+    identifiers, William 7/31). Bodies ride the once-ever cache.
+    thread_ids serve the orderless cards (William 8/1) — same exchange
+    shape under key 'thread:{tid}', no facts."""
     ids = [str(i) for i in ((payload or {}).get("order_ids") or [])][:60]
+    tids = [str(t) for t in ((payload or {}).get("thread_ids") or [])][:60]
     out = {}
     for oid in ids:
         try:
@@ -371,4 +480,11 @@ def queue_exchanges(payload: Dict = Body(...),
             entry = {"has_exchange": False, "error": str(e)[:100]}
         entry["facts"] = _order_facts(oid)
         out[oid] = entry
+    for tid in tids:
+        try:
+            entry = thread_exchange(tid)
+        except Exception as e:
+            entry = {"has_exchange": False, "error": str(e)[:100]}
+        entry["facts"] = None
+        out[f"thread:{tid}"] = entry
     return {"status": "ok", "exchanges": out}
