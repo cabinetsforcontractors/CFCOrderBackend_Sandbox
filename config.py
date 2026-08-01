@@ -3,7 +3,9 @@ config.py
 Centralized configuration for CFC Order Backend.
 All environment variables and constants in one place.
 
-⚠️ SMOKE TEST — LI and Love-Milestone emails set to wpjob1@gmail.com
+⚠️ SMOKE TEST — LI email set to wpjob1@gmail.com; Love-Milestone set to
+   homesupplyplus@gmail.com (the warehouse actor in William's 8/1 end-to-end
+   test — he answers as Bella from that inbox).
    Restore both to real supplier emails after test.
 """
 
@@ -45,7 +47,8 @@ AUTO_SYNC_DAYS_BACK = 7
 
 # =============================================================================
 # SUPPLIER INFO
-# ⚠️ SMOKE TEST — LI and Love-Milestone emails set to wpjob1@gmail.com
+# ⚠️ SMOKE TEST — LI email set to wpjob1@gmail.com; Love-Milestone set to
+#   homesupplyplus@gmail.com (warehouse actor, William 8/1 end-to-end test).
 #   Restore after test:
 #     LI:             cabinetrydistribution@gmail.com
 #     Love-Milestone: lovetoucheskitchen@gmail.com
@@ -81,7 +84,8 @@ SUPPLIER_INFO = {
         'address': '10963 Florida Crown Dr STE 100, Orlando FL 32824',
         # William 2026-07-30: the contact is Bella now, no longer Ireen
         'contact': 'Bella',
-        'email': 'wpjob1@gmail.com'  # SMOKE TEST — restore to lovetoucheskitchen@gmail.com
+        # TEST CAST (William 8/1): homesupplyplus = the warehouse actor
+        'email': 'homesupplyplus@gmail.com'  # SMOKE TEST — restore to lovetoucheskitchen@gmail.com
     },
     'Cabinet & Stone': {
         'name': 'Cabinet & Stone',
