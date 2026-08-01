@@ -90,6 +90,8 @@ def get_supplier_sheet(order_id: str, _: bool = Depends(require_admin)):
     Groups the order's line items per warehouse and translates every website SKU
     to the supplier's own SKU via rta_products. Lines with no translation are
     returned under 'untranslated' — DO NOT auto-send those; they need a human.
+    Lookup is CASE-BLIND (the 5750 lesson: .net sample codes arrive mixed-case
+    'Richmond White-Sample' while rta rows are uppercase).
     """
     with get_db() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -107,15 +109,15 @@ def get_supplier_sheet(order_id: str, _: bool = Depends(require_admin)):
             if skus:
                 cur.execute(
                     """SELECT product_sku, supplier, supplier_sku FROM rta_products
-                       WHERE product_sku = ANY(%s)""",
-                    (skus,),
+                       WHERE UPPER(product_sku) = ANY(%s)""",
+                    ([s.upper() for s in skus],),
                 )
-                lookup = {r["product_sku"]: r for r in cur.fetchall()}
+                lookup = {r["product_sku"].upper(): r for r in cur.fetchall()}
 
     warehouses = {}
     for it in items:
         wh = it.get("warehouse") or "UNMAPPED"
-        rec = lookup.get(it.get("sku") or "")
+        rec = lookup.get((it.get("sku") or "").upper())
         if wh == "UNMAPPED" and rec and rec.get("supplier"):
             wh = rec["supplier"]
         if wh not in warehouses:
@@ -269,12 +271,14 @@ def _detect_pdf_supplier(data):
 def _order_lines_for_supplier(cur, order_id, prefixes, aliases):
     """The order's line items belonging to one supplier — matched by website-SKU
     prefix, rta_products.supplier, or the line's warehouse column. Includes the
-    SOT supplier token for body-space comparison."""
+    SOT supplier token for body-space comparison. Join is CASE-BLIND (the 5750
+    lesson)."""
     cur.execute(
         """SELECT oli.sku, oli.quantity, oli.warehouse,
                   rp.supplier AS rta_supplier, rp.supplier_sku
            FROM order_line_items oli
-           LEFT JOIN rta_products rp ON rp.product_sku = oli.sku
+           LEFT JOIN rta_products rp
+                  ON UPPER(rp.product_sku) = UPPER(oli.sku)
            WHERE oli.order_id = %s""",
         (order_id,),
     )
