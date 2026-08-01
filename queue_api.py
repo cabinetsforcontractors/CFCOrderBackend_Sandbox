@@ -14,7 +14,8 @@ Settling = the alert thread is marked read (the board derives from unread)
 
 MONEY STRIP (ruling 5): GET /queue/money-strip
 DONE EVENTS (7/30): honest robot activity, redirects confessed.
-AWAITING REPLY (7/30): read is not replied.
+AWAITING REPLY (7/30): read is not replied. STICKY (8/1): 60-day window —
+unanswered threads stop dropping off before William acts.
 ORDER ACTIONS (7/31): six checkpoints + CANCEL (notify-or-quiet).
 HANDLED (7/31): the loop is closed; a NEW email brings it back.
 THREAD ACTIONS (7/31): Read/Archive/Delete for ledger-born NEEDS REPLY
@@ -152,10 +153,8 @@ def resolve_supplier_ref(text: str):
     Tiers: supplier_orders.supplier_doc_ref (leading zeros ignored) ->
     PRO numbers on order_shipments/orders -> the order event history ->
     SIBLING EMAILS (another ledger message carrying the same supplier
-    number already attributed to an order — the 7/28 ROC confirmation
-    carried both PO 5737 and order 000041258, so the 7/30 BOL request
-    naming 41258 inherits 5737). Returns the order id ONLY when exactly
-    one order matches — never guesses."""
+    number already attributed to an order). Returns the order id ONLY
+    when exactly one order matches — never guesses."""
     text = text or ""
     m = _OID_RE.search(text)
     if m:
@@ -450,11 +449,12 @@ def done_events(days: int = 3, limit: int = 60) -> Dict:
 # AWAITING REPLY — read is not replied (William's law 7/30)
 # =============================================================================
 
-def awaiting_reply(days: int = 14) -> Dict:
+def awaiting_reply(days: int = 60) -> Dict:
     """Threads where the last OUTSIDE word has no answer from us — from the
     email ledger, so read/forwarded state changes nothing. Self-healing:
     a real reply (ledger sent-row after the inbound) drops the card; a
-    dismissal only covers inbounds that existed when it was made."""
+    dismissal only covers inbounds that existed when it was made.
+    STICKY (8/1): 60-day window — a surfaced thread stays until action."""
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute("""
@@ -543,8 +543,9 @@ def get_done_events(days: int = 3, limit: int = 60,
 
 
 @queue_router.get("/queue/awaiting-reply")
-def get_awaiting_reply(days: int = 14, _: bool = Depends(require_admin)):
-    """Conversations waiting on OUR word [admin] — read is not replied."""
+def get_awaiting_reply(days: int = 60, _: bool = Depends(require_admin)):
+    """Conversations waiting on OUR word [admin] — read is not replied.
+    STICKY (8/1): 60-day window by default."""
     return awaiting_reply(days=days)
 
 
