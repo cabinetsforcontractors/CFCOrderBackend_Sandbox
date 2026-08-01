@@ -8,6 +8,9 @@ marks bol_sent=TRUE, syncs PRO to orders.tracking, updates order checkpoint.
 
 Blocker 2 fix: BOL requires warehouse_confirmed=TRUE before generating.
 Blocker 3 fix: PRO number written to orders.tracking so alerts engine sees it.
+William 8/1: force=true bypasses the gates (payment / warehouse confirmed /
+already-sent) — his explicit override from the DO-box; every forced fire is
+recorded as forced in the order event.
 
 Endpoints:
     POST /bol/{shipment_id}/create   — generate BOL via R+L API  [admin]
@@ -113,6 +116,7 @@ def _call_rl_bol_create(payload: dict) -> dict:
 def create_bol_for_shipment(
     shipment_id: str,
     pickup_date: Optional[str] = None,
+    force: bool = False,
     _: bool = Depends(require_admin),
 ):
     """
@@ -124,31 +128,37 @@ def create_bol_for_shipment(
     BLOCKER 3 FIX: PRO number is written to both order_shipments.pro_number AND
     orders.tracking so the alerts engine's 'ready_ship_long' rule resolves correctly.
 
+    force=true (William 8/1): his explicit override — skips the payment /
+    warehouse-confirmed / already-sent gates. A re-fire on an already-sent
+    shipment creates a SECOND PRO with R+L; the DO-box preview says so
+    before the fire, and the event records forced=true.
+
     pickup_date: optional MM/DD/YYYY — defaults to today if not supplied.
     """
     shipment = _get_shipment_with_order(shipment_id)
     if not shipment:
         raise HTTPException(status_code=404, detail=f"Shipment {shipment_id} not found")
 
-    # BLOCKER 2 FIX — enforce correct step order
-    if not shipment.get("payment_received"):
-        raise HTTPException(
-            status_code=400,
-            detail="Cannot generate BOL — payment not yet received for this order"
-        )
+    # BLOCKER 2 FIX — enforce correct step order (force = William's override)
+    if not force:
+        if not shipment.get("payment_received"):
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot generate BOL — payment not yet received for this order"
+            )
 
-    if not shipment.get("warehouse_confirmed"):
-        raise HTTPException(
-            status_code=400,
-            detail="Cannot generate BOL — warehouse has not yet confirmed this order. "
-                   "Mark 'Warehouse Confirmed' in the admin panel first."
-        )
+        if not shipment.get("warehouse_confirmed"):
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot generate BOL — warehouse has not yet confirmed this order. "
+                       "Mark 'Warehouse Confirmed' in the admin panel first."
+            )
 
-    if shipment.get("bol_sent"):
-        raise HTTPException(
-            status_code=400,
-            detail=f"BOL already generated for shipment {shipment_id} — PRO: {shipment.get('pro_number')}"
-        )
+        if shipment.get("bol_sent"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"BOL already generated for shipment {shipment_id} — PRO: {shipment.get('pro_number')}"
+            )
 
     warehouse_name = shipment["warehouse"]
     wh_info = WAREHOUSE_ADDRESSES.get(warehouse_name)
@@ -252,11 +262,13 @@ def create_bol_for_shipment(
                         "is_residential": is_residential,
                         "pickup_date": pickup_date or "today",
                         "rl_attempts": result.get("attempts", 1),
+                        "forced": bool(force),
                     }),
                 ),
             )
 
-    print(f"[BOL] Order {shipment['order_id']} / shipment {shipment_id} — BOL created, PRO: {pro_number}")
+    print(f"[BOL] Order {shipment['order_id']} / shipment {shipment_id} — BOL created, PRO: {pro_number}"
+          + (" (FORCED past gates)" if force else ""))
 
     return {
         "status": "ok",
@@ -269,6 +281,7 @@ def create_bol_for_shipment(
         "weight_lbs": weight,
         "is_residential": is_residential,
         "rl_attempts": result.get("attempts", 1),
+        "forced": bool(force),
         "message": f"BOL created — PRO {pro_number}",
     }
 
