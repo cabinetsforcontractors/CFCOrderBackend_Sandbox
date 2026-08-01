@@ -150,8 +150,10 @@ def _handled_note(task_key: str, order_id: str, note: str) -> bool:
 def resolve_supplier_ref(text: str):
     """Map supplier numbers in a subject/body back to OUR order id.
     Sources: supplier_orders.supplier_doc_ref (ROC 000041258 style, leading
-    zeros ignored), PRO numbers on order_shipments/orders. Returns the
-    order id ONLY when exactly one order matches — never guesses."""
+    zeros ignored), PRO numbers on order_shipments/orders, and the order
+    event history (supplier confirmations record their numbers even when
+    no supplier_orders row carries them). Returns the order id ONLY when
+    exactly one order matches — never guesses."""
     text = text or ""
     m = _OID_RE.search(text)
     if m:
@@ -184,6 +186,21 @@ def resolve_supplier_ref(text: str):
                         WHERE pro_number = ANY(%s) OR tracking = ANY(%s)
                     """, (probe, probe))
                     hits.update(str(r[0]) for r in cur.fetchall())
+                if not hits:
+                    # last resort: the event history — supplier docs record
+                    # their numbers (ROC 000041258 on 5737) even when no
+                    # supplier_orders row carries them
+                    like = [f"%{t}%" for t in (pros | tokens) if len(t) >= 5]
+                    if like:
+                        clauses = " OR ".join(
+                            ["event_data::text ILIKE %s"] * len(like))
+                        cur.execute(f"""
+                            SELECT DISTINCT order_id FROM order_events
+                            WHERE created_at > NOW() - INTERVAL '120 days'
+                              AND ({clauses})
+                            LIMIT 5
+                        """, like)
+                        hits.update(str(r[0]) for r in cur.fetchall())
     except Exception as e:
         print(f"[QUEUE] supplier-ref resolve failed: {e}")
         return None
