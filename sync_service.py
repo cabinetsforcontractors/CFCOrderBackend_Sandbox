@@ -7,6 +7,7 @@ Auto-generates 6-bullet AI state summary for active orders after each sync.
 
 import json
 import base64
+import os
 import urllib.request
 import urllib.error
 import threading
@@ -80,6 +81,18 @@ def sync_order_from_b2bwave(order_data: dict) -> dict:
     order_total = float(order.get('gross_total', 0) or 0)
     total_weight = float(order.get('total_weight', 0) or 0)
 
+    # PICKUP DETECTION (8/1, the 5738/5749 lesson): B2BWave carries the
+    # shipping option in the order payload; only the .com webhook path was
+    # reading it, so every .net pickup order landed is_pickup=FALSE and the
+    # robot quoted freight for it. Sticky-true: once pickup (detected or
+    # hand-set), a later sync never downgrades it.
+    is_pickup = False
+    try:
+        from checkout import detect_warehouse_pickup
+        is_pickup = bool(detect_warehouse_pickup(order))
+    except Exception as e:
+        print(f"[SYNC] pickup detect failed {order_id}: {e}")
+
     submitted_at = order.get('submitted_at')
     if submitted_at:
         try:
@@ -132,8 +145,8 @@ def sync_order_from_b2bwave(order_data: dict) -> dict:
                     order_id, order_date, customer_name, company_name,
                     street, street2, city, state, zip_code, phone, email,
                     comments, order_total, total_weight, warehouse_1, warehouse_2, warehouse_3, warehouse_4,
-                    is_trusted_customer
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    is_trusted_customer, is_pickup
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (order_id) DO UPDATE SET
                     customer_name = EXCLUDED.customer_name,
                     company_name = EXCLUDED.company_name,
@@ -152,13 +165,14 @@ def sync_order_from_b2bwave(order_data: dict) -> dict:
                     warehouse_3 = COALESCE(orders.warehouse_3, EXCLUDED.warehouse_3),
                     warehouse_4 = COALESCE(orders.warehouse_4, EXCLUDED.warehouse_4),
                     is_trusted_customer = EXCLUDED.is_trusted_customer,
+                    is_pickup = COALESCE(orders.is_pickup, FALSE) OR EXCLUDED.is_pickup,
                     updated_at = NOW()
                 RETURNING order_id
             """, (
                 order_id, order_date, customer_name, company_name,
                 street, street2, city, state, zip_code, phone, email,
                 comments, order_total, total_weight, warehouse_1, warehouse_2, warehouse_3, warehouse_4,
-                is_trusted
+                is_trusted, is_pickup
             ))
             cur.fetchone()
 
@@ -210,6 +224,7 @@ def sync_order_from_b2bwave(order_data: dict) -> dict:
         'warehouse_2': warehouse_2,
         'warehouse_3': warehouse_3,
         'warehouse_4': warehouse_4,
+        'is_pickup': is_pickup,
         'line_items_count': len(line_items)
     }
 
