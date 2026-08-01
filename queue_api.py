@@ -19,6 +19,9 @@ ORDER ACTIONS (7/31): six checkpoints + CANCEL (notify-or-quiet).
 HANDLED (7/31): the loop is closed; a NEW email brings it back.
 THREAD ACTIONS (7/31): Read/Archive/Delete for ledger-born NEEDS REPLY
 cards — "I need delete to parse out the spam newsletters and the like".
+SUPPLIER-NUMBER LINKING (8/1): orderless cards resolve supplier numbers
+(ROC order/SO numbers, R+L PRO numbers) back to OUR order — "the robot
+needs to review all ROC's SO's and find out order number to link".
 
 Doors [admin]:
   POST /auto-settle/run?dry_run=true
@@ -75,6 +78,11 @@ _OUR_ADDR_RE = re.compile(
     r"orders@cabinetsforcontractors\.com|cabinetsforcontractors@gmail\.com|"
     r"wpjob1@gmail\.com|contact@allprocabinetsandflooring\.com|"
     r"4wprince@gmail\.com", re.I)
+
+# Supplier-reference shapes: bare numbers (ROC order 41258, SO 139967,
+# doc refs like 000041258) and carrier PRO numbers (IAH3136257).
+_SUPREF_TOKEN_RE = re.compile(r"\b(?:SO\s?#?\s?)?#?(\d{5,9})\b", re.I)
+_PRO_RE = re.compile(r"\b([A-Z]{2,4}\d{6,9})\b")
 
 # ORDER ACTIONS — the full dropdown (William 7/31). Checkpoints ride
 # orders_routes.update_checkpoint; cancel rides lifecycle_engine (the
@@ -137,6 +145,51 @@ def _handled_note(task_key: str, order_id: str, note: str) -> bool:
     except Exception as e:
         print(f"[QUEUE] note failed {task_key}: {e}")
         return False
+
+
+def resolve_supplier_ref(text: str):
+    """Map supplier numbers in a subject/body back to OUR order id.
+    Sources: supplier_orders.supplier_doc_ref (ROC 000041258 style, leading
+    zeros ignored), PRO numbers on order_shipments/orders. Returns the
+    order id ONLY when exactly one order matches — never guesses."""
+    text = text or ""
+    m = _OID_RE.search(text)
+    if m:
+        return m.group(1)
+    tokens = {t.lstrip("0") for t in _SUPREF_TOKEN_RE.findall(text)}
+    tokens = {t for t in tokens if len(t) >= 4}
+    pros = set(_PRO_RE.findall(text.upper()))
+    if not tokens and not pros:
+        return None
+    hits = set()
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                if tokens:
+                    cur.execute("""
+                        SELECT DISTINCT order_id FROM supplier_orders
+                        WHERE TRIM(LEADING '0' FROM
+                                   COALESCE(supplier_doc_ref, '')) = ANY(%s)
+                    """, (list(tokens),))
+                    hits.update(str(r[0]) for r in cur.fetchall())
+                probe = list(pros | tokens)
+                if probe:
+                    cur.execute("""
+                        SELECT DISTINCT order_id FROM order_shipments
+                        WHERE pro_number = ANY(%s)
+                    """, (probe,))
+                    hits.update(str(r[0]) for r in cur.fetchall())
+                    cur.execute("""
+                        SELECT DISTINCT order_id FROM orders
+                        WHERE pro_number = ANY(%s) OR tracking = ANY(%s)
+                    """, (probe, probe))
+                    hits.update(str(r[0]) for r in cur.fetchall())
+    except Exception as e:
+        print(f"[QUEUE] supplier-ref resolve failed: {e}")
+        return None
+    if len(hits) == 1:
+        return hits.pop()
+    return None
 
 
 def _order_is_dead(conn, order_id: str) -> str:
@@ -416,6 +469,10 @@ def awaiting_reply(days: int = 14) -> Dict:
         if oids:
             m = _OID_RE.search(str(oids))
             oid = m.group(1) if m else None
+        if not oid:
+            # supplier-number linking (William 8/1): ROC SO/order numbers,
+            # PRO numbers in the subject point back to OUR order
+            oid = resolve_supplier_ref(subj or "")
         cards.append({
             "thread_id": tid,
             "message_id": mid,
