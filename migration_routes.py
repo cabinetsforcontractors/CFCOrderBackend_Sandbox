@@ -339,3 +339,54 @@ def debug_rta_load(req_in: RTALoadRequest, _: bool = Depends(require_admin)):
                     errors.append(f"{sku}: {str(e)[:120]}")
         conn.commit()
     return {"status": "ok", "upserted": upserted, "errors": errors[:10], "error_count": len(errors)}
+
+
+@migration_router.post("/debug/normalize-rta-supplier")
+def normalize_rta_supplier(from_name: str = "C&S",
+                           to_name: str = "Cabinet & Stone",
+                           dry_run: bool = True,
+                           _: bool = Depends(require_admin),
+                           x_allow_destructive: Optional[str] =
+                           Header(None, alias="X-Allow-Destructive")):
+    """SUPPLIER-ALIAS NORMALIZER (William 2026-08-02: the stats door showed
+    681 rta_products rows under bare 'C&S' with ZERO tokens beside 2,120
+    'Cabinet & Stone' rows). dry_run=true (default) = the AUDIT: counts,
+    prefix distribution, token coverage, samples. The real rename needs
+    dry_run=false AND X-Allow-Destructive: yes (cleanup-door idiom)."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT COUNT(*),
+                                  COUNT(*) FILTER (WHERE supplier_sku IS NOT NULL
+                                                     AND supplier_sku != '')
+                           FROM rta_products WHERE supplier = %s""",
+                        (from_name,))
+            total, tokened = cur.fetchone()
+            cur.execute("""SELECT split_part(product_sku, '-', 1) AS prefix,
+                                  COUNT(*)
+                           FROM rta_products WHERE supplier = %s
+                           GROUP BY 1 ORDER BY 2 DESC LIMIT 15""",
+                        (from_name,))
+            prefixes = [{"prefix": r[0], "rows": r[1]} for r in cur.fetchall()]
+            cur.execute("""SELECT product_sku FROM rta_products
+                           WHERE supplier = %s LIMIT 10""", (from_name,))
+            samples = [r[0] for r in cur.fetchall()]
+        audit = {"from": from_name, "to": to_name, "rows": total,
+                 "with_token": tokened, "prefixes": prefixes,
+                 "samples": samples}
+        if dry_run:
+            return {"status": "dry_run", "audit": audit}
+        if (x_allow_destructive or "").strip().lower() != "yes":
+            return {"status": "error",
+                    "message": "X-Allow-Destructive: yes header required",
+                    "audit": audit}
+        with conn.cursor() as cur:
+            cur.execute("""UPDATE rta_products SET supplier = %s
+                           WHERE supplier = %s""", (to_name, from_name))
+            renamed = cur.rowcount
+            cur.execute("""
+                INSERT INTO order_events (order_id, event_type, event_data, source)
+                VALUES ('', 'rta_supplier_normalized', %s, 'migration')
+            """, (__import__('json').dumps({"from": from_name, "to": to_name,
+                                            "rows": renamed}),))
+            conn.commit()
+    return {"status": "ok", "renamed": renamed, "audit": audit}

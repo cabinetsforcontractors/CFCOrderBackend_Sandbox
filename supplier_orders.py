@@ -797,6 +797,21 @@ def dispatch_order(order_id: str, auto_send: bool = True,
                     sent_to=wres.get("sent_to") or wres.get("send", {}).get("to"))
         results["warehouses"][wh] = wres
 
+    # STAMP FIX (board item 3, William 2026-08-02 — the 5750/5738 unstamped
+    # class): a real dispatch that sent or prepared ANY warehouse stamps
+    # orders.sent_to_warehouse — the checkpoint no longer lies.
+    if not dry_run and (results["sent"] or results["prepared"]):
+        try:
+            with get_db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""UPDATE orders
+                                   SET sent_to_warehouse = TRUE,
+                                       updated_at = NOW()
+                                   WHERE order_id = %s""", (order_id,))
+                    conn.commit()
+        except Exception as e:
+            print(f"[DISPATCH] sent_to_warehouse stamp failed {order_id}: {e}")
+
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute("""
