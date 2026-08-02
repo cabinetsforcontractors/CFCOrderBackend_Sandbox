@@ -183,7 +183,8 @@ def create_approval_draft(order_id: str, doc_ref: str, report: Dict,
 
     contact_email = (SUPPLIER_INFO.get("GHI") or {}).get("email",
                                                          "kbelfiore@ghicabinets.com")
-    greeting = supplier_greeting("GHI").replace("Hey", "Hi")
+    # Hey-There law 2026-08-02: exactly "Hey There," — no Hi-swap
+    greeting = supplier_greeting("GHI")
     door = _door_text(order_id)
 
     asks = [] if clean else build_approval_asks(report)

@@ -261,7 +261,14 @@ def _gmail_send(
     extra attachments ([{filename, content(bytes), mime}]).
     Returns the Gmail message ID on success, None on failure.
     """
+    # RETRY-ONCE LAW (2026-08-02, the 5750 payment-received blip): one
+    # transient token failure killed a customer email with no second try.
+    # Wait 3s and re-fetch before giving up.
     token = get_gmail_access_token()
+    if not token:
+        import time
+        time.sleep(3)
+        token = get_gmail_access_token()
     if not token:
         raise Exception("Failed to get Gmail access token")
 
@@ -303,23 +310,37 @@ def _gmail_send(
     url = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"
     payload = json.dumps({"raw": raw_message}).encode("utf-8")
 
-    req = urllib.request.Request(url, data=payload, method="POST")
-    req.add_header("Authorization", f"Bearer {token}")
-    req.add_header("Content-Type", "application/json")
-
-    try:
-        with urllib.request.urlopen(req, timeout=30) as response:
-            data = json.loads(response.read().decode())
-            message_id = data.get("id")
-            print(f"[EMAIL] Sent to {to_email}: {subject} (msg_id={message_id}, pdf={pdf_bytes is not None})")
-            return message_id
-    except urllib.error.HTTPError as e:
-        error_body = e.read().decode()[:500]
-        print(f"[EMAIL] Gmail API error {e.code}: {error_body}")
-        raise Exception(f"Gmail API {e.code}: {error_body}")
-    except Exception as e:
-        print(f"[EMAIL] Send error: {e}")
-        raise
+    # RETRY-ONCE LAW (2026-08-02): a transient send failure (rate limit,
+    # Gmail 5xx, network drop) gets one more try after 3s with a fresh
+    # token. Hard 4xx errors still fail immediately — retrying a bad
+    # request would just double-log it.
+    for attempt in (1, 2):
+        req = urllib.request.Request(url, data=payload, method="POST")
+        req.add_header("Authorization", f"Bearer {token}")
+        req.add_header("Content-Type", "application/json")
+        try:
+            with urllib.request.urlopen(req, timeout=30) as response:
+                data = json.loads(response.read().decode())
+                message_id = data.get("id")
+                print(f"[EMAIL] Sent to {to_email}: {subject} (msg_id={message_id}, pdf={pdf_bytes is not None}, attempt={attempt})")
+                return message_id
+        except urllib.error.HTTPError as e:
+            error_body = e.read().decode()[:500]
+            print(f"[EMAIL] Gmail API error {e.code} (attempt {attempt}): {error_body}")
+            if attempt == 1 and (e.code == 429 or e.code >= 500):
+                import time
+                time.sleep(3)
+                token = get_gmail_access_token() or token
+                continue
+            raise Exception(f"Gmail API {e.code}: {error_body}")
+        except Exception as e:
+            print(f"[EMAIL] Send error (attempt {attempt}): {e}")
+            if attempt == 1:
+                import time
+                time.sleep(3)
+                token = get_gmail_access_token() or token
+                continue
+            raise
 
 
 def create_invoice_draft(

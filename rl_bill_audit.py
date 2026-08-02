@@ -44,12 +44,16 @@ Rides the ledger cycle (unprocessed BILL2 ledger rows) + manual door:
 import csv
 import io
 import json
+import os
 import re
 from typing import Dict, List, Optional
 
 from db_helpers import get_db
 
-INTERNAL_ALERT = "orders@cabinetsforcontractors.com"
+# 2026-08-02: was hardcoded orders@ — now follows the same env as every
+# other alert (the routing-cleanup audit caught it)
+INTERNAL_ALERT = os.environ.get("WAREHOUSE_NOTIFICATION_EMAIL",
+                                "orders@cabinetsforcontractors.com").strip()
 
 WAY_OFF_PCT = 0.15    # 15% of charged...
 WAY_OFF_ABS = 75.0    # ...or $75 — whichever is SMALLER trips the flag

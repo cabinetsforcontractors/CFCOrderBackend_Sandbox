@@ -124,13 +124,11 @@ STOCK_CHECK_ASK = "<p>Please check for any out-of-stock items and let us know.</
 
 
 def supplier_greeting(warehouse: str) -> str:
-    """'Hey Kathryn,' from SUPPLIER_INFO contact's first name; 'Hello,' when
-    no contact is on file."""
-    contact = (SUPPLIER_INFO.get(warehouse) or {}).get("contact", "") or ""
-    first = contact.strip().split(" ")[0].strip(",")
-    if first and first.isalpha():
-        return f"Hey {first},"
-    return "Hello,"
+    """HEY-THERE LAW (William 2026-07-30, extended to ALL supplier sends
+    2026-08-02): several people answer a supplier box (Bella one day, Maria
+    the next) — supplier-facing emails NEVER greet by name. Exactly
+    "Hey There," always; the warehouse arg stays for call-site stability."""
+    return "Hey There,"
 
 
 def strip_our_door_name(product_name: str) -> str:
@@ -319,7 +317,13 @@ def _send_email(order_id: str, to_email: str, subject: str, html: str,
             if cc and cc.lower() == to_email.lower():
                 cc = None  # avoid To == Cc after double redirect
     try:
+        # RETRY-ONCE LAW (2026-08-02, the 5750 payment-received blip):
+        # a transient token failure gets one more try before giving up.
         token = get_gmail_access_token()
+        if not token:
+            import time
+            time.sleep(3)
+            token = get_gmail_access_token()
         if not token:
             return {"success": False, "error": "no Gmail access token"}
         msg = MIMEMultipart("mixed")
@@ -345,15 +349,37 @@ def _send_email(order_id: str, to_email: str, subject: str, html: str,
             part.add_header("Content-Disposition", "attachment",
                             filename=att.get("filename", "attachment"))
             msg.attach(part)
+        import urllib.error
         import urllib.request
-        req = urllib.request.Request(
-            "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
-            data=json.dumps({"raw": base64.urlsafe_b64encode(msg.as_bytes()).decode()}).encode(),
-            method="POST")
-        req.add_header("Authorization", f"Bearer {token}")
-        req.add_header("Content-Type", "application/json")
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            message_id = json.loads(resp.read().decode()).get("id")
+        payload = json.dumps(
+            {"raw": base64.urlsafe_b64encode(msg.as_bytes()).decode()}).encode()
+        # RETRY-ONCE LAW (2026-08-02): transient failures (429/5xx/network)
+        # get one more try after 3s with a fresh token; hard 4xx fails now.
+        message_id = None
+        for attempt in (1, 2):
+            req = urllib.request.Request(
+                "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
+                data=payload, method="POST")
+            req.add_header("Authorization", f"Bearer {token}")
+            req.add_header("Content-Type", "application/json")
+            try:
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    message_id = json.loads(resp.read().decode()).get("id")
+                break
+            except urllib.error.HTTPError as e:
+                if attempt == 1 and (e.code == 429 or e.code >= 500):
+                    import time
+                    time.sleep(3)
+                    token = get_gmail_access_token() or token
+                    continue
+                raise
+            except urllib.error.URLError:
+                if attempt == 1:
+                    import time
+                    time.sleep(3)
+                    token = get_gmail_access_token() or token
+                    continue
+                raise
         _log_email_event(order_id=order_id, template_id="supplier_dispatch",
                          to_email=to_email, subject=subject, message_id=message_id,
                          triggered_by=triggered_by, source="email_send")

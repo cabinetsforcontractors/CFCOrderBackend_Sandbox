@@ -24,6 +24,7 @@ Flow (rides the ledger cycle right after ingest — the read-once guarantee):
 """
 
 import json
+import os
 import re
 from typing import Dict
 
@@ -34,7 +35,10 @@ _SUBJ_RE = re.compile(r"PRO\s+([A-Z]{0,3}\d{6,12})\s+has been Delivered",
 _DATE_RE = re.compile(r"delivered(?:\s+on\s+time)?\s+on\s+(\d{2}/\d{2}/\d{4})",
                       re.IGNORECASE)
 
-INTERNAL_ALERT = "orders@cabinetsforcontractors.com"
+# 2026-08-02: was hardcoded orders@ — now follows the same env as every
+# other alert (the routing-cleanup audit caught it)
+INTERNAL_ALERT = os.environ.get("WAREHOUSE_NOTIFICATION_EMAIL",
+                                "orders@cabinetsforcontractors.com").strip()
 
 
 def _mpo_from_body(body: str):
