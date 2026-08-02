@@ -371,6 +371,32 @@ def customer_po_prepare(message_id: str, _: bool = Depends(require_admin)):
         return {"status": "error", "message": str(e)}
 
 
+@supplier_order_router.post("/store-credits")
+def store_credit_add(payload: dict = Body(...),
+                     _: bool = Depends(require_admin)):
+    """Add a store credit by hand [admin] — {customer_email, amount,
+    source_order_id?, reason?}. Auto-applies to the customer's NEXT
+    invoice as a credit line (William 2026-08-02: the double-payment
+    disposition door)."""
+    from store_credits import add_store_credit
+    try:
+        return add_store_credit(
+            str(payload.get("customer_email") or ""),
+            str(payload.get("source_order_id") or ""),
+            float(payload.get("amount") or 0),
+            str(payload.get("reason") or "manual credit"))
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@supplier_order_router.get("/store-credits")
+def store_credit_list(customer_email: str = "",
+                      _: bool = Depends(require_admin)):
+    """Store-credit ledger [admin] — all, or one customer's."""
+    from store_credits import list_credits
+    return list_credits(customer_email)
+
+
 @supplier_order_router.post("/customer-po/create/{message_id}")
 def customer_po_create(message_id: str, dry_run: bool = True,
                        _: bool = Depends(require_admin)):

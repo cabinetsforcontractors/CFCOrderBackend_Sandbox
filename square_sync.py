@@ -322,6 +322,19 @@ def run_square_sync(conn, hours_back: int = 24) -> dict:
                         except Exception as e:
                             print(f"[SQUARE] Payment triggers failed for order {order_id}: {e}")
 
+                        # LINKS DIE ON PAYMENT (William 2026-08-02, the
+                        # 5752 double-pay: quick-pay links stay payable
+                        # forever — 5752's link took a SECOND $9.57 the
+                        # next day). A matched payment kills the order's
+                        # links so a stale link can never charge twice.
+                        try:
+                            from auto_invoice import kill_order_links
+                            killed = kill_order_links(order_id)
+                            print(f"[SQUARE] links killed for paid order "
+                                  f"{order_id}: {killed}")
+                        except Exception as e:
+                            print(f"[SQUARE] link kill failed {order_id}: {e}")
+
                 except Exception as e:
                     results["errors"].append({
                         "order_id": order_id,

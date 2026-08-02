@@ -744,11 +744,29 @@ def match_payment_to_order(conn, amount, customer_name, email, message_id=""):
         why = ("this amount matches SEVERAL of their open orders"
                if len(passing) > 1 else
                "this amount matches NONE of their open orders' invoiced totals")
+        # DOUBLE-PAYMENT SUSPECT (William 2026-08-02, the 5752 second
+        # $9.57): an unmatched amount exactly equal to a recently-PAID
+        # order's payment = almost certainly the same link paid twice.
+        dup_suspects = []
+        try:
+            cur.execute("""SELECT order_id, payment_amount
+                           FROM orders
+                           WHERE payment_received = TRUE
+                             AND payment_amount IS NOT NULL
+                             AND ABS(payment_amount - %s) <= 0.01
+                             AND payment_received_at > NOW() - INTERVAL '14 days'
+                           ORDER BY payment_received_at DESC LIMIT 3""",
+                        (amount,))
+            dup_suspects = [{"order_id": r[0], "amount": float(r[1])}
+                            for r in cur.fetchall()]
+        except Exception as e:
+            print(f"[GMAIL] dup-suspect check failed: {e}")
         detail = {
             'amount': amount,
             'customer': customer_name,
             'message_id': message_id,
             'why': why,
+            'dup_suspects': dup_suspects,
             'candidates': [{'order_id': o['order_id'],
                             'expected': o['_expected'],
                             'basis': o['_basis']} for o in candidates],
@@ -770,13 +788,26 @@ def match_payment_to_order(conn, amount, customer_name, email, message_id=""):
                 f"<td style='padding:4px 10px;border-bottom:1px solid #eee;text-align:right'>${o['_expected']:,.2f}</td>"
                 f"<td style='padding:4px 10px;border-bottom:1px solid #eee'>{o['_basis']}</td></tr>"
                 for o in candidates)
+            dup_block = ""
+            if dup_suspects:
+                d0 = dup_suspects[0]
+                dup_block = (
+                    f"<p style='background:#FDECEA;border:1px solid #E74C3C;"
+                    f"border-radius:6px;padding:10px 14px'>"
+                    f"<strong>&#9888; Looks like a DOUBLE PAYMENT:</strong> "
+                    f"order #{d0['order_id']} already took exactly "
+                    f"${d0['amount']:,.2f} in the last 14 days. If so: "
+                    f"refund it in the Square dashboard, or turn it into a "
+                    f"store credit (POST /store-credits).</p>")
             _send_email(
                 candidates[0]['order_id'], alert_to,
-                f"PAYMENT NEEDS A HUMAN - ${amount:,.2f} from {customer_name}",
+                f"PAYMENT NEEDS A HUMAN - ${amount:,.2f} from {customer_name}"
+                + (" - DOUBLE PAYMENT?" if dup_suspects else ""),
                 f"<p>A Square payment of <strong>${amount:,.2f}</strong> from "
                 f"<strong>{customer_name}</strong> could not be matched to one "
                 f"order: {why}. Nothing was stamped.</p>"
-                f"<table style='border-collapse:collapse;font-size:13px'>"
+                + dup_block
+                + f"<table style='border-collapse:collapse;font-size:13px'>"
                 f"<tr><th style='padding:4px 10px;text-align:left'>Open order</th>"
                 f"<th style='padding:4px 10px;text-align:right'>Invoiced / total</th>"
                 f"<th style='padding:4px 10px;text-align:left'>Basis</th></tr>"
