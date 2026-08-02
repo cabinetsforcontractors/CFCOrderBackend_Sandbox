@@ -70,6 +70,11 @@ STATUSES = ("pending", "sent", "prepared", "blocked", "confirmed", "discrepancy"
             "scheduled", "picked_up", "delivered", "invoice_verified", "canceled")
 
 # warehouse key (as used by /freight/supplier-sheet) -> channel config
+# ⚖️ ONE-PROCESS LAW (William 2026-08-02): every supplier gets the direct
+# sanitized PO email. Exactly two exceptions: ROC = quick-order CSV to us
+# (portal-only law stands) and GHI = same flow but their own order sheet
+# is the artifact. LI keeps the customer-info block (he dropships for us).
+# DL / L&C / Linda flipped from portal_prepared to direct email this day.
 SUPPLIER_CHANNELS = {
     "GHI":             {"mode": "email_auto", "artifact": "ghi_xlsx"},
     "LI":              {"mode": "email_auto", "artifact": "po_email"},
@@ -77,11 +82,9 @@ SUPPLIER_CHANNELS = {
     "DuraStone":       {"mode": "email_auto", "artifact": "po_email"},
     "Love-Milestone":  {"mode": "email_auto", "artifact": "po_email"},
     "ROC":             {"mode": "portal_prepared", "artifact": "roc_csv"},
-    "DL":              {"mode": "portal_prepared", "artifact": "po_email"},
-    "L&C Cabinetry":   {"mode": "portal_prepared", "artifact": "po_email"},
-    "Linda":           {"mode": "portal_prepared", "artifact": "po_email"},
-    # William 2026-07-28: GB doors going live on .net — GB is EMAIL-TO-ORDER
-    # with the default PO-email logic (opposite of ROC's portal-only law)
+    "DL":              {"mode": "email_auto", "artifact": "po_email"},
+    "L&C Cabinetry":   {"mode": "email_auto", "artifact": "po_email"},
+    "Linda":           {"mode": "email_auto", "artifact": "po_email"},
     "Go Bravura":      {"mode": "email_auto", "artifact": "po_email"},
 }
 

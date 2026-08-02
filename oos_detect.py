@@ -52,6 +52,36 @@ _QUOTE_CUT_RE = re.compile(
 _PO_CODE_RE = re.compile(r"\bPO\s+\d{4,5}-([A-Z]{2,4})\b", re.I)
 
 
+def business_hours_between(start, end=None) -> float:
+    """Elapsed BUSINESS hours between two datetimes — Mon-Fri, 8am-6pm
+    Eastern (William's clock rulings ride this: stock-check nudges 4h/8h,
+    stall alarm 8h)."""
+    import datetime as _dt
+    try:
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("America/New_York")
+    except Exception:
+        tz = _dt.timezone.utc
+    if start is None:
+        return 0.0
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=_dt.timezone.utc)
+    end = end or _dt.datetime.now(_dt.timezone.utc)
+    if end.tzinfo is None:
+        end = end.replace(tzinfo=_dt.timezone.utc)
+    start, end = start.astimezone(tz), end.astimezone(tz)
+    if end <= start:
+        return 0.0
+    total, cur = 0.0, start
+    step = _dt.timedelta(minutes=30)
+    while cur < end:
+        nxt = min(cur + step, end)
+        if cur.weekday() < 5 and 8 <= cur.hour < 18:
+            total += (nxt - cur).total_seconds() / 3600.0
+        cur = nxt
+    return round(total, 2)
+
+
 def _fresh_text(body: str) -> str:
     """The reply's own words: cut at the first quoted-history marker and
     drop '>'-quoted lines."""
@@ -157,6 +187,138 @@ def process_oos_scan(hours_back: int = 48, dry_run: bool = False) -> Dict:
                 except Exception:
                     pass
                 out["errors"].append(f"{mid}: {e}")
+    return out
+
+
+# =============================================================================
+# STOCK-CHECK CLOCK (William 2026-08-02): a stock-check email to the
+# supplier starts a clock — 4 business hours silent = nudge, 8 business
+# hours = second nudge + an email to orders@ so William can CALL them.
+# Healed the moment any reply lands in the thread.
+# =============================================================================
+
+def ensure_stock_check_table(conn):
+    with conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS stock_checks (
+                id SERIAL PRIMARY KEY,
+                order_id VARCHAR(20),
+                warehouse VARCHAR(60),
+                original_sku VARCHAR(100),
+                substitute_sku VARCHAR(100),
+                to_email VARCHAR(200),
+                sent_message_id VARCHAR(120),
+                thread_id VARCHAR(120),
+                thread_headers TEXT,
+                subject TEXT,
+                status VARCHAR(20) DEFAULT 'open',
+                sent_at TIMESTAMPTZ DEFAULT NOW(),
+                nudge1_at TIMESTAMPTZ,
+                nudge2_at TIMESTAMPTZ,
+                answered_at TIMESTAMPTZ
+            )""")
+        conn.commit()
+
+
+def record_stock_check(order_id, warehouse, original_sku, substitute_sku,
+                       to_email, sent_message_id, thread_id, thread_headers,
+                       subject):
+    with get_db() as conn:
+        ensure_stock_check_table(conn)
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO stock_checks
+                    (order_id, warehouse, original_sku, substitute_sku,
+                     to_email, sent_message_id, thread_id, thread_headers,
+                     subject)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
+            """, (order_id, warehouse, original_sku, substitute_sku or None,
+                  to_email, sent_message_id, thread_id,
+                  json.dumps(thread_headers or {}), subject))
+            row_id = cur.fetchone()[0]
+            conn.commit()
+    return row_id
+
+
+def check_stock_check_clocks() -> Dict:
+    """Rides the ledger cycle. DB + Gmail only when a beat is due."""
+    out = {"open": 0, "healed": 0, "nudged": 0, "escalated": 0, "errors": []}
+    with get_db() as conn:
+        ensure_stock_check_table(conn)
+        with conn.cursor() as cur:
+            cur.execute("""SELECT id, order_id, warehouse, original_sku,
+                                  substitute_sku, to_email, thread_id,
+                                  thread_headers, subject, sent_at,
+                                  nudge1_at, nudge2_at
+                           FROM stock_checks WHERE status = 'open'""")
+            rows = cur.fetchall()
+        for (sid, oid, wh, orig, subst, to_email, thread_id, headers_json,
+             subject, sent_at, n1, n2) in rows:
+            out["open"] += 1
+            try:
+                # HEAL: any inbound ledger row in the thread after our send
+                if thread_id:
+                    with conn.cursor() as cur:
+                        cur.execute("""SELECT 1 FROM email_ledger
+                                       WHERE thread_id = %s AND folder = 'inbox'
+                                         AND processed_at > %s LIMIT 1""",
+                                    (thread_id, sent_at))
+                        if cur.fetchone():
+                            with conn.cursor() as cur2:
+                                cur2.execute("""UPDATE stock_checks
+                                                SET status = 'answered',
+                                                    answered_at = NOW()
+                                                WHERE id = %s""", (sid,))
+                                conn.commit()
+                            out["healed"] += 1
+                            continue
+                bh = business_hours_between(sent_at)
+                headers = json.loads(headers_json or "{}") or None
+                from substitutions import _send_guarded_email
+                if bh >= 8 and n2 is None:
+                    _send_guarded_email(
+                        oid, to_email, subject or f"PO {oid} - stock check",
+                        f"<p>Hey There,</p><p>Second follow-up on the stock "
+                        f"question for PO {oid} ({orig}) — could you give us "
+                        f"a quick answer so we can take care of the customer?"
+                        f"</p><p>Thank you,<br>--<br>William Prince<br>"
+                        f"Cabinets For Contractors<br>(770) 990-4885</p>",
+                        triggered_by="stock_check_nudge2",
+                        thread_headers=headers)
+                    from supplier_orders import _send_email
+                    _send_email(
+                        oid, "orders@cabinetsforcontractors.com",
+                        f"CALL THE WAREHOUSE - stock check on order #{oid} "
+                        f"({wh}) silent {bh:.0f} business hours",
+                        f"<p>The stock-check for order #{oid} ({wh}, "
+                        f"{orig}) has had NO answer in {bh:.1f} business "
+                        f"hours after two nudges — time to call them.</p>",
+                        triggered_by="stock_check_escalation")
+                    with conn.cursor() as cur:
+                        cur.execute("""UPDATE stock_checks SET nudge2_at = NOW()
+                                       WHERE id = %s""", (sid,))
+                        conn.commit()
+                    out["escalated"] += 1
+                elif bh >= 4 and n1 is None:
+                    _send_guarded_email(
+                        oid, to_email, subject or f"PO {oid} - stock check",
+                        f"<p>Hey There,</p><p>Just checking on the stock "
+                        f"question for PO {oid} ({orig}) — any word?</p>"
+                        f"<p>Thank you,<br>--<br>William Prince<br>"
+                        f"Cabinets For Contractors<br>(770) 990-4885</p>",
+                        triggered_by="stock_check_nudge1",
+                        thread_headers=headers)
+                    with conn.cursor() as cur:
+                        cur.execute("""UPDATE stock_checks SET nudge1_at = NOW()
+                                       WHERE id = %s""", (sid,))
+                        conn.commit()
+                    out["nudged"] += 1
+            except Exception as e:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                out["errors"].append(f"{sid}: {e}")
     return out
 
 

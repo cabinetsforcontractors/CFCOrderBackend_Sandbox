@@ -298,6 +298,14 @@ def run_auto_sync(gmail_sync_func=None, square_sync_func=None):
     """
     global last_auto_sync, auto_sync_running
 
+    # SPLIT CADENCE (William 2026-08-02): the B2BWave orders poll runs every
+    # cycle (2 min — orders feel instant); Gmail/Square/AI companions keep
+    # their 7.5-min rhythm; 1 AM ET = the nightly deep catch (14-day window)
+    # for anything that landed after hours.
+    from config import AUTO_SYNC_COMPANION_MINUTES
+    last_companions = 0.0
+    last_deep_date = None
+
     while True:
         time.sleep(AUTO_SYNC_INTERVAL_MINUTES * 60)
 
@@ -307,9 +315,28 @@ def run_auto_sync(gmail_sync_func=None, square_sync_func=None):
 
         try:
             auto_sync_running = True
-            print(f"[AUTO-SYNC] Starting sync at {datetime.now()} (interval: {AUTO_SYNC_INTERVAL_MINUTES} min)")
 
-            since_date = (datetime.now(timezone.utc) - timedelta(days=AUTO_SYNC_DAYS_BACK)).strftime("%Y-%m-%d")
+            days_back = AUTO_SYNC_DAYS_BACK
+            deep_catch = False
+            try:
+                from zoneinfo import ZoneInfo
+                et_now = datetime.now(ZoneInfo("America/New_York"))
+                if et_now.hour == 1 and last_deep_date != et_now.date():
+                    deep_catch = True
+                    last_deep_date = et_now.date()
+                    days_back = 14
+            except Exception as e:
+                print(f"[AUTO-SYNC] deep-catch clock error: {e}")
+
+            run_companions = deep_catch or (
+                (time.time() - last_companions)
+                >= AUTO_SYNC_COMPANION_MINUTES * 60)
+
+            print(f"[AUTO-SYNC] Starting sync at {datetime.now()} "
+                  f"(interval: {AUTO_SYNC_INTERVAL_MINUTES} min, "
+                  f"companions: {run_companions}, deep: {deep_catch})")
+
+            since_date = (datetime.now(timezone.utc) - timedelta(days=days_back)).strftime("%Y-%m-%d")
 
             data = b2bwave_api_request("orders", {"submitted_at_gteq": since_date})
             orders_list = data if isinstance(data, list) else [data]
@@ -325,26 +352,29 @@ def run_auto_sync(gmail_sync_func=None, square_sync_func=None):
             last_auto_sync = datetime.now(timezone.utc)
             print(f"[AUTO-SYNC] Completed: {synced} orders synced")
 
-            # Gmail sync
-            if gmail_sync_func:
-                try:
-                    with get_db() as conn:
-                        gmail_results = gmail_sync_func(conn, hours_back=2)
-                        print(f"[AUTO-SYNC] Gmail sync: {gmail_results}")
-                except Exception as e:
-                    print(f"[AUTO-SYNC] Gmail sync error: {e}")
+            # Companions ride the 7.5-min rhythm (or the 1 AM deep catch) —
+            # NOT the 2-min orders poll
+            if run_companions:
+                if gmail_sync_func:
+                    try:
+                        with get_db() as conn:
+                            gmail_results = gmail_sync_func(
+                                conn, hours_back=24 if deep_catch else 2)
+                            print(f"[AUTO-SYNC] Gmail sync: {gmail_results}")
+                    except Exception as e:
+                        print(f"[AUTO-SYNC] Gmail sync error: {e}")
 
-            # Square sync
-            if square_sync_func:
-                try:
-                    with get_db() as conn:
-                        square_results = square_sync_func(conn, hours_back=24)
-                        print(f"[AUTO-SYNC] Square sync: {square_results}")
-                except Exception as e:
-                    print(f"[AUTO-SYNC] Square sync error: {e}")
+                if square_sync_func:
+                    try:
+                        with get_db() as conn:
+                            square_results = square_sync_func(conn, hours_back=24)
+                            print(f"[AUTO-SYNC] Square sync: {square_results}")
+                    except Exception as e:
+                        print(f"[AUTO-SYNC] Square sync error: {e}")
 
-            # AI summary refresh — runs after every B2BWave sync
-            refresh_ai_summaries_for_active_orders()
+                # AI summary refresh — companion rhythm only
+                refresh_ai_summaries_for_active_orders()
+                last_companions = time.time()
 
         except Exception as e:
             print(f"[AUTO-SYNC] Error: {e}")

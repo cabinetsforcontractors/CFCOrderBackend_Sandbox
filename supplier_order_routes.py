@@ -318,6 +318,44 @@ def shortage_list(include_resolved: bool = False,
     return list_shortages(include_resolved=include_resolved)
 
 
+@supplier_order_router.post("/supplier-orders/{order_id}/dims")
+def set_dims_override(order_id: str, payload: dict = Body(...),
+                      _: bool = Depends(require_admin)):
+    """SUPPLIER-SENT DIMS (William 2026-08-02): pallet data the warehouse
+    stated — {pallets: [{length, width, height, weight}], note?} — beats
+    our computed numbers on the BOL (weight + piece count) [admin]."""
+    pallets = payload.get("pallets") or []
+    if not pallets:
+        return {"status": "error", "message": "pallets required"}
+    from db_helpers import get_db
+    import json as _json
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""ALTER TABLE order_shipments
+                           ADD COLUMN IF NOT EXISTS dims_override TEXT""")
+            cur.execute("""SELECT shipment_id FROM order_shipments
+                           WHERE order_id = %s ORDER BY id DESC LIMIT 1""",
+                        (order_id,))
+            row = cur.fetchone()
+            if not row:
+                return {"status": "error",
+                        "message": f"no shipment row for order {order_id}"}
+            cur.execute("""UPDATE order_shipments SET dims_override = %s,
+                           updated_at = NOW() WHERE shipment_id = %s""",
+                        (_json.dumps({"pallets": pallets,
+                                      "note": payload.get("note")}),
+                         row[0]))
+            cur.execute("""
+                INSERT INTO order_events (order_id, event_type, event_data, source)
+                VALUES (%s, 'dims_override_set', %s, 'supplier_orders')
+            """, (order_id, _json.dumps(
+                {"shipment_id": row[0], "pallets": pallets,
+                 "total_weight": sum(float(p.get("weight") or 0)
+                                     for p in pallets)}, default=str)))
+            conn.commit()
+    return {"status": "ok", "shipment_id": row[0], "pallets": len(pallets)}
+
+
 # =============================================================================
 # CUSTOMER POs (Wave 3 build K, William 2026-08-02 — UFP/Nationwide PDFs)
 # =============================================================================

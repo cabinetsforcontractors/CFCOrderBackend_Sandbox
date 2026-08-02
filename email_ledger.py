@@ -521,6 +521,13 @@ def run_ledger_cycle(hours_back: int = 24) -> Dict:
         check_claim_clocks()
     except Exception as e:
         print(f"[LEDGER] claim clocks failed: {e}")
+    # STOCK-CHECK CLOCK (William 2026-08-02): 4/8 business-hour nudges on
+    # unanswered stock questions; heals on any reply in the thread
+    try:
+        from oos_detect import check_stock_check_clocks
+        check_stock_check_clocks()
+    except Exception as e:
+        print(f"[LEDGER] stock-check clocks failed: {e}")
     # NEW-CUSTOMER NOTIFICATION GUARD (at most once per NOTIF_GUARD_HOURS,
     # one API list call — the guard itself decides whether it's due)
     try:

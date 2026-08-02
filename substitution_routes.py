@@ -98,6 +98,9 @@ class ProposalRequest(BaseModel):
     reason: str = "out_of_stock"
     oos_message_id: Optional[str] = None
     supersede: bool = False
+    # supplier-offered in-stock alternatives (William 2026-08-02) — up to
+    # 3 total options ride the proposal; the customer picks
+    alternatives: Optional[list] = None
 
 
 class CounterApplyRequest(BaseModel):
@@ -107,7 +110,9 @@ class CounterApplyRequest(BaseModel):
 class StockCheckRequest(BaseModel):
     order_id: str
     original_sku: str
-    substitute_sku: str
+    # optional (2026-08-02): no substitute named = ask the warehouse for
+    # up to 3 in-stock alternatives
+    substitute_sku: Optional[str] = None
     oos_message_id: Optional[str] = None
     warehouse: Optional[str] = None
 
@@ -123,7 +128,8 @@ def propose_substitution(req: ProposalRequest, _: bool = Depends(require_admin))
         return create_substitution_proposal(req.order_id, req.original_sku,
                                             req.substitute_sku, req.reason,
                                             oos_message_id=req.oos_message_id,
-                                            supersede=req.supersede)
+                                            supersede=req.supersede,
+                                            alternatives=req.alternatives)
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
@@ -138,7 +144,7 @@ def stock_check(req: StockCheckRequest, _: bool = Depends(require_admin)):
     from substitutions import send_stock_check
     try:
         return send_stock_check(req.order_id, req.original_sku,
-                                req.substitute_sku,
+                                req.substitute_sku or "",
                                 oos_message_id=req.oos_message_id or "",
                                 warehouse=req.warehouse or "")
     except Exception as e:
@@ -224,11 +230,53 @@ def substitution_landing(token: str, intent: str = ""):
 
     price = float(sub.get("keep_price") or 0)
     note_open = "open" if intent == "no" else ""
+
+    # MULTI-OPTION pick (William 2026-08-02): the warehouse offered real
+    # in-stock alternatives — the customer chooses right here.
+    import json as _json
+    try:
+        _opts = _json.loads(sub.get("options_json") or "[]")
+    except Exception:
+        _opts = []
+    if len(_opts) > 1:
+        opt_rows = "".join(
+            f"""<label class="opt">
+                  <input type="radio" name="chosen"
+                         value="{_html.escape(o.get('sku') or '', quote=True)}"
+                         {'checked' if i == 0 else ''}>
+                  <strong>{_html.escape(o.get('sku') or '')}</strong> —
+                  {_html.escape(o.get('name') or '')}
+                  <br><span style="color:#555;font-size:13px;">
+                  {_html.escape(o.get('blurb') or '')}</span>
+                </label>"""
+            for i, o in enumerate(_opts))
+        return _page(f"Order #{sub['order_id']} — pick your replacement", f"""
+          <h2>Order #{sub['order_id']} — pick your replacement</h2>
+          <p>Out of stock: <s>{sub['original_sku']}</s>
+             (qty {sub['quantity']})</p>
+          <p>The warehouse has these IN STOCK right now:</p>
+          <form method="post" action="/substitution/{token}/choose">
+            {opt_rows}
+            <label class="opt" style="border-style:dashed;">
+              <input type="radio" name="chosen" value="__none__">
+              None of these — tell us what you'd prefer:
+              <textarea name="note" placeholder="What would you like us to do?"></textarea>
+            </label>
+            <p><button class="btn approve" type="submit">Confirm my choice</button></p>
+          </form>
+          <p style="color:#888;font-size:13px;">Nothing changes on your order
+             until you confirm. Questions? Call (770) 990-4885.</p>""")
+
+    price_note = ""
+    if len(_opts) == 1 and _opts[0].get("blurb"):
+        price_note = _html.escape(_opts[0]["blurb"])
+    else:
+        price_note = f"your price stays ${price:,.2f} — unchanged"
     return _page(f"Order #{sub['order_id']} substitution", f"""
       <h2>Order #{sub['order_id']} — substitution approval</h2>
       <p>Out of stock: <s>{sub['original_sku']}</s></p>
       <p>Replacement: <strong>{sub['substitute_sku']}</strong>
-         (qty {sub['quantity']}, your price stays ${price:,.2f} — unchanged)</p>
+         (qty {sub['quantity']}, {price_note})</p>
       <form method="post" action="/substitution/{token}/respond">
         <button class="btn approve" type="submit" name="choice" value="approve">
           &#10003; Approve substitution</button>

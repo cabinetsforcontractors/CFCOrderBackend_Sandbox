@@ -107,6 +107,10 @@ def ensure_substitutions_table(conn):
         cur.execute("ALTER TABLE order_substitutions ADD COLUMN IF NOT EXISTS requested_price DECIMAL(10,2)")
         cur.execute("ALTER TABLE order_substitutions ADD COLUMN IF NOT EXISTS requested_detail TEXT")
         cur.execute("ALTER TABLE order_substitutions ADD COLUMN IF NOT EXISTS oos_message_id VARCHAR(120)")
+        # PRICE LAW columns (William 2026-08-02): supplier-offered options
+        # + whether the order was paid at proposal time
+        cur.execute("ALTER TABLE order_substitutions ADD COLUMN IF NOT EXISTS options_json TEXT")
+        cur.execute("ALTER TABLE order_substitutions ADD COLUMN IF NOT EXISTS paid_at_proposal BOOLEAN")
         conn.commit()
 
 
@@ -277,6 +281,71 @@ _BTN = ("display:inline-block;padding:12px 28px;border-radius:6px;color:#ffffff;
 _TD = "border-bottom:1px solid #dddddd;padding:6px;"
 
 
+# =============================================================================
+# PRICE LAW (William 2026-08-02): the substitute's price decides the path.
+#   cheaper  -> unpaid: line at the LOWER price + invoice refire
+#               paid:   line stays, difference = STORE CREDIT on next order
+#   <= +25%  -> price stays, "the difference is on the house"
+#   >  +25%  -> ADMIN DECIDES, never auto-proposed
+# Customer price for a substitute = its MSRP x the order line's implied
+# multiplier (price = MSRP x multiplier is the standing catalog law).
+# =============================================================================
+
+def _order_paid(order_id: str) -> bool:
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT payment_received FROM orders WHERE order_id = %s",
+                            (str(order_id),))
+                row = cur.fetchone()
+                return bool(row and row[0])
+    except Exception:
+        return False
+
+
+def assess_substitute(line: Dict, orig_product: Dict, sub_product: Dict,
+                      paid: bool) -> Dict:
+    """Price-law verdict for ONE candidate substitute."""
+    qty = int(float(line.get("quantity") or 1))
+    orig_price = float(line.get("final_price") or 0)
+    orig_msrp = float((orig_product or {}).get("price") or 0)
+    sub_msrp = float((sub_product or {}).get("price") or 0)
+    out = {"sku": sub_product.get("code"), "name": sub_product.get("name") or "",
+           "product_id": sub_product.get("id"), "qty": qty,
+           "orig_price": orig_price}
+    if orig_msrp <= 0 or sub_msrp <= 0 or orig_price <= 0:
+        out.update(action="admin", reason="price data missing — human decides")
+        return out
+    mult = orig_price / orig_msrp
+    sub_customer = round(sub_msrp * mult, 2)
+    delta = round(sub_customer - orig_price, 2)
+    pct = delta / orig_price
+    out.update(customer_price=sub_customer, delta=delta,
+               pct=round(pct * 100, 1))
+    if delta <= 0:
+        credit_total = round(-delta * qty, 2)
+        if paid:
+            out.update(action="credit", charge_price=orig_price,
+                       credit_total=credit_total,
+                       blurb=(f"This one costs less — the difference "
+                              f"(${credit_total:,.2f}) becomes a store credit "
+                              f"applied to your next order."))
+        else:
+            out.update(action="cheaper", charge_price=sub_customer,
+                       blurb=(f"This one costs less — your updated invoice "
+                              f"will show the lower price "
+                              f"(${sub_customer:,.2f} each)."))
+    elif pct <= 0.25:
+        out.update(action="house", charge_price=orig_price,
+                   blurb=(f"This one costs a little more, but the difference "
+                          f"is on the house — your price stays "
+                          f"${orig_price:,.2f} each."))
+    else:
+        out.update(action="admin",
+                   reason=f"substitute is {out['pct']}% over — past the 25% line")
+    return out
+
+
 def build_proposal_email(order: Dict, sub: Dict) -> str:
     """Proposal HTML: message box + buttons on top, order-style change table below.
     Mirrors the B2BWave notification styling (Open Sans 13px, same table look)."""
@@ -293,6 +362,14 @@ def build_proposal_email(order: Dict, sub: Dict) -> str:
                       if catalog_err else "is out of stock")
     row_label = "Not available" if catalog_err else "Out of stock"
 
+    # PRICE LAW wording (William 2026-08-02): the blurb states the money
+    # plainly — on the house / store credit / lower price
+    price_line = (sub.get("price_blurb")
+                  or "<strong>Your price stays exactly the same</strong> — "
+                     "we cover any difference in cost.")
+    charge = float(sub.get("charge_price") or price)
+    charge_total = charge * qty
+
     return f"""
 <div style='color:#393939;font-family:"Open Sans","Helvetica Neue",Helvetica,Arial,sans-serif;font-size:13px;line-height:1.5;max-width:50em;'>
   <h1 style="margin-bottom:6px;">A change needs your OK — Order #{order_id}</h1>
@@ -305,7 +382,7 @@ def build_proposal_email(order: Dict, sub: Dict) -> str:
     </p>
     <p style="margin:0 0 8px 0;">
       We can replace it with <strong>{sub['substitute_sku']}</strong> — {sub.get('substitute_name', '')}.
-      <strong>Your price stays exactly the same</strong> — we cover any difference in cost.
+      {price_line}
     </p>
     <p style="margin:0 0 12px 0;">
       If that works for you, click <strong>Approve</strong>. If not, click <strong>No</strong> and
@@ -341,14 +418,49 @@ def build_proposal_email(order: Dict, sub: Dict) -> str:
         <td style="{td}"><strong style="color:#1dc9b7;">Replacement</strong></td>
         <td style="{td}"><strong>{sub['substitute_sku']}</strong></td>
         <td style="{td}">{sub.get('substitute_name', '')}</td>
-        <td style="{td}" align="right"><strong>${price:,.2f}</strong></td>
+        <td style="{td}" align="right"><strong>${charge:,.2f}</strong></td>
         <td style="{td}" align="right"><strong>{qty}</strong></td>
-        <td style="{td}" align="right"><strong>${line_total:,.2f}</strong></td>
+        <td style="{td}" align="right"><strong>${charge_total:,.2f}</strong></td>
       </tr>
     </tbody>
   </table>
 
-  <p style="margin:0 0 4px 0;">Every other item on your order is unchanged, and your order total stays the same.</p>
+  <p style="margin:0 0 4px 0;">Every other item on your order is unchanged.</p>
+  <p>Thank you,<br>The CFC Team<br>(770) 990-4885</p>
+</div>
+"""
+
+
+def build_options_proposal_email(order: Dict, sub: Dict,
+                                 options: List[Dict]) -> str:
+    """Multi-option proposal (William 2026-08-02): the warehouse offered
+    real in-stock alternatives — the customer picks. One button leads to
+    the landing page where the pick happens (scanner-proof)."""
+    first = (sub.get("customer_name") or order.get("customer_name") or "there").split()[0]
+    order_id = sub["order_id"]
+    landing = f"{PUBLIC_BASE_URL}/substitution/{sub['token']}"
+    rows = "".join(
+        f"<li style='margin:6px 0;'><strong>{o['sku']}</strong> — {o.get('name', '')}"
+        f"<br><span style='color:#555;'>{o.get('blurb', '')}</span></li>"
+        for o in options)
+    return f"""
+<div style='color:#393939;font-family:"Open Sans","Helvetica Neue",Helvetica,Arial,sans-serif;font-size:13px;line-height:1.5;max-width:50em;'>
+  <h1 style="margin-bottom:6px;">A change needs your OK — Order #{order_id}</h1>
+  <div style="border:1px solid #f0ad4e;background:#fdf7ec;border-radius:6px;padding:14px 16px;margin:12px 0;">
+    <p style="margin:0 0 8px 0;">Hi {first},</p>
+    <p style="margin:0 0 8px 0;">
+      One item on your order <strong>#{order_id}</strong> is out of stock:
+      <strong>{sub['original_sku']}</strong> — {sub.get('original_name', '')}.
+    </p>
+    <p style="margin:0 0 8px 0;">The warehouse has these IN STOCK right now
+      as replacements:</p>
+    <ul style="margin:0 0 12px 0;">{rows}</ul>
+    <p style="margin:0 0 12px 0;">Pick the one you'd like — or tell us what
+      you'd prefer instead. Nothing changes on your order until you choose.</p>
+    <p style="margin:0;">
+      <a href="{landing}" style="{_BTN}background:#1dc9b7;">Choose my replacement</a>
+    </p>
+  </div>
   <p>Thank you,<br>The CFC Team<br>(770) 990-4885</p>
 </div>
 """
@@ -478,7 +590,8 @@ def _send_guarded_email(order_id: str, to_email: str, subject: str, html: str,
 # THEN propose to the customer.)
 # =============================================================================
 
-def send_stock_check(order_id: str, original_sku: str, substitute_sku: str,
+def send_stock_check(order_id: str, original_sku: str,
+                     substitute_sku: str = "",
                      oos_message_id: str = "", warehouse: str = "") -> Dict:
     """Threaded ask to the supplier: 'is {substitute} in stock?'. Sends ONE
     supplier email (allowlist-guarded), records a stock_check_sent event,
@@ -530,11 +643,24 @@ def send_stock_check(order_id: str, original_sku: str, substitute_sku: str,
             print(f"[STOCK-CHECK] thread lookup failed ({oos_message_id}): {e}")
 
     from supplier_orders import SIGNATURE_HTML, supplier_greeting
+    # SUPPLIER-FIRST ALTERNATIVES (William 2026-08-02): the warehouse names
+    # what it actually HAS — up to 3 in-stock alternatives; nothing goes to
+    # the customer until stock is confirmed.
+    if (substitute_sku or "").strip():
+        ask = (f"<p>Is <strong>{substitute_sku}</strong> in stock? "
+               f"(It would replace {original_sku}.) If it isn't — or if "
+               f"something else works better — please list up to "
+               f"<strong>3 in-stock alternatives</strong> with their "
+               f"item numbers.</p>")
+    else:
+        ask = (f"<p><strong>{original_sku}</strong> came back out of stock — "
+               f"please list up to <strong>3 in-stock alternatives</strong> "
+               f"(closest sizes/configurations) with their item numbers.</p>")
     html = (f"<div style='font-family:Arial,sans-serif;font-size:14px;'>"
             f"<p>{supplier_greeting(wh)}</p>"
-            f"<p>Before we set up a replacement on <strong>PO {order_id}</strong>: "
-            f"is <strong>{substitute_sku}</strong> in stock?</p>"
-            f"<p>(It would replace {original_sku}.)</p>"
+            f"<p>Before we set up a replacement on <strong>PO {order_id}"
+            f"</strong>:</p>"
+            f"{ask}"
             f"{SIGNATURE_HTML}</div>")
     result = _send_guarded_email(order_id, to_email, subject, html,
                                  triggered_by="stock_check",
@@ -557,6 +683,21 @@ def send_stock_check(order_id: str, original_sku: str, substitute_sku: str,
                     conn.commit()
         except Exception as e:
             print(f"[STOCK-CHECK] event record failed: {e}")
+        # THE CLOCK (William 2026-08-02): 4 business hours = nudge,
+        # 8 = second nudge + the call-them email to orders@
+        try:
+            tid = (thread_headers or {}).get("thread_id")
+            if not tid and result.get("message_id"):
+                from gmail_sync import gmail_api_request
+                meta = gmail_api_request(
+                    f"messages/{result['message_id']}", {"format": "minimal"}) or {}
+                tid = meta.get("threadId")
+            from oos_detect import record_stock_check
+            record_stock_check(order_id, wh, original_sku, substitute_sku,
+                               result.get("to"), result.get("message_id"),
+                               tid, thread_headers, subject)
+        except Exception as e:
+            print(f"[STOCK-CHECK] clock record failed: {e}")
     return {"status": "ok" if result.get("success") else "error",
             "warehouse": wh, "send": result, "subject": subject,
             "threaded": bool(thread_headers)}
@@ -569,7 +710,8 @@ def send_stock_check(order_id: str, original_sku: str, substitute_sku: str,
 def create_substitution_proposal(order_id: str, original_sku: str,
                                  substitute_sku: str, reason: str = "out_of_stock",
                                  oos_message_id: str = None,
-                                 supersede: bool = False) -> Dict:
+                                 supersede: bool = False,
+                                 alternatives: list = None) -> Dict:
     """Create + email a substitution proposal. Does NOT touch the order.
     oos_message_id = Gmail id of the warehouse's out-of-stock email; when set,
     the supplier gets a threaded reply with the correction after the swap.
@@ -584,10 +726,50 @@ def create_substitution_proposal(order_id: str, original_sku: str,
     if not line:
         return {"status": "error",
                 "message": f"order {order_id} has no line with SKU {original_sku}"}
-    sub_product = fetch_b2b_product(substitute_sku)
-    if not sub_product:
-        return {"status": "error",
-                "message": f"substitute SKU {substitute_sku} not found on B2BWave"}
+    # PRICE LAW + SUPPLIER OPTIONS (William 2026-08-02): every candidate is
+    # priced (MSRP x the line's implied multiplier); >25%-over candidates
+    # go to the admin, never to the customer.
+    orig_product = fetch_b2b_product(original_sku)
+    paid = _order_paid(order_id)
+    seen, options, excluded = set(), [], []
+    for cand in [substitute_sku] + [a for a in (alternatives or []) if a]:
+        c = (cand or "").strip()
+        if not c or c.upper() in seen:
+            continue
+        seen.add(c.upper())
+        prod = fetch_b2b_product(c)
+        if not prod:
+            excluded.append({"sku": c, "reason": "not found on B2BWave"})
+            continue
+        verdict = assess_substitute(line, orig_product, prod, paid)
+        if verdict.get("action") == "admin":
+            excluded.append({"sku": c, "reason": verdict.get("reason")})
+            continue
+        options.append(verdict)
+        if len(options) >= 3:
+            break
+    if not options:
+        try:
+            from supplier_orders import _send_email
+            _send_email(order_id, os.environ.get(
+                "WAREHOUSE_NOTIFICATION_EMAIL",
+                "orders@cabinetsforcontractors.com").strip(),
+                f"SUBSTITUTION NEEDS YOU - order #{order_id} "
+                f"({original_sku})",
+                f"<p>No substitute for <strong>{original_sku}</strong> on "
+                f"order #{order_id} cleared the price rules — nothing went "
+                f"to the customer.</p><ul>"
+                + "".join(f"<li>{e['sku']}: {e['reason']}</li>"
+                          for e in excluded) + "</ul>",
+                triggered_by="substitution_admin_gate")
+        except Exception as e:
+            print(f"[SUBS] admin-gate alert failed: {e}")
+        return {"status": "admin_decision", "excluded": excluded,
+                "message": "no candidate cleared the price rules — "
+                           "admin decides (alert sent)"}
+    primary = options[0]
+    sub_product = {"code": primary["sku"], "name": primary["name"],
+                   "id": primary["product_id"]}
 
     # duplicate guard (William 2026-07-17): never two open approvable emails
     # for the same order line
@@ -624,9 +806,15 @@ def create_substitution_proposal(order_id: str, original_sku: str,
         "customer_email": order.get("customer_email") or "",
         "customer_name": order.get("customer_name") or "",
         "reason": reason,
+        "charge_price": primary.get("charge_price"),
+        "price_blurb": primary.get("blurb"),
     }
-    html = build_proposal_email(order, sub)
-    subject = f"Order #{order_id} — one item needs your OK"
+    if len(options) > 1:
+        html = build_options_proposal_email(order, sub, options)
+        subject = f"Order #{order_id} — pick your replacement"
+    else:
+        html = build_proposal_email(order, sub)
+        subject = f"Order #{order_id} — one item needs your OK"
 
     with get_db() as conn:
         ensure_substitutions_table(conn)
@@ -635,13 +823,14 @@ def create_substitution_proposal(order_id: str, original_sku: str,
                 INSERT INTO order_substitutions
                     (token, order_id, original_sku, substitute_sku, quantity,
                      keep_price, reason, status, customer_email, customer_name,
-                     oos_message_id)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, 'pending', %s, %s, %s)
+                     oos_message_id, options_json, paid_at_proposal)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, 'pending', %s, %s, %s,
+                        %s, %s)
                 RETURNING id
             """, (sub["token"], sub["order_id"], sub["original_sku"],
                   sub["substitute_sku"], sub["quantity"], sub["keep_price"],
                   reason, sub["customer_email"], sub["customer_name"],
-                  oos_message_id))
+                  oos_message_id, json.dumps(options, default=str), paid))
             sub_id = cur.fetchone()[0]
             conn.commit()
 
@@ -840,6 +1029,18 @@ def apply_substitution(sub: Dict, substitute_sku: str = None,
     before_ids = {p["id"] for p in _order_products(order)}
     qty = int(float(line.get("quantity") or 1))
     price = float(sub["keep_price"] or line.get("final_price") or 0)
+    # PRICE LAW (William 2026-08-02): the chosen option's charge price wins
+    # (cheaper+unpaid = the lower price; house/credit = the original price)
+    chosen_option = None
+    try:
+        _opts = json.loads(sub.get("options_json") or "[]")
+        chosen_option = next(
+            (o for o in _opts
+             if (o.get("sku") or "").upper() == target_sku.upper()), None)
+        if chosen_option and chosen_option.get("charge_price") is not None:
+            price = float(chosen_option["charge_price"])
+    except Exception as e:
+        print(f"[SUBS] option price lookup failed: {e}")
 
     st, d = _b2b("PATCH", f"orders/{order_id}/add_product", {
         "product_id": sub_product["id"], "quantity": qty,
@@ -871,6 +1072,35 @@ def apply_substitution(sub: Dict, substitute_sku: str = None,
         return result
 
     result["applied"] = True
+    # PRICE LAW aftermath (William 2026-08-02)
+    if chosen_option:
+        try:
+            if chosen_option.get("action") == "credit" and \
+                    chosen_option.get("credit_total"):
+                from store_credits import add_store_credit
+                add_store_credit(
+                    sub.get("customer_email") or "", order_id,
+                    chosen_option["credit_total"],
+                    f"substitution {sub['original_sku']} -> {target_sku} "
+                    f"on paid order {order_id}")
+                result["store_credit"] = chosen_option["credit_total"]
+            elif chosen_option.get("action") == "cheaper":
+                from supplier_orders import _send_email
+                _send_email(
+                    order_id,
+                    os.environ.get("WAREHOUSE_NOTIFICATION_EMAIL",
+                                   "orders@cabinetsforcontractors.com").strip(),
+                    f"REFIRE INVOICE - order #{order_id} price dropped "
+                    f"after substitution",
+                    f"<p>Order #{order_id}: {sub['original_sku']} -> "
+                    f"{target_sku} applied at the LOWER price "
+                    f"${price:,.2f}. The invoice needs a refire: "
+                    f"<code>POST /orders/{order_id}/auto-invoice"
+                    f"?dry_run=false</code></p>",
+                    triggered_by="substitution_refire")
+                result["invoice_refire_alerted"] = True
+        except Exception as e:
+            result["price_law_error"] = str(e)
     try:
         result["finalize"] = finalize_applied_substitution(sub, target_sku, check)
         if result["finalize"].get("supplier_correction"):

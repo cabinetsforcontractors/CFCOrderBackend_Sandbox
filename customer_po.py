@@ -272,3 +272,34 @@ def _alert(customer: str, hit: Dict, doc: Dict):
                 f"CUSTOMER PO IN - {customer} PO {parsed.get('po_number')} "
                 f"({hit['mapped']} mapped, {hit['unmatched']} unmatched)",
                 html, triggered_by="customer_po")
+
+    # MISMATCH DRAFT (William 2026-08-02): unmatched lines get a ready
+    # DRAFT back to the sender — William clears it internally first, then
+    # fires the draft himself.
+    if doc.get("unmatched"):
+        try:
+            import re as _re
+            from email_sender import create_gmail_draft
+            m = _re.search(r"[\w.+-]+@[\w.-]+", hit.get("from") or "")
+            sender = m.group(0) if m else None
+            if sender:
+                un_rows = "".join(
+                    f"<li>{u['qty']}x <strong>{u['their_sku']}</strong> — "
+                    f"{u.get('description', '')}</li>"
+                    for u in doc["unmatched"])
+                subj = hit.get("subject") or f"PO {parsed.get('po_number')}"
+                if not subj.upper().startswith("RE"):
+                    subj = f"RE: {subj}"
+                create_gmail_draft(
+                    sender, subj,
+                    f"<div style='font-family:Arial,sans-serif;font-size:14px;'>"
+                    f"<p>Hey There,</p>"
+                    f"<p>Quick question on PO {parsed.get('po_number')} — "
+                    f"we want to make sure we get these exactly right. Could "
+                    f"you confirm the following item(s)?</p>"
+                    f"<ul>{un_rows}</ul>"
+                    f"<p>Everything else on the PO is clear and in process.</p>"
+                    f"<p>Thank you,<br>--<br>William Prince<br>"
+                    f"Cabinets For Contractors<br>(770) 990-4885</p></div>")
+        except Exception as e:
+            print(f"[CUSTOMER-PO] mismatch draft failed: {e}")

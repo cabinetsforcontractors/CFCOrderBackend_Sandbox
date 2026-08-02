@@ -52,9 +52,14 @@ RL_QUOTE_SANDBOX_URL = os.environ.get("RL_QUOTE_SANDBOX_URL", "https://rl-quote-
 
 # =============================================================================
 # AUTO-SYNC CONFIG
+# William 2026-08-02: orders poll every 2 MINUTES (720 calls/day — .net
+# orders feel instant). The heavy companions (Gmail, Square, AI refresh)
+# keep the old 7.5-minute rhythm — see sync_service. A 1 AM ET deep catch
+# sweeps a 14-day window nightly as the belt-and-suspenders net.
 # =============================================================================
 
-AUTO_SYNC_INTERVAL_MINUTES = 7.5
+AUTO_SYNC_INTERVAL_MINUTES = 2
+AUTO_SYNC_COMPANION_MINUTES = 7.5
 AUTO_SYNC_DAYS_BACK = 7
 
 # =============================================================================

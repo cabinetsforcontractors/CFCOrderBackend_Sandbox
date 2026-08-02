@@ -152,7 +152,7 @@ def _existing_link(order_id: str):
 
 
 @pay_router.get("/pay/{order_id}/invoice", response_class=HTMLResponse)
-def pay_invoice(order_id: str, token: str = ""):
+def pay_invoice(order_id: str, token: str = "", quote: str = ""):
     if not verify_checkout_token(str(order_id), token or ""):
         return HTMLResponse(_shell("Link expired",
                                    "<div class='card'><h1>This link has "
@@ -186,6 +186,29 @@ def pay_invoice(order_id: str, token: str = ""):
         shipping = round(max(0.0, grand - total - tariff), 2)
         pay_url = link.get("url")
     else:
+        # QUOTE SPINNER (William 2026-08-02: "if it takes 100 seconds then
+        # it takes 100 seconds — put a spinning something and a message").
+        # First visit shows the spinner instantly; the meta-refresh request
+        # runs the real quote while the spinner stays on screen.
+        if quote != "1":
+            next_url = (f"{BASE_URL}/pay/{order_id}/invoice"
+                        f"?token={token}&quote=1")
+            return HTMLResponse(_shell(
+                f"Order #{order_id} — pricing your freight",
+                f"<div class='card' style='text-align:center'>"
+                f"<h1>Pricing your freight&hellip;</h1>"
+                f"<div style='margin:26px auto;width:52px;height:52px;"
+                f"border:6px solid #e2e8f0;border-top-color:#1D4ED8;"
+                f"border-radius:50%;animation:spin 1s linear infinite'></div>"
+                f"<style>@keyframes spin{{to{{transform:rotate(360deg)}}}}"
+                f"</style>"
+                f"<p style='font-size:14px'>We're getting your real freight "
+                f"quote from the carriers right now — this can take a minute "
+                f"or two. Please don't close this page; your invoice will "
+                f"appear the moment the quote lands.</p>"
+                f"<script>setTimeout(function(){{window.location.href="
+                f"'{next_url}';}},800);</script>"
+                f"</div>"))
         from auto_invoice import auto_shipping
         ship = auto_shipping(order_id, order)
         if not ship.get("ok"):

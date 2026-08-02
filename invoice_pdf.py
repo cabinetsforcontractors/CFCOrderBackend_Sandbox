@@ -259,26 +259,32 @@ def generate_invoice_pdf(order_data: dict, shipping_result: dict) -> Optional[by
     elements.append(items_table)
     elements.append(Spacer(1, 12))
 
-    # TOTALS — email labels, ending at Grand Total
+    # TOTALS — email labels, ending at Grand Total. Store credit (William
+    # 2026-08-02) rides after tariff when present; style rows are computed
+    # so the insert can't shift the bold Grand Total.
     totals_data = [
         ['', 'Subtotal (in-stock):', f"${total_items:,.2f}"],
         ['', f"Tariff Surcharge ({int(tariff_rate * 100)}%):", f"${tariff_amount:,.2f}"],
-        ['', 'Shipping:', f"${total_shipping:,.2f}"],
-        ['', 'Grand Total:', f"${grand_total:,.2f}"],
     ]
+    store_credit = float(shipping_result.get('store_credit_amount', 0) or 0)
+    if store_credit > 0:
+        totals_data.append(['', 'Store Credit Applied:', f"-${store_credit:,.2f}"])
+    totals_data.append(['', 'Shipping:', f"${total_shipping:,.2f}"])
+    totals_data.append(['', 'Grand Total:', f"${grand_total:,.2f}"])
+    last = len(totals_data) - 1
     totals_table = Table(totals_data, colWidths=[3.7 * inch, 1.8 * inch, 1.2 * inch])
     totals_table.setStyle(TableStyle([
-        ('FONTNAME', (0, 0), (-1, 2), 'Helvetica'),
-        ('FONTNAME', (1, 3), (2, 3), 'Helvetica-Bold'),
-        ('FONTSIZE', (0, 0), (-1, 2), 9),
-        ('FONTSIZE', (1, 3), (2, 3), 11),
-        ('TEXTCOLOR', (1, 0), (1, 2), colors.HexColor('#4a5568')),
-        ('TEXTCOLOR', (2, 0), (2, 2), colors.HexColor('#1a202c')),
-        ('TEXTCOLOR', (1, 3), (2, 3), colors.HexColor('#1a365d')),
+        ('FONTNAME', (0, 0), (-1, last - 1), 'Helvetica'),
+        ('FONTNAME', (1, last), (2, last), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, last - 1), 9),
+        ('FONTSIZE', (1, last), (2, last), 11),
+        ('TEXTCOLOR', (1, 0), (1, last - 1), colors.HexColor('#4a5568')),
+        ('TEXTCOLOR', (2, 0), (2, last - 1), colors.HexColor('#1a202c')),
+        ('TEXTCOLOR', (1, last), (2, last), colors.HexColor('#1a365d')),
         ('ALIGN', (1, 0), (2, -1), 'RIGHT'),
         ('TOPPADDING', (0, 0), (-1, -1), 4),
         ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
-        ('LINEABOVE', (1, 3), (2, 3), 1, colors.HexColor('#1a365d')),
+        ('LINEABOVE', (1, last), (2, last), 1, colors.HexColor('#1a365d')),
         ('LEFTPADDING', (0, 0), (-1, -1), 0),
         ('RIGHTPADDING', (0, 0), (-1, -1), 0),
     ]))

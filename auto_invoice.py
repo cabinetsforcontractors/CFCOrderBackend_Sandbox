@@ -210,6 +210,20 @@ def run_auto_invoice(order_id: str, triggered_by: str = "new_order",
                        "grand_total": grand},
                shipping_detail=ship["detail"], to=email,
                pay_by_check=check_account)
+    # STORE CREDIT (William 2026-08-02): open credit rides this invoice as
+    # a credit line after tariff and lowers the Square amount; rows flip
+    # only after the send lands.
+    credit_used, credit_ids = 0.0, []
+    try:
+        from store_credits import apply_credit_to_totals
+        _od = dict(order)
+        _od["shipping_result"] = out["totals"]
+        grand, credit_used, credit_ids = apply_credit_to_totals(_od, grand)
+        out["totals"] = _od["shipping_result"]
+        if credit_used:
+            out["store_credit_applied"] = credit_used
+    except Exception as e:
+        print(f"[AUTO-INVOICE] store-credit lookup failed {order_id}: {e}")
     if dry_run:
         out.update(status="dry_run")
         return out
@@ -252,6 +266,12 @@ def run_auto_invoice(order_id: str, triggered_by: str = "new_order",
                             f"send failed — {res.get('error')}"
                             + (f" (link {link['url']} already exists; "
                                f"reuse it)" if link else ""))
+    if credit_used and credit_ids:
+        try:
+            from store_credits import mark_credits_applied
+            mark_credits_applied(credit_ids, order_id, credit_used)
+        except Exception as e:
+            print(f"[AUTO-INVOICE] store-credit apply-mark failed {order_id}: {e}")
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute("""UPDATE orders SET payment_link_sent = TRUE,

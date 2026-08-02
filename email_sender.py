@@ -399,6 +399,15 @@ def create_invoice_draft(
         "total_shipping": shipping,
         "grand_total": grand,
     }
+    # STORE CREDIT (William 2026-08-02): open credit rides the next invoice
+    # as a credit line after tariff and lowers the Square amount. Rows flip
+    # to applied only after the draft actually lands.
+    credit_used, credit_ids = 0.0, []
+    try:
+        from store_credits import apply_credit_to_totals
+        grand, credit_used, credit_ids = apply_credit_to_totals(order_data, grand)
+    except Exception as e:
+        print(f"[EMAIL] store-credit lookup failed for {order_id}: {e}")
     link_info = None
     link_error = None
     if not (square_link or "").strip() and auto_link:
@@ -487,6 +496,13 @@ def create_invoice_draft(
             draft_id = json.loads(response.read().decode()).get("id")
     except urllib.error.HTTPError as e:
         return {"success": False, "error": f"Gmail API {e.code}: {e.read().decode()[:300]}"}
+
+    if credit_used and credit_ids:
+        try:
+            from store_credits import mark_credits_applied
+            mark_credits_applied(credit_ids, order_id, credit_used)
+        except Exception as e:
+            print(f"[EMAIL] store-credit apply-mark failed for {order_id}: {e}")
 
     _log_email_event(order_id=order_id, template_id="payment_link",
                      to_email=to_email, subject=subject, message_id=draft_id,

@@ -171,6 +171,12 @@ def warehouse_set_date(token: str, pickup_date_str: str) -> dict:
         except ValueError:
             return {"success": False, "error": f"Invalid date format: {pickup_date_str}"}
 
+        # SAME-DAY LAW (William 2026-08-02): the pickup date is the day the
+        # warehouse's word arrives — a past (or backdated) date becomes today
+        today = date.today()
+        if pickup_date < today:
+            pickup_date = today
+
         shipment_id = shipment.get("shipment_id")
         order_id = shipment.get("order_id")
 
@@ -218,6 +224,19 @@ def process_bol_and_pickup(token: str, pickup_time_str: str, close_time_str: str
         shipment_id = shipment["shipment_id"]
         order_id = shipment["order_id"]
 
+        # 2-HOUR LAW (William 2026-08-02): the requested ready time must sit
+        # at least 2 hours before the dock closes — R+L needs a real window.
+        window_note = None
+        try:
+            _r = datetime.strptime(pickup_time_str.strip(), "%H:%M")
+            _c = datetime.strptime(close_time_str.strip(), "%H:%M")
+            if (_c - _r) < timedelta(hours=2):
+                pickup_time_str = (_c - timedelta(hours=2)).strftime("%H:%M")
+                window_note = (f"ready time moved to {pickup_time_str} — "
+                               f"2-hours-before-close law")
+        except Exception:
+            pass
+
         try:
             with get_db() as conn:
                 with conn.cursor() as cur:
@@ -255,6 +274,7 @@ def process_bol_and_pickup(token: str, pickup_time_str: str, close_time_str: str
             "shipment_id": shipment_id,
             "pickup_time": pickup_time_str,
             "close_time": close_time_str,
+            "window_note": window_note,
         })
 
         shipment = get_shipment_by_token(token)
@@ -601,12 +621,77 @@ def _watch_alert_once(order_id: str, key: str) -> bool:
         return False
 
 
-def check_transit_stalls(stall_hours: int = 72) -> dict:
-    """Wave 3 build I (2026-08-02): the blind window between first scan and
-    the Delivered notice gets a watchman. Every cron beat fingerprints each
-    moving shipment's trace events; a fingerprint that hasn't changed in
-    stall_hours (and isn't delivered) = STUCK AT A TERMINAL -> one alarm
-    per stuck-state. The clock only advances when R+L shows movement."""
+def _terminal_ask(order_id: str, pro: str, data: dict, age_h: float) -> dict:
+    """William 2026-08-02: a stalled shipment gets an EMAIL TO THE TERMINAL
+    asking what the issue is. Chain: (1) an email address anywhere in the
+    tracing data; (2) online lookup of R+L's terminal directory; (3) no
+    address found -> the ask goes to William instead."""
+    import re as _re
+    import urllib.request as _url
+    email_re = _re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+")
+    found = None
+    try:  # 1: the tracing payload itself
+        hits = email_re.findall(json.dumps(data, default=str))
+        found = next((h for h in hits if "rlc" in h.lower()
+                      or "rlcarriers" in h.lower()), None)
+    except Exception:
+        pass
+    if not found:
+        try:  # 2: online lookup — R+L service center directory
+            city = ""
+            for k in ("DestinationServiceCenter", "OriginServiceCenter",
+                      "ServiceCenter"):
+                v = data.get(k)
+                if isinstance(v, dict):
+                    city = v.get("City") or v.get("city") or ""
+                elif isinstance(v, str):
+                    city = v
+                if city:
+                    break
+            req = _url.Request(
+                "https://www.rlcarriers.com/company/shipping-network",
+                headers={"User-Agent": "Mozilla/5.0"})
+            page = _url.urlopen(req, timeout=15).read().decode(
+                "utf-8", errors="replace")
+            hits = email_re.findall(page)
+            if city:
+                pos = page.lower().find(city.lower())
+                if pos >= 0:
+                    near = email_re.findall(page[max(0, pos - 2000):pos + 2000])
+                    hits = near or hits
+            found = next((h for h in hits if "rlc" in h.lower()
+                          or "rlcarriers" in h.lower()), None)
+        except Exception as e:
+            print(f"[TRANSIT] terminal lookup failed {order_id}: {e}")
+    from supplier_orders import _send_email
+    body = (f"<p>Hey There,</p>"
+            f"<p>Our shipment PRO <strong>{pro}</strong> has shown no "
+            f"movement for {int(age_h)} business hours. Can you tell us "
+            f"what the holdup is and when it will move?</p>"
+            f"<p>Thank you,<br>--<br>William Prince<br>"
+            f"Cabinets For Contractors<br>(770) 990-4885</p>")
+    if found:
+        res = _send_email(order_id, found,
+                          f"PRO {pro} - shipment status inquiry",
+                          body, triggered_by="transit_terminal_ask")
+        return {"asked": found, "send": res}
+    # 3: nothing found -> the ask lands with William
+    res = _send_email(order_id, CFC_INTERNAL_EMAIL,
+                      f"NO TERMINAL ADDRESS FOUND - order #{order_id} "
+                      f"PRO {pro} stalled - call R+L",
+                      f"<p>The robot could not find a terminal email for "
+                      f"PRO {pro} (order #{order_id}) — data and directory "
+                      f"both came up empty. Call R+L with the PRO.</p>",
+                      triggered_by="transit_terminal_ask")
+    return {"asked": None, "fallback_to_william": True, "send": res}
+
+
+def check_transit_stalls(stall_hours: int = 8) -> dict:
+    """Wave 3 build I, re-cut 2026-08-02 (William): the stall clock runs on
+    BUSINESS HOURS — 8 business hours without a new scan while undelivered
+    = stuck at a terminal -> one alarm per stuck-state + an email to the
+    terminal asking what the issue is. The clock only advances when R+L
+    shows movement."""
     import hashlib as _hashlib
     out = {"watched": 0, "stalled_alerts": 0, "errors": []}
     try:
@@ -670,24 +755,28 @@ def check_transit_stalls(stall_hours: int = 72) -> dict:
                                                "status": status})))
                         conn.commit()
                         continue
-            import datetime as _dt
-            age_h = ((_dt.datetime.now(_dt.timezone.utc) - old_at)
-                     .total_seconds() / 3600) if old_at else 0
+            from oos_detect import business_hours_between
+            age_h = business_hours_between(old_at) if old_at else 0
             if age_h >= stall_hours and _watch_alert_once(
                     oid, f"stalled:{oid}:{fp}"):
                 from supplier_orders import _send_email
                 _send_email(
                     oid, CFC_INTERNAL_EMAIL,
                     f"SHIPMENT STALLED - order #{oid} - no R+L movement "
-                    f"in {int(age_h)}h",
+                    f"in {int(age_h)} business hours",
                     f"<p>Order #{oid} (PRO {pro}) has shown NO new R+L scan "
-                    f"for {int(age_h)} hours and is not delivered — likely "
-                    f"stuck at a terminal (missed sort window / cross-dock "
-                    f"hold). Current status: {status or 'unknown'}, "
-                    f"{len(events)} scans on record. Call R+L with the PRO."
-                    f"</p>",
+                    f"for {int(age_h)} business hours and is not delivered — "
+                    f"likely stuck at a terminal (missed sort window / "
+                    f"cross-dock hold). Current status: "
+                    f"{status or 'unknown'}, {len(events)} scans on record. "
+                    f"The robot is asking the terminal directly.</p>",
                     triggered_by="transit_watch")
                 out["stalled_alerts"] += 1
+                try:
+                    out.setdefault("terminal_asks", []).append(
+                        _terminal_ask(oid, pro, data, age_h))
+                except Exception as e:
+                    out["errors"].append(f"terminal ask {oid}: {e}")
         except Exception as e:
             out["errors"].append(f"{oid}: {e}")
     return out
@@ -956,6 +1045,33 @@ def _fire_bol(shipment: dict, pickup_date_str: Optional[str]) -> dict:
         weight = int(float(shipment.get("weight") or 200))
         is_residential = bool(shipment.get("is_residential", True))
 
+        # SUPPLIER-SENT DIMS OVERRIDE (William 2026-08-02, both halves
+        # ruling): pallet data the WAREHOUSE stated beats our computed
+        # numbers on the BOL. Set via POST /supplier-orders/{id}/dims.
+        pieces = 1
+        try:
+            with get_db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""ALTER TABLE order_shipments
+                                   ADD COLUMN IF NOT EXISTS dims_override TEXT""")
+                    conn.commit()
+                    cur.execute("""SELECT dims_override FROM order_shipments
+                                   WHERE shipment_id = %s""",
+                                (shipment.get("shipment_id"),))
+                    row = cur.fetchone()
+            if row and row[0]:
+                _pallets = (json.loads(row[0]) or {}).get("pallets") or []
+                if _pallets:
+                    _w = sum(float(p.get("weight") or 0) for p in _pallets)
+                    if _w > 0:
+                        weight = int(_w)
+                    pieces = len(_pallets)
+                    print(f"[BOL] dims override in effect for "
+                          f"{shipment.get('shipment_id')}: {pieces} pallets, "
+                          f"{weight} lbs (warehouse-stated)")
+        except Exception as e:
+            print(f"[BOL] dims override read failed: {e}")
+
         quote_number = (
             shipment.get("quote_number") or
             shipment.get("rl_quote_number") or
@@ -978,7 +1094,7 @@ def _fire_bol(shipment: dict, pickup_date_str: Optional[str]) -> dict:
             "weight_lbs": weight,
             "is_residential": is_residential,
             "order_id": shipment["order_id"],
-            "pieces": 1,
+            "pieces": pieces,
             "description": "RTA Cabinetry",
             "pickup_date": pickup_date_str,
             "special_instructions": f"CFC Order #{shipment['order_id']}",

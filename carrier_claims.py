@@ -143,6 +143,23 @@ def open_carrier_claim(request_id: int, amount: float,
                     "mime": p["mime"] or "image/jpeg"}
                    for i, p in enumerate(photos) if p.get("content")]
 
+    # ⚖️ WILLIAM'S WINDOWS SUPERSEDE THE CARRIER'S (2026-08-02, from his
+    # own policy page): damage = 5 BUSINESS DAYS, missing items = 2 WEEKS,
+    # concealed damage = 1 MONTH — all from delivery. The carrier's 9-month
+    # limit is only the absolute backstop.
+    window_days, window_label = 30, "concealed damage — 1 month"
+    try:
+        issue_types = " ".join(
+            str(ln.get("issue", ln.get("issue_type", "")))
+            for ln in (lines or []))
+        bol_noted = str(req.get("bol_noted") or "").lower()
+        if "freight_damage_bol" in issue_types or bol_noted in ("yes", "true"):
+            window_days, window_label = 7, "damage — 5 business days"
+        elif "missing" in issue_types:
+            window_days, window_label = 14, "missing items — 2 weeks"
+    except Exception:
+        pass
+
     from email_sender import create_gmail_draft
     draft = create_gmail_draft(
         RL_CLAIMS_EMAIL,
@@ -160,12 +177,13 @@ def open_carrier_claim(request_id: int, amount: float,
                      deadline, draft_id, note)
                 VALUES (%s, %s, %s, %s, %s,
                         CASE WHEN %s::date IS NOT NULL
-                             THEN %s::date + INTERVAL '270 days' END,
+                             THEN %s::date + (%s || ' days')::interval END,
                         %s, %s)
                 RETURNING id, deadline
             """, (order_id, request_id, pro or None, amount,
-                  delivered, delivered, delivered,
-                  draft.get("draft_id"), note or None))
+                  delivered, delivered, delivered, int(window_days),
+                  draft.get("draft_id"),
+                  (f"window: {window_label}. " + (note or "")).strip()))
             cid, deadline = cur.fetchone()
             cur.execute("""
                 INSERT INTO order_events (order_id, event_type, event_data, source)
@@ -268,18 +286,23 @@ def check_claim_clocks() -> Dict:
             for c in claims:
                 out["checked"] += 1
                 cid, oid = c["id"], str(c["order_id"])
-                # unfiled and inside 30 days of the deadline
+                # unfiled and the window is closing (William's windows are
+                # SHORT — the alarm rings at 2 days out and again when past)
                 if c["status"] == "draft" and c["deadline"]:
                     days = (c["deadline"] - __import__("datetime").date.today()).days
-                    if days <= 30 and _clock_alert_once(conn, oid,
-                                                        f"deadline30:{cid}"):
+                    key = (f"overdue:{cid}" if days < 0
+                           else f"deadline2:{cid}" if days <= 2 else None)
+                    if key and _clock_alert_once(conn, oid, key):
+                        when = (f"is {abs(days)} days PAST"
+                                if days < 0 else f"is {days} days away")
                         _send_email(oid, INTERNAL_ALERT_EMAIL,
-                                    f"CLAIM DEADLINE - {days} DAYS LEFT - "
-                                    f"order #{oid} claim #{cid}",
+                                    f"CLAIM DEADLINE - order #{oid} "
+                                    f"claim #{cid} - {when}",
                                     f"<p>The freight claim for order #{oid} is "
-                                    f"STILL A DRAFT and the 9-month filing "
-                                    f"deadline is {c['deadline']} — "
-                                    f"{days} days away. Send the filing.</p>",
+                                    f"STILL A DRAFT and its filing window "
+                                    f"({(c.get('note') or '').split('.')[0]}) "
+                                    f"{when} ({c['deadline']}). Send the "
+                                    f"filing NOW.</p>",
                                     triggered_by="carrier_claim_clock")
                         out["alarms"] += 1
                 # filed but silent for 30+ days

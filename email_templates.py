@@ -409,6 +409,16 @@ def _render_payment_link(order: Dict) -> str:
     grand_total = float(sr.get("grand_total",
                         round(total_items + tariff_amount + total_shipping, 2)))
     ship_label = (order.get("shipping_label") or "Shipping").strip()
+    # STORE CREDIT line (William 2026-08-02): rides after tariff when set
+    store_credit = float(sr.get("store_credit_amount", 0) or 0)
+    credit_row = ""
+    if store_credit > 0:
+        credit_row = (
+            f'<tr><td colspan="2"></td>'
+            f'<td style="padding:6px;text-align:right;color:#1a7a3a">'
+            f'Store Credit Applied</td>'
+            f'<td style="padding:6px;text-align:right;color:#1a7a3a">'
+            f'-${store_credit:,.2f}</td></tr>')
 
     street = order.get("street") or ""
     street2 = order.get("street2") or ""
@@ -511,6 +521,7 @@ Please send your check for the Grand Total per our usual arrangement, and reply 
 <tfoot>
 <tr><td colspan="2"></td><td style="padding:6px;text-align:right">Subtotal (in-stock)</td><td style="padding:6px;text-align:right">${total_items:,.2f}</td></tr>
 <tr><td colspan="2"></td><td style="padding:6px;text-align:right">Tariff Surcharge ({int(tariff_rate * 100)}%)</td><td style="padding:6px;text-align:right">${tariff_amount:,.2f}</td></tr>
+{credit_row}
 <tr><td colspan="2"></td><td style="padding:6px;text-align:right">{ship_label}</td><td style="padding:6px;text-align:right">${total_shipping:,.2f}</td></tr>
 <tr><td colspan="2"></td><td style="padding:6px;text-align:right;font-weight:700">Grand Total</td><td style="padding:6px;text-align:right;font-weight:700">${grand_total:,.2f}</td></tr>
 </tfoot></table>

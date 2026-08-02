@@ -608,17 +608,29 @@ def _apply_verdict(order_id: str, supplier: str, verdict_ok: bool,
             if res.get("success"):
                 _mark_alert_sent(order_id, supplier, pair_hash)
 
-    if supplier == "GHI":
-        # GHI's channel is a HUMAN reply to their "review and approve" email:
-        # the robot writes the approval draft (clean or conditional) and
-        # notifies us — no auto revision request goes to GHI (draft-first law,
-        # William 2026-07-18).
+    # ⚖️ 2026-08-02 (William: "the 7/18 draft ruling is stale"): GHI's
+    # approval-draft special path RETIRED — GHI rides the same auto
+    # revision-request flow as every other supplier. On a CLEAN verify the
+    # robot still sends GHI the approval reply (their process asks for one),
+    # but automatically, from orders@, no draft step.
+    if supplier == "GHI" and verdict_ok:
         try:
-            from ghi_inbox import create_approval_draft
-            create_approval_draft(order_id, doc_ref, report, message_id,
-                                  clean=verdict_ok)
+            supplier_email = (SUPPLIER_INFO.get("GHI") or {}).get("email", "")
+            if supplier_email:
+                _send_email(
+                    order_id, supplier_email,
+                    f"Re: PO {order_id}",
+                    f"<div style='font-family:Arial,sans-serif;font-size:14px;'>"
+                    f"<p>Hey There,</p>"
+                    f"<p>{doc_ref or 'Your sales order'} for our PO "
+                    f"{order_id} checks out line for line — approved for "
+                    f"processing. Please let us know when it's ready to ship "
+                    f"and we will send a BOL.</p>"
+                    f"<p>Thank you,<br>--<br>William Prince<br>"
+                    f"Cabinets For Contractors<br>(770) 990-4885</p></div>",
+                    triggered_by="ghi_auto_approval")
         except Exception as e:
-            print(f"[VERIFY] GHI approval draft error: {e}")
+            print(f"[VERIFY] GHI auto-approval error: {e}")
         return status
 
     if verdict_ok:
