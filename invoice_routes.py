@@ -249,7 +249,9 @@ SUPPLIER_FULL_ADDRESSES = {
 
 OWN_EMAILS = {"cabinetsforcontractors@gmail.com", "orders@cabinetsforcontractors.com"}
 OWN_EMAIL_NEVER = {"cfcinvoices42@gmail.com", "cabinetrydistribution@gmail.com", "lovetoucheskitchen@gmail.com"}
-OWN_EMAIL_PATTERNS = ["cabinetsforcontractors.net", "4wprince", "cabinetcloudai"]
+# 4wprince removed 2026-08-02: William's personal address = the test
+# customer, never a CFC box
+OWN_EMAIL_PATTERNS = ["cabinetsforcontractors.net", "cabinetcloudai"]
 
 
 def _identify_supplier(sender: str) -> Optional[str]:

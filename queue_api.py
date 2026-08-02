@@ -73,12 +73,13 @@ _NOISE_SENDER_RE = re.compile(
     r"ifttt\.com|cloudhq\.net|randstadusa\.com|@eq\.intuit\.com|"
     r"emails\.dlcabinetry\.com", re.I)
 
-# OUR boxes — an inbox row from ourselves (robot alerts, William's own
-# forwards from his personal gmail) is not someone waiting on a reply.
+# OUR boxes — an inbox row from ourselves (robot alerts) is not someone
+# waiting on a reply. 4wprince@gmail.com is NOT ours (William 2026-08-02:
+# his personal address, cast as the test customer — customer mail must
+# make NEEDS REPLY cards).
 _OUR_ADDR_RE = re.compile(
     r"orders@cabinetsforcontractors\.com|cabinetsforcontractors@gmail\.com|"
-    r"wpjob1@gmail\.com|contact@allprocabinetsandflooring\.com|"
-    r"4wprince@gmail\.com", re.I)
+    r"wpjob1@gmail\.com|contact@allprocabinetsandflooring\.com", re.I)
 
 # Supplier-reference shapes: bare numbers (ROC order 41258, SO 139967,
 # doc refs like 000041258) and carrier PRO numbers (IAH3136257).

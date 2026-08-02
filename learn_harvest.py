@@ -46,10 +46,11 @@ harvest_router = APIRouter(tags=["learning"])
 _OID_RE = re.compile(r"\b(5\d{3})\b")
 
 # addresses that count as "us" — a reply TO these is not a counterparty pair
+# (4wprince@gmail.com removed 2026-08-02: William's personal address, the
+# test customer — not a CFC box)
 _OUR_RE = re.compile(
     r"orders@cabinetsforcontractors\.com|cabinetsforcontractors@gmail\.com|"
-    r"wpjob1@gmail\.com|contact@allprocabinetsandflooring\.com|"
-    r"4wprince@gmail\.com", re.I)
+    r"wpjob1@gmail\.com|contact@allprocabinetsandflooring\.com", re.I)
 
 
 # =============================================================================

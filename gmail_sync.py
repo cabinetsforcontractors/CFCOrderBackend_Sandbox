@@ -220,9 +220,11 @@ def is_customer_email(email_from: str, email_to: str) -> str:
     Determine if this is a customer-related email (to or from customer).
     Returns 'from_customer', 'to_customer', or 'internal'.
     
-    CFC emails: cabinetsforcontractors, william, 4wprince
+    CFC emails: cabinetsforcontractors, william
+    4wprince@gmail.com is William's PERSONAL address — NOT a CFC box
+    (William 2026-08-02: he is the test customer from it).
     """
-    cfc_patterns = ['cabinetsforcontractors', 'william', '4wprince', 'team@cabinetcloudai', 'wpjob1']
+    cfc_patterns = ['cabinetsforcontractors', 'william', 'team@cabinetcloudai', 'wpjob1']
     
     from_lower = (email_from or '').lower()
     to_lower = (email_to or '').lower()
