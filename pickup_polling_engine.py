@@ -411,7 +411,13 @@ def check_pickup_confirmations() -> dict:
                     FROM order_shipments s
                     WHERE s.pickup_type = 'warehouse_pickup'
                       AND s.pickup_ready_date IS NOT NULL
-                      AND s.pickup_ready_date <= CURRENT_DATE
+                      -- TZ ruling (William 2026-08-02): judge the ready
+                      -- date on WAREHOUSE local time. Pacific is the
+                      -- westernmost warehouse clock, so this is never
+                      -- early for anyone (a FL warehouse's ask lands a
+                      -- few hours later, never before their day passed)
+                      AND s.pickup_ready_date <=
+                          (NOW() AT TIME ZONE 'America/Los_Angeles')::date
                       AND s.pickup_confirm_poll_sent_at IS NULL
                       AND (s.customer_pickup_confirmed = FALSE OR s.customer_pickup_confirmed IS NULL)
                     ORDER BY s.pickup_ready_date ASC

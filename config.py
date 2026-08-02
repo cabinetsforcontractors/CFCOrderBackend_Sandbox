@@ -160,6 +160,51 @@ WAREHOUSE_ZIPS = {
 OVERSIZED_KEYWORDS = ['OVEN', 'PANTRY', '96"', '96*', 'X96', '96X', '96H', '96 H']
 
 # =============================================================================
+# WAREHOUSE LOCAL TIME (William 2026-08-02: "the times reflect the local
+# time of the warehouse, not the time zone I am in — just because the
+# pickup window is closed in GA doesn't mean it's closed in TX or CA").
+# Zones derived from each warehouse's address above. Every clock that
+# judges a warehouse's day (same-day pickup, business-hour nudges) runs
+# on the WAREHOUSE'S clock via warehouse_now()/warehouse_tz().
+# =============================================================================
+
+WAREHOUSE_TIMEZONES = {
+    'LI':                     'America/New_York',   # Interlachen FL
+    'DL':                     'America/New_York',   # Jacksonville FL
+    'ROC':                    'America/New_York',   # Norcross GA
+    'GHI':                    'America/New_York',   # Palmetto FL
+    'Go Bravura':             'America/Chicago',    # Houston TX
+    'Love-Milestone':         'America/New_York',   # Orlando FL
+    'Cabinet & Stone':        'America/Chicago',    # Houston TX
+    'Cabinet & Stone CA':     'America/Los_Angeles',  # Pico Rivera CA
+    'DuraStone':              'America/Chicago',    # Houston TX
+    'L&C Cabinetry':          'America/New_York',   # Virginia Beach VA
+    'Linda':                  'America/New_York',   # Bremen GA
+    # full-name aliases (some rows carry the long name)
+    'Cabinetry Distribution': 'America/New_York',
+    'DL Cabinetry':           'America/New_York',
+    'ROC Cabinetry':          'America/New_York',
+    'GHI Cabinets':           'America/New_York',
+    'Dealer Cabinetry':       'America/New_York',
+}
+
+
+def warehouse_tz(warehouse: str) -> str:
+    """The warehouse's IANA zone; Eastern when unknown."""
+    return WAREHOUSE_TIMEZONES.get((warehouse or "").strip(),
+                                   'America/New_York')
+
+
+def warehouse_now(warehouse: str):
+    """Right now on the WAREHOUSE'S wall clock."""
+    from datetime import datetime, timezone
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo(warehouse_tz(warehouse)))
+    except Exception:
+        return datetime.now(timezone.utc)
+
+# =============================================================================
 # COMMERCIAL ADDRESS OVERRIDES (William 2026-07-30)
 # Addresses that ALWAYS quote commercial no matter what Smarty or a carrier
 # classifier says. 561 Keuka Rd = LI's warehouse dock in Interlachen — the

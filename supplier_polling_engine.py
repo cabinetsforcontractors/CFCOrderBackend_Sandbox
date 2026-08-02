@@ -172,8 +172,11 @@ def warehouse_set_date(token: str, pickup_date_str: str) -> dict:
             return {"success": False, "error": f"Invalid date format: {pickup_date_str}"}
 
         # SAME-DAY LAW (William 2026-08-02): the pickup date is the day the
-        # warehouse's word arrives — a past (or backdated) date becomes today
-        today = date.today()
+        # warehouse's word arrives — a past (or backdated) date becomes
+        # today ON THE WAREHOUSE'S CLOCK (his TZ ruling: a GA evening is
+        # still afternoon in TX/CA — never the server's or his own zone)
+        from config import warehouse_now
+        today = warehouse_now(shipment.get("warehouse")).date()
         if pickup_date < today:
             pickup_date = today
 

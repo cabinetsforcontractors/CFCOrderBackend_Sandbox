@@ -52,14 +52,16 @@ _QUOTE_CUT_RE = re.compile(
 _PO_CODE_RE = re.compile(r"\bPO\s+\d{4,5}-([A-Z]{2,4})\b", re.I)
 
 
-def business_hours_between(start, end=None) -> float:
-    """Elapsed BUSINESS hours between two datetimes — Mon-Fri, 8am-6pm
-    Eastern (William's clock rulings ride this: stock-check nudges 4h/8h,
-    stall alarm 8h)."""
+def business_hours_between(start, end=None,
+                           tz_name: str = "America/New_York") -> float:
+    """Elapsed BUSINESS hours between two datetimes — Mon-Fri, 8am-6pm in
+    tz_name. William's TZ ruling 2026-08-02: clocks that judge a
+    WAREHOUSE'S day pass that warehouse's zone (config.warehouse_tz) — a
+    GA evening is still business hours in TX or CA."""
     import datetime as _dt
     try:
         from zoneinfo import ZoneInfo
-        tz = ZoneInfo("America/New_York")
+        tz = ZoneInfo(tz_name)
     except Exception:
         tz = _dt.timezone.utc
     if start is None:
@@ -272,7 +274,9 @@ def check_stock_check_clocks() -> Dict:
                                 conn.commit()
                             out["healed"] += 1
                             continue
-                bh = business_hours_between(sent_at)
+                # the clock runs on the WAREHOUSE'S zone (TZ ruling 8/2)
+                from config import warehouse_tz
+                bh = business_hours_between(sent_at, tz_name=warehouse_tz(wh))
                 headers = json.loads(headers_json or "{}") or None
                 from substitutions import _send_guarded_email
                 if bh >= 8 and n2 is None:
