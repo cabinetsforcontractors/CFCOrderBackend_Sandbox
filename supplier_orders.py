@@ -109,6 +109,9 @@ SUPPLIER_DOOR_INFO = {
     ("GHI", "SNS"):            {"door_name": "Sonona Sand",      "presku": "SNS"},
     ("GHI", "SNW"):            {"door_name": "Sonona Wheat",     "presku": "SNW"},
     ("Love-Milestone", "SB"):  {"door_name": "Sage Breeze",      "presku": "SB"},
+    # William ruling 2026-08-02: Milestone calls NJGR "Sage Breeze" too
+    # (settles the 7/3-map conflict; unblocks 5747-class POs)
+    ("Love-Milestone", "NJGR"): {"door_name": "Sage Breeze"},
     # ------------------------------------------------------------------
     # WAVE 2 build E (William 2026-08-02): the full live-door roster from
     # REVISED WAREHOUSE MAP.csv (Desktop SOT, 93 doors) — supplier's own

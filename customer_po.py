@@ -36,8 +36,10 @@ CUSTOMER_PO_SENDERS = {
     "nationwidecustomhomes.com": "Nationwide",
 }
 
-# (customer, their prefix) -> our prefix. BLK->NBLK pending William's
-# confirm; every mapped SKU is validated against rta_products anyway.
+# (customer, their prefix) -> our prefix. BLK->NBLK CONFIRMED by William
+# 2026-08-02: NBLK = LI's line, Li calls it "black shaker"; BLK is UFP's
+# own notation, not a CFC prefix. Every mapped SKU is still validated
+# against rta_products.
 CUSTOMER_SKU_PREFIX_MAP = {
     ("UFP", "BLK"): "NBLK",
 }

@@ -16,9 +16,9 @@ watched the clock — now:
     the claim still unfiled -> alarm; filed with no movement for 30 days
     -> follow-up nudge. Each alarm fires once (event-deduped).
 
-RL_CLAIMS_EMAIL env = the carrier claims box (default
-cargoclaims@rlcarriers.com — CONFIRM with R+L before the first real
-filing; in the test lane the allowlist redirects it anyway).
+RL_CLAIMS_EMAIL env = the carrier claims box. William ruling 2026-08-02:
+cargoclaims@rlc.com (rlc.com is R+L's corporate domain). In the test
+lane the allowlist redirects it anyway.
 """
 
 import json
@@ -29,8 +29,9 @@ from db_helpers import get_db, get_order_by_id
 
 INTERNAL_ALERT_EMAIL = os.environ.get(
     "WAREHOUSE_NOTIFICATION_EMAIL", "orders@cabinetsforcontractors.com").strip()
+# William ruling 2026-08-02: R+L claims box = cargoclaims@rlc.com
 RL_CLAIMS_EMAIL = os.environ.get("RL_CLAIMS_EMAIL",
-                                 "cargoclaims@rlcarriers.com").strip()
+                                 "cargoclaims@rlc.com").strip()
 
 CLAIM_STATUSES = ("draft", "filed", "acknowledged", "paid", "denied", "closed")
 MAX_PHOTOS = 6
