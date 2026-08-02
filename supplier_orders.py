@@ -872,7 +872,35 @@ def run_dispatch_on_payment(order_id: str, order_data: dict,
     enabled = (os.environ.get("AUTO_DISPATCH_ENABLED", "false").lower() == "true"
                and not force_gate)
     order_total = float(order_data.get("order_total") or 0)
-    exact = order_total > 0 and abs(float(payment_amount) - order_total) <= 1.00
+    # GATE FIX (William 2026-08-02, the 5751 lesson): the customer pays the
+    # INVOICE — goods + tariff + shipping — never the bare goods total, so
+    # comparing against order_total alone can NEVER pass on a real order
+    # (8% tariff breaks the $1 window past ~$12.50 of goods). The gate now
+    # compares against every invoiced ask on record (Square link amounts,
+    # auto-invoice grands) with the goods total kept as the last fallback.
+    expected = [order_total] if order_total > 0 else []
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""SELECT event_data FROM order_events
+                               WHERE order_id = %s
+                                 AND event_type IN ('payment_link_created',
+                                                    'invoice_auto_sent',
+                                                    'invoice_drafted')
+                               ORDER BY created_at DESC LIMIT 6""",
+                            (order_id,))
+                for (data,) in cur.fetchall():
+                    try:
+                        d = json.loads(data) if isinstance(data, str) \
+                            else (data or {})
+                        amt = d.get("amount") or d.get("grand_total")
+                        if amt:
+                            expected.append(float(amt))
+                    except Exception:
+                        continue
+    except Exception as e:
+        print(f"[DISPATCH-GATE] expected-amount lookup failed {order_id}: {e}")
+    exact = any(abs(float(payment_amount) - e) <= 1.00 for e in expected)
 
     if enabled and exact:
         return dispatch_order(order_id, auto_send=True, dry_run=False,
@@ -903,13 +931,12 @@ def run_dispatch_on_payment(order_id: str, order_data: dict,
         att = art.get("attachment")
         if att:
             attachments.append(att)
+        # CLEAN FORMAT (William 2026-08-02: "remove all this shit... leave"
+        # the PO itself) — supplier name + the PO body, nothing else
         sections.append(
-            f"<h3 style='margin:18px 0 4px'>{wh}</h3>"
-            f"<p style='margin:2px 0;color:#555'>Would go to: <strong>{dest}</strong>"
-            f" &middot; subject: <strong>{art['subject']}</strong>"
-            + (f" &middot; units: {art['units']}" if art.get("units") is not None else "")
-            + (f" &middot; attachment: {att['filename']} (attached below)" if att else "")
-            + "</p>"
+            f"<h3 style='margin:18px 0 4px'>{wh}"
+            + (f" &middot; {att['filename']} attached" if att else "")
+            + f"</h3>"
             f"<div style='border:1px solid #ccc;border-radius:6px;padding:10px;"
             f"margin:6px 0;background:#fafafa'>{art['html']}</div>")
     for wh, wres in (preview.get("warehouses") or {}).items():
@@ -919,15 +946,16 @@ def run_dispatch_on_payment(order_id: str, order_data: dict,
                 f"<p style='margin:2px 0;color:#b00'>BLOCKED — "
                 f"{wres.get('note', 'see dispatch note')}</p>")
 
+    # SUBJECT + BODY per William 2026-08-02: "New Order #.." subject, the
+    # robot-speak preamble gone, the POs themselves front and center. One
+    # muted line survives at the bottom — it's the only reason this email
+    # exists instead of a real dispatch.
     _send_email(order_id, INTERNAL_ALERT_EMAIL,
-                f"CONFIRM DISPATCH: order #{order_id} paid - supplier orders ready",
-                f"<p>Payment received for order <strong>#{order_id}</strong> "
-                f"(${payment_amount:,.2f}).</p>"
-                f"<p><strong>Not auto-dispatched:</strong> {reason}</p>"
-                f"<p>Below is EXACTLY what auto-dispatch would have sent "
-                f"(same builders, same data). To fire it for real: "
-                f"POST /supplier-orders/dispatch/{order_id}</p>"
-                + "".join(sections),
+                f"New Order #{order_id} - Cabinets For Contractors",
+                "".join(sections)
+                + f"<p style='color:#888;font-size:12px;margin-top:14px'>"
+                f"Held: {reason}. Fire for real: "
+                f"POST /supplier-orders/dispatch/{order_id}</p>",
                 triggered_by="payment_trigger_gated",
                 attachment=attachments or None)
     return {"status": "gated", "reason": reason, "preview": preview}

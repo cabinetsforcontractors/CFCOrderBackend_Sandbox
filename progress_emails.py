@@ -669,13 +669,22 @@ def run_progress_sweep(dry_run: bool = False, days_back: int = 7) -> Dict:
                         "arrive": f"{w['arrive_min']}..{w['arrive_max']}"}
                 if not dry_run:
                     body = _post_payment_body(o, w)
-                    draft_id = _make_draft(
-                        o["email"],
+                    # ⚖️ 2026-08-02 (William, the 5751/5752 drafts: "these
+                    # should fire automatically after payment is made") —
+                    # the post-payment progress email SENDS itself. Payment
+                    # is the customer's own act; this is the receipt of it.
+                    # Delay/tracking/delivered stay draft-first.
+                    from supplier_orders import _send_email
+                    send = _send_email(
+                        o["order_id"], o["email"],
                         f"Order #{o['order_id']} - payment received, "
                         f"here's what happens next",
-                        body)
-                    if not draft_id:
-                        raise RuntimeError("draft create failed")
+                        f"<div style='font-family:Arial,sans-serif;"
+                        f"font-size:14px;white-space:pre-wrap;'>{body}</div>",
+                        triggered_by="progress_post_payment")
+                    if not send.get("success"):
+                        raise RuntimeError(
+                            f"post-payment send failed: {send.get('error')}")
                     with conn.cursor() as cur:
                         cur.execute("""
                             INSERT INTO progress_promises
@@ -687,8 +696,7 @@ def run_progress_sweep(dry_run: bool = False, days_back: int = 7) -> Dict:
                               w["method"], w["ship_by"], w["arrive_min"],
                               w["arrive_max"]))
                         conn.commit()
-                    _notify(o["order_id"], "post-payment", body)
-                    item["draft_id"] = draft_id
+                    item["sent_to"] = send.get("to")
                 out["post_payment"].append(item)
             except Exception as e:
                 try:

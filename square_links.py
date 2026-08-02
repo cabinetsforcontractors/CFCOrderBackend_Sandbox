@@ -49,8 +49,12 @@ def _square_request(method: str, path: str, body: Optional[Dict] = None) -> Dict
 def create_payment_link(order_id: str, amount: float,
                         name: str = "", note: str = "") -> Dict:
     """Create a quick-pay link for an order. Returns {'url','id','long_url'}.
-    name defaults to 'INV-{order_id}' — NEVER change that shape without
-    checking square_sync's matcher (it is the payment-matching key)."""
+    NAME LAW (William 2026-08-02, the '#B84z' receipt lesson): the customer's
+    Square receipt shows the ITEM name — it must carry the ORDER NUMBER in
+    plain words. Square's receipt SUBJECT (#B84z) is Square's own receipt
+    code and cannot be changed. The name keeps 'INV-{id}' inside it AND the
+    5xxx number, so square_sync's regex matcher (\\b5\\d{3,4}\\b over the
+    description) still matches — checked 2026-08-02."""
     location_id = os.environ.get("SQUARE_LOCATION_ID", "").strip()
     if not location_id:
         raise Exception("SQUARE_LOCATION_ID not configured")
@@ -60,7 +64,8 @@ def create_payment_link(order_id: str, amount: float,
     body = {
         "idempotency_key": str(uuid.uuid4()),
         "quick_pay": {
-            "name": (name or f"INV-{order_id}")[:255],
+            "name": (name or f"Order #{order_id} - Cabinets For "
+                             f"Contractors (INV-{order_id})")[:255],
             "price_money": {"amount": cents, "currency": "USD"},
             "location_id": location_id,
         },
