@@ -21,7 +21,7 @@ Design (the 5696 lesson baked in — no more "BFH 30" mystery SKUs):
 import json
 import os
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse, Response
 
 from auth import require_admin
@@ -599,3 +599,47 @@ def order_claims_link(order_id: str, _: bool = Depends(require_admin)):
         raise HTTPException(status_code=404, detail="Order not found")
     return {"status": "ok", "order_id": order_id,
             "url": claims_form_url(order_id)}
+
+
+# =============================================================================
+# CARRIER CLAIMS (Wave 3 build J, William 2026-08-02 - the 9-month clock)
+# =============================================================================
+
+@claims_router.post("/claims/requests/{request_id}/carrier-claim")
+def carrier_claim_open(request_id: int, payload: dict = Body(...),
+                       _: bool = Depends(require_admin)):
+    """Build the freight-claim packet (photos attached) as a Gmail DRAFT to
+    the carrier claims box + open the deadline-tracked claim row [admin].
+    {amount (required), pro_number?, note?}. DRAFT-FIRST: William sends."""
+    from carrier_claims import open_carrier_claim
+    try:
+        amount = float(payload.get("amount") or 0)
+        if amount <= 0:
+            return {"status": "error", "message": "amount required"}
+        return open_carrier_claim(
+            request_id, amount,
+            pro_number=str(payload.get("pro_number") or ""),
+            note=str(payload.get("note") or ""))
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@claims_router.get("/claims/carrier")
+def carrier_claims_list(_: bool = Depends(require_admin)):
+    """All carrier claims with days_to_deadline [admin]."""
+    from carrier_claims import list_carrier_claims
+    return list_carrier_claims()
+
+
+@claims_router.post("/claims/carrier/{claim_id}/status")
+def carrier_claim_status(claim_id: int, payload: dict = Body(...),
+                         _: bool = Depends(require_admin)):
+    """Walk a claim: {status: draft|filed|acknowledged|paid|denied|closed,
+    note?} [admin]. 'filed' stamps filed_at and starts the follow-up clock."""
+    from carrier_claims import set_claim_status
+    try:
+        return set_claim_status(claim_id,
+                                str(payload.get("status") or ""),
+                                note=str(payload.get("note") or ""))
+    except Exception as e:
+        return {"status": "error", "message": str(e)}

@@ -215,21 +215,18 @@ def door_info_for(supplier: str, items: List[Dict]) -> Optional[Dict]:
 
 
 # COLOR LAW (William 2026-08-02, Wave 2 build E — the "what color?" loop
-# killer: Milestone asked twice in one week because accessory lines carry
-# no color). Accessory keywords mark lines a supplier cannot color-infer
-# from the SKU alone.
-_ACCESSORY_RE = re.compile(
-    r"SKIN|PANEL|FILLER|MOLD|CROWN|TOE\s?KICK|\bTK\d|TOUCH.?UP|SCRIBE|BATTEN",
-    re.I)
+# killer: Milestone asked on 5738 AND 5747 in one week, on cabinets and
+# accessories alike, because PO tokens like "B18" carry no color at all).
 
 
 def door_color_lines(warehouse: str, items: List[Dict]) -> Dict:
     """Name every door color on the PO in the SUPPLIER'S language.
     Returns {"html", "blocked"}: html = the color statement for the PO
-    body; blocked = accessory-like lines whose door has no supplier name
-    on file (sending would just earn a "what color?" reply — the row
-    blocks instead). Sample-door lines carry their color in the token
-    and are skipped."""
+    body; blocked = lines whose door has no supplier name on file —
+    sending those would just earn a "what color?" reply (the 5747
+    lesson: the question comes on cabinets too, not only accessories),
+    so the row blocks instead. Sample-door lines carry their color in
+    the token and are skipped."""
     counts: Dict[str, int] = {}
     blocked = []
     for i in items:
@@ -242,7 +239,7 @@ def door_color_lines(warehouse: str, items: List[Dict]) -> Dict:
         info = SUPPLIER_DOOR_INFO.get((warehouse, pre))
         if info:
             counts[info["door_name"]] = counts.get(info["door_name"], 0) + qty
-        elif _ACCESSORY_RE.search(i.get("product_name") or ""):
+        else:
             blocked.append(sku or tok)
     if blocked:
         return {"html": "", "blocked": blocked}
@@ -567,7 +564,7 @@ def build_po_email(order_id: str, warehouse: str, wdata: Dict) -> Dict:
     # a "what color?" reply.
     color = door_color_lines(warehouse, items)
     if color["blocked"]:
-        return {"error": (f"DOOR COLOR UNKNOWN for accessory line(s): "
+        return {"error": (f"DOOR COLOR UNKNOWN for line(s): "
                           f"{', '.join(color['blocked'][:6])} — the supplier "
                           f"would ask 'what color?'. Add the (supplier, "
                           f"prefix) pair to SUPPLIER_DOOR_INFO.")}

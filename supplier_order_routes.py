@@ -47,7 +47,7 @@ transitions record supplier_leg_status:{wh} fires.
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends, File, UploadFile
+from fastapi import APIRouter, Body, Depends, File, UploadFile
 from pydantic import BaseModel
 
 from auth import require_admin
@@ -264,6 +264,82 @@ def attachment_text(message_id: str, _: bool = Depends(require_admin)):
             entry["error"] = str(e)
         out["attachments"].append(entry)
     return out
+
+
+# =============================================================================
+# SHORTAGES (Wave 3 build H, William 2026-08-02 — the 5696 class gets a home)
+# =============================================================================
+
+@supplier_order_router.post("/shortages")
+def shortage_record(payload: dict = Body(...),
+                    _: bool = Depends(require_admin)):
+    """Record a short-ship: {order_id, warehouse, items:[{sku,qty}],
+    source_location?, supplier_ref?, eta?(YYYY-MM-DD), note?,
+    customer_draft?(default true)} [admin]. Alerts + optional DRAFT-FIRST
+    customer note; stays on GET /shortages until resolved."""
+    from shortages import record_shortage
+    try:
+        return record_shortage(
+            str(payload.get("order_id") or ""),
+            str(payload.get("warehouse") or ""),
+            payload.get("items") or [],
+            source_location=str(payload.get("source_location") or ""),
+            supplier_ref=str(payload.get("supplier_ref") or ""),
+            eta=str(payload.get("eta") or ""),
+            note=str(payload.get("note") or ""),
+            customer_draft=bool(payload.get("customer_draft", True)))
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@supplier_order_router.post("/shortages/{shortage_id}/update")
+def shortage_update(shortage_id: int, payload: dict = Body(...),
+                    _: bool = Depends(require_admin)):
+    """Walk a shortage: {status?(open|makeup_arranged|resolved), eta?,
+    supplier_ref?, source_location?, note?} [admin]."""
+    from shortages import update_shortage
+    try:
+        return update_shortage(
+            shortage_id,
+            status=str(payload.get("status") or ""),
+            eta=str(payload.get("eta") or ""),
+            supplier_ref=str(payload.get("supplier_ref") or ""),
+            source_location=str(payload.get("source_location") or ""),
+            note=str(payload.get("note") or ""))
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@supplier_order_router.get("/shortages")
+def shortage_list(include_resolved: bool = False,
+                  _: bool = Depends(require_admin)):
+    """Open shortages (add ?include_resolved=true for history) [admin]."""
+    from shortages import list_shortages
+    return list_shortages(include_resolved=include_resolved)
+
+
+# =============================================================================
+# CUSTOMER POs (Wave 3 build K, William 2026-08-02 — UFP/Nationwide PDFs)
+# =============================================================================
+
+@supplier_order_router.post("/customer-po/prepare/{message_id}")
+def customer_po_prepare(message_id: str, _: bool = Depends(require_admin)):
+    """Parse a customer-PO email into the would-be B2BWave order for
+    review [admin]. v1 is REVIEW-ONLY — nothing is created."""
+    from customer_po import prepare_from_message
+    try:
+        return prepare_from_message(message_id)
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@supplier_order_router.post("/customer-po/scan")
+def customer_po_scan(hours_back: int = 48, dry_run: bool = True,
+                     _: bool = Depends(require_admin)):
+    """Run the customer-PO detector on demand [admin]. dry_run=true
+    (default) lists detections without recording or alerting."""
+    from customer_po import process_customer_po_scan
+    return process_customer_po_scan(hours_back=hours_back, dry_run=dry_run)
 
 
 @supplier_order_router.post("/supplier-orders/verify-email/{message_id}")

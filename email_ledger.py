@@ -505,6 +505,22 @@ def run_ledger_cycle(hours_back: int = 24) -> Dict:
         oos = process_oos_scan(hours_back=hours_back)
     except Exception as e:
         oos = {"errors": [str(e)]}
+    # CUSTOMER-PO READER (Wave 3 build K): UFP/Nationwide PO PDFs get
+    # parsed + one bell; review-only, never creates an order
+    try:
+        from customer_po import process_customer_po_scan
+        cpo = process_customer_po_scan(hours_back=hours_back)
+        if cpo.get("errors"):
+            print(f"[LEDGER] customer-po errors: {cpo['errors']}")
+    except Exception as e:
+        print(f"[LEDGER] customer-po scan failed: {e}")
+    # CARRIER CLAIM CLOCKS (Wave 3 build J): deadline-30 and quiet-30
+    # alarms, each fires exactly once per condition
+    try:
+        from carrier_claims import check_claim_clocks
+        check_claim_clocks()
+    except Exception as e:
+        print(f"[LEDGER] claim clocks failed: {e}")
     # NEW-CUSTOMER NOTIFICATION GUARD (at most once per NOTIF_GUARD_HOURS,
     # one API list call — the guard itself decides whether it's due)
     try:

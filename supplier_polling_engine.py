@@ -453,7 +453,8 @@ def check_tracking_updates() -> dict:
                            o.tracking,
                            o.pro_number,
                            COALESCE(o.tracking, o.pro_number) AS effective_pro,
-                           o.customer_name, o.company_name, o.email, o.order_total
+                           o.customer_name, o.company_name, o.email, o.order_total,
+                           o.bol_sent_at
                     FROM orders o
                     WHERE o.bol_sent = TRUE
                       AND (o.is_complete = FALSE OR o.is_complete IS NULL)
@@ -503,6 +504,34 @@ def check_tracking_updates() -> dict:
             if not is_moving:
                 summary["not_yet_moving"] += 1
                 print(f"[TRACKING] PRO {pro_number} — order {order_id} — not yet moving (status: {status_code})")
+                # MISSED-PICKUP WATCH (Wave 3 build I, 2026-08-02): BOL sent
+                # 48h+ ago and R+L still shows nothing = the pallet is likely
+                # sitting on the warehouse dock. One alarm per order.
+                try:
+                    bol_at = order.get("bol_sent_at")
+                    if bol_at is not None:
+                        import datetime as _dt
+                        age_h = (_dt.datetime.now(_dt.timezone.utc)
+                                 - bol_at).total_seconds() / 3600
+                        if age_h >= 48 and _watch_alert_once(
+                                order_id, f"pickup_missed:{order_id}"):
+                            from supplier_orders import _send_email
+                            _send_email(
+                                order_id, CFC_INTERNAL_EMAIL,
+                                f"PICKUP MISSED? order #{order_id} - BOL sent "
+                                f"{int(age_h)}h ago, no R+L scan",
+                                f"<p>The BOL for order #{order_id} (PRO "
+                                f"{pro_number}) went out {int(age_h)} hours "
+                                f"ago and R+L still shows NO pickup scan — "
+                                f"the freight may be sitting on the "
+                                f"warehouse dock. Call R+L / the warehouse."
+                                f"</p>",
+                                triggered_by="transit_watch")
+                            summary.setdefault("pickup_missed_alerts", 0)
+                            summary["pickup_missed_alerts"] = \
+                                summary["pickup_missed_alerts"] + 1
+                except Exception as _e:
+                    print(f"[TRACKING] missed-pickup check failed {order_id}: {_e}")
                 continue
 
             # Freight is moving — write PRO to orders.tracking, then send tracking email
@@ -539,7 +568,129 @@ def check_tracking_updates() -> dict:
         except Exception as e:
             summary["errors"].append({"order_id": order_id, "pro": pro_number, "error": str(e)})
 
+    # IN-TRANSIT STALL WATCH (Wave 3 build I) rides the same cron beat
+    try:
+        summary["transit_stalls"] = check_transit_stalls()
+    except Exception as e:
+        summary["errors"].append({"phase": "transit_stalls", "error": str(e)})
+
     return summary
+
+
+def _watch_alert_once(order_id: str, key: str) -> bool:
+    """True when this transit-watch alarm key has NOT fired yet (records it).
+    One alarm per condition — the watch never nags twice on the same state."""
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""SELECT 1 FROM order_events
+                               WHERE event_type = 'transit_watch_alerted'
+                                 AND event_data::text ILIKE %s LIMIT 1""",
+                            (f"%{key}%",))
+                if cur.fetchone():
+                    return False
+                cur.execute("""
+                    INSERT INTO order_events
+                        (order_id, event_type, event_data, source)
+                    VALUES (%s, 'transit_watch_alerted', %s, 'transit_watch')
+                """, (order_id, json.dumps({"key": key})))
+                conn.commit()
+        return True
+    except Exception as e:
+        print(f"[TRANSIT] alert-once failed {order_id}/{key}: {e}")
+        return False
+
+
+def check_transit_stalls(stall_hours: int = 72) -> dict:
+    """Wave 3 build I (2026-08-02): the blind window between first scan and
+    the Delivered notice gets a watchman. Every cron beat fingerprints each
+    moving shipment's trace events; a fingerprint that hasn't changed in
+    stall_hours (and isn't delivered) = STUCK AT A TERMINAL -> one alarm
+    per stuck-state. The clock only advances when R+L shows movement."""
+    import hashlib as _hashlib
+    out = {"watched": 0, "stalled_alerts": 0, "errors": []}
+    try:
+        with get_db() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT o.order_id,
+                           COALESCE(o.tracking, o.pro_number) AS pro
+                    FROM orders o
+                    WHERE (o.is_complete = FALSE OR o.is_complete IS NULL)
+                      AND COALESCE(o.tracking, o.pro_number) IS NOT NULL
+                      AND COALESCE(o.tracking, o.pro_number) != ''
+                      AND EXISTS (SELECT 1 FROM order_events e
+                                  WHERE e.order_id = o.order_id
+                                    AND e.event_type = 'tracking_email_sent')
+                    LIMIT 40
+                """)
+                orders = [dict(r) for r in cur.fetchall()]
+    except Exception as e:
+        out["errors"].append(str(e))
+        return out
+    from rl_carriers import track_shipment
+    for o in orders:
+        oid, pro = o["order_id"], o["pro"]
+        try:
+            data = track_shipment(pro)
+        except Exception:
+            continue  # tracing hiccup — next beat retries
+        out["watched"] += 1
+        status = (data.get("StatusCode") or data.get("Status") or "").upper()
+        if status in ("DEL", "DELIVERED"):
+            continue
+        events = data.get("TraceEvents") or data.get("Events") or []
+        fp = _hashlib.sha1(json.dumps(events, sort_keys=True,
+                                      default=str).encode()).hexdigest()[:16]
+        try:
+            with get_db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT event_data, created_at FROM order_events
+                        WHERE order_id = %s AND event_type = 'transit_watch'
+                        ORDER BY created_at DESC LIMIT 1
+                    """, (oid,))
+                    row = cur.fetchone()
+                    old_fp, old_at = None, None
+                    if row:
+                        try:
+                            old_fp = (json.loads(row[0])
+                                      if isinstance(row[0], str)
+                                      else row[0]).get("fp")
+                        except Exception:
+                            old_fp = None
+                        old_at = row[1]
+                    if fp != old_fp:
+                        cur.execute("""
+                            INSERT INTO order_events
+                                (order_id, event_type, event_data, source)
+                            VALUES (%s, 'transit_watch', %s, 'transit_watch')
+                        """, (oid, json.dumps({"fp": fp, "pro": pro,
+                                               "scans": len(events),
+                                               "status": status})))
+                        conn.commit()
+                        continue
+            import datetime as _dt
+            age_h = ((_dt.datetime.now(_dt.timezone.utc) - old_at)
+                     .total_seconds() / 3600) if old_at else 0
+            if age_h >= stall_hours and _watch_alert_once(
+                    oid, f"stalled:{oid}:{fp}"):
+                from supplier_orders import _send_email
+                _send_email(
+                    oid, CFC_INTERNAL_EMAIL,
+                    f"SHIPMENT STALLED - order #{oid} - no R+L movement "
+                    f"in {int(age_h)}h",
+                    f"<p>Order #{oid} (PRO {pro}) has shown NO new R+L scan "
+                    f"for {int(age_h)} hours and is not delivered — likely "
+                    f"stuck at a terminal (missed sort window / cross-dock "
+                    f"hold). Current status: {status or 'unknown'}, "
+                    f"{len(events)} scans on record. Call R+L with the PRO."
+                    f"</p>",
+                    triggered_by="transit_watch")
+                out["stalled_alerts"] += 1
+        except Exception as e:
+            out["errors"].append(f"{oid}: {e}")
+    return out
 
 
 def _send_customer_tracking_email(

@@ -43,9 +43,11 @@ NEG_RE = re.compile(
     r"(?:out of stock|out-of-stock|backordered|back-?ordered|discontinued|"
     r"sold out)\b", re.I)
 
+# any line ending in "wrote:" is a quote header — AOL's runs 150+ chars on
+# one line (the Bill Rhoads self-quote leak, caught by the 8/2 dry run)
 _QUOTE_CUT_RE = re.compile(
-    r"^On .{5,120} wrote:|^-{2,}\s*Original Message|^-{2,}\s*Forwarded message",
-    re.I | re.M)
+    r"^[^\n]{0,300}\bwrote:\s*$|^-{2,}\s*Original Message|"
+    r"^-{2,}\s*Forwarded message", re.I | re.M)
 
 _PO_CODE_RE = re.compile(r"\bPO\s+\d{4,5}-([A-Z]{2,4})\b", re.I)
 
