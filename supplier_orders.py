@@ -109,6 +109,67 @@ SUPPLIER_DOOR_INFO = {
     ("GHI", "SNS"):            {"door_name": "Sonona Sand",      "presku": "SNS"},
     ("GHI", "SNW"):            {"door_name": "Sonona Wheat",     "presku": "SNW"},
     ("Love-Milestone", "SB"):  {"door_name": "Sage Breeze",      "presku": "SB"},
+    # ------------------------------------------------------------------
+    # WAVE 2 build E (William 2026-08-02): the full live-door roster from
+    # REVISED WAREHOUSE MAP.csv (Desktop SOT, 93 doors) — supplier's own
+    # door name per (supplier, our prefix). presku only where the map
+    # carries the supplier's code. Rows above this line are older William
+    # rulings and stay exactly as ruled.
+    ("LI", "WSP"):             {"door_name": "White Shaker"},
+    ("LI", "GSP"):             {"door_name": "Grey Shaker (Aspen Shaker)"},
+    ("LI", "NBLK"):            {"door_name": "Shaker Black"},
+    ("ROC", "BC"):             {"door_name": "Classic Chocolate"},
+    ("ROC", "PG"):             {"door_name": "Pebble Gray"},
+    ("ROC", "EJG"):            {"door_name": "Newtown Jade Green"},
+    ("ROC", "NJGR"):           {"door_name": "Shaker Jade Green"},
+    ("ROC", "EGD"):            {"door_name": "Escada Vintage Wood"},
+    ("ROC", "EMB"):            {"door_name": "Escada Midnight Blue"},
+    ("ROC", "DCW"):            {"door_name": "Inset Origami White"},
+    ("ROC", "DCT"):            {"door_name": "Inset Truffle Brown"},
+    ("ROC", "DCH"):            {"door_name": "Inset Hazelnut Oak"},
+    ("Love-Milestone", "EWT"): {"door_name": "Slim Dove White"},
+    ("Love-Milestone", "RMW"): {"door_name": "Aspen White"},
+    ("Love-Milestone", "EWD"): {"door_name": "Double Dove White"},
+    ("Love-Milestone", "EDG"): {"door_name": "Double Smokey Ash"},
+    ("Love-Milestone", "DG"):  {"door_name": "Smokey Ash"},
+    ("Love-Milestone", "LGS"): {"door_name": "Aston Green"},
+    ("Love-Milestone", "LGSS"): {"door_name": "Slim Aston Green"},
+    ("Love-Milestone", "RND"): {"door_name": "Aspen Charcoal Gray"},
+    ("Love-Milestone", "HSS"): {"door_name": "Treasure Chest"},
+    ("Love-Milestone", "SWO"): {"door_name": "Slim White Oak"},
+    ("Love-Milestone", "NBL"): {"door_name": "Navy Blue"},
+    ("Love-Milestone", "FW"):  {"door_name": "Floral White"},
+    ("Love-Milestone", "FG"):  {"door_name": "Floral Grey"},
+    ("Love-Milestone", "FE"):  {"door_name": "Floral Espresso"},
+    ("DuraStone", "SIV"):      {"door_name": "Shaker Ivory"},
+    ("DuraStone", "NBDS"):     {"door_name": "Blue Shaker"},
+    ("DuraStone", "CMEN"):     {"door_name": "Midnight Espresso"},
+    ("Cabinet & Stone", "ESCS"): {"door_name": "Shaker Espresso"},
+    ("Cabinet & Stone", "SGCS"): {"door_name": "Grey Shaker"},
+    ("Cabinet & Stone", "CAWN"): {"door_name": "Antique White"},
+    ("Cabinet & Stone", "MSCS"): {"door_name": "Maple Shaker"},
+    ("Cabinet & Stone", "BSN"): {"door_name": "Ocean Blue (Natural Box)"},
+    ("Cabinet & Stone", "WOCS"): {"door_name": "Urban Oak (Natural Box)"},
+    ("L&C Cabinetry", "BG"):   {"door_name": "D5-Cyberspace"},
+    ("L&C Cabinetry", "EDD"):  {"door_name": "G4-Grey"},
+    ("L&C Cabinetry", "RBLS"): {"door_name": "G8-Royal Blue"},
+    ("L&C Cabinetry", "SHLS"): {"door_name": "D-3-Shallow Green"},
+    ("L&C Cabinetry", "MGLS"): {"door_name": "D5-DoveGrey"},
+    ("DL", "DC"):              {"door_name": "Dark Caramel",      "presku": "DC"},
+    ("DL", "PW"):              {"door_name": "Pearl White",       "presku": "PW"},
+    ("DL", "SAVNG"):           {"door_name": "No Glaze"},
+    ("DL", "UFS"):             {"door_name": "Versa (unfinished)"},
+    ("DL", "EBK"):             {"door_name": "Slim Shaker Ebony", "presku": "SSE"},
+    ("Go Bravura", "MW"):      {"door_name": "Prime Frost White (Matte)", "presku": "PFWM"},
+    ("Go Bravura", "HGW"):     {"door_name": "Prime Mist White High Gloss", "presku": "PMG"},
+    ("Go Bravura", "HGG"):     {"door_name": "Prime Gris Brillo", "presku": "PGB"},
+    ("Go Bravura", "PJB"):     {"door_name": "Prime Magic Black", "presku": "PMB"},
+    ("Go Bravura", "NBG"):     {"door_name": "Genesis Weathered Oak", "presku": "GWO"},
+    ("Go Bravura", "NCC"):     {"door_name": "Genesis Sliced Oak", "presku": "GSSL"},
+    ("Go Bravura", "NDG"):     {"door_name": "Genesis Grey Oak",  "presku": "GSGO"},
+    ("Go Bravura", "UC"):      {"door_name": "Arcadia Rain Cherry", "presku": "AC"},
+    ("Go Bravura", "UW"):      {"door_name": "Arcadia Yellow Walnut", "presku": "AYW"},
+    ("Go Bravura", "WWA"):     {"door_name": "Artisan Golden Walnut", "presku": "AGW"},
 }
 
 # William's signature block for supplier-facing emails (his own GHI send,
@@ -151,6 +212,49 @@ def door_info_for(supplier: str, items: List[Dict]) -> Optional[Dict]:
         if info:
             return info
     return None
+
+
+# COLOR LAW (William 2026-08-02, Wave 2 build E — the "what color?" loop
+# killer: Milestone asked twice in one week because accessory lines carry
+# no color). Accessory keywords mark lines a supplier cannot color-infer
+# from the SKU alone.
+_ACCESSORY_RE = re.compile(
+    r"SKIN|PANEL|FILLER|MOLD|CROWN|TOE\s?KICK|\bTK\d|TOUCH.?UP|SCRIBE|BATTEN",
+    re.I)
+
+
+def door_color_lines(warehouse: str, items: List[Dict]) -> Dict:
+    """Name every door color on the PO in the SUPPLIER'S language.
+    Returns {"html", "blocked"}: html = the color statement for the PO
+    body; blocked = accessory-like lines whose door has no supplier name
+    on file (sending would just earn a "what color?" reply — the row
+    blocks instead). Sample-door lines carry their color in the token
+    and are skipped."""
+    counts: Dict[str, int] = {}
+    blocked = []
+    for i in items:
+        sku = (i.get("website_sku") or "")
+        tok = (i.get("supplier_sku") or "")
+        if "SAMPLE" in sku.upper() or "SAMPLE" in tok.upper():
+            continue
+        qty = int(float(i.get("quantity") or 0))
+        pre = sku.split("-")[0].upper()
+        info = SUPPLIER_DOOR_INFO.get((warehouse, pre))
+        if info:
+            counts[info["door_name"]] = counts.get(info["door_name"], 0) + qty
+        elif _ACCESSORY_RE.search(i.get("product_name") or ""):
+            blocked.append(sku or tok)
+    if blocked:
+        return {"html": "", "blocked": blocked}
+    if not counts:
+        return {"html": "", "blocked": []}
+    if len(counts) == 1:
+        html = (f"<p><strong>All items in "
+                f"{next(iter(counts))}.</strong></p>")
+    else:
+        parts = ", ".join(f"{n} ({u} pcs)" for n, u in sorted(counts.items()))
+        html = f"<p><strong>Colors: {parts}.</strong></p>"
+    return {"html": html, "blocked": []}
 
 
 # =============================================================================
@@ -452,12 +556,27 @@ def build_po_email(order_id: str, warehouse: str, wdata: Dict) -> Dict:
     items = wdata["items"]
     total_units = sum(int(i.get("quantity") or 0) for i in items)
     door = door_info_for(warehouse, items)
-    door_txt = f" ({door['door_name']}, {door['presku']})" if door else ""
+    if door and door.get("presku"):
+        door_txt = f" ({door['door_name']}, {door['presku']})"
+    elif door:
+        door_txt = f" ({door['door_name']})"
+    else:
+        door_txt = ""
+    # COLOR LAW (2026-08-02): the PO states every color; accessory lines
+    # with no supplier door name on file BLOCK the row instead of earning
+    # a "what color?" reply.
+    color = door_color_lines(warehouse, items)
+    if color["blocked"]:
+        return {"error": (f"DOOR COLOR UNKNOWN for accessory line(s): "
+                          f"{', '.join(color['blocked'][:6])} — the supplier "
+                          f"would ask 'what color?'. Add the (supplier, "
+                          f"prefix) pair to SUPPLIER_DOOR_INFO.")}
     html = (f"<div style='font-family:Arial,sans-serif;font-size:14px;'>"
             f"<p>{supplier_greeting(warehouse)}</p>"
             f"<p>Please process our order <strong>PO {order_id}</strong>:{door_txt}</p>"
             f"{_supplier_lines_table(items)}"
             f"<p><strong>Total Qty All SKUS: {total_units}</strong></p>"
+            f"{color['html']}"
             f"{STOCK_CHECK_ASK}"
             f"{SIGNATURE_HTML}</div>")
     return {"html": html, "attachment": None, "units": total_units,

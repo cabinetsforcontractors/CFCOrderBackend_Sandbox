@@ -497,6 +497,14 @@ def run_ledger_cycle(hours_back: int = 24) -> Dict:
         bill = process_bill2_reports(hours_back=hours_back)
     except Exception as e:
         bill = {"errors": [str(e)]}
+    # OUT-OF-STOCK DETECTOR (Wave 2 build D, William 2026-08-02):
+    # detect-only, idempotent per message — one bell per OOS reply
+    oos = {}
+    try:
+        from oos_detect import process_oos_scan
+        oos = process_oos_scan(hours_back=hours_back)
+    except Exception as e:
+        oos = {"errors": [str(e)]}
     # NEW-CUSTOMER NOTIFICATION GUARD (at most once per NOTIF_GUARD_HOURS,
     # one API list call — the guard itself decides whether it's due)
     try:
@@ -512,8 +520,11 @@ def run_ledger_cycle(hours_back: int = 24) -> Dict:
                              if rl.get(k)},
             "bill2": {k: bill.get(k) for k in ("audited", "already")
                       if bill.get(k)},
+            "oos": {k: oos.get(k) for k in ("alerted", "already")
+                    if oos.get(k)},
             "errors": (ing.get("errors") or []) + (app.get("errors") or [])
-                      + (rl.get("errors") or []) + (bill.get("errors") or [])}
+                      + (rl.get("errors") or []) + (bill.get("errors") or [])
+                      + (oos.get("errors") or [])}
 
 
 # pre-cutover name, kept so old callers/notes stay valid
@@ -565,6 +576,15 @@ def ledger_rl_delivered(hours_back: int = 48, dry_run: bool = True,
     (default) reports the decisions without stamping, drafting, or alerting."""
     from rl_delivered import process_rl_delivered
     return process_rl_delivered(hours_back=hours_back, dry_run=dry_run)
+
+
+@ledger_router.post("/ledger/oos-scan")
+def ledger_oos_scan(hours_back: int = 48, dry_run: bool = True,
+                    _: bool = Depends(require_admin)):
+    """Run the out-of-stock detector on demand [admin]. dry_run=true
+    (default) lists the hits without recording or alerting."""
+    from oos_detect import process_oos_scan
+    return process_oos_scan(hours_back=hours_back, dry_run=dry_run)
 
 
 @ledger_router.post("/b2bwave/notif-guard")

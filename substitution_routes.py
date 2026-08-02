@@ -104,6 +104,14 @@ class CounterApplyRequest(BaseModel):
     sku: Optional[str] = None
 
 
+class StockCheckRequest(BaseModel):
+    order_id: str
+    original_sku: str
+    substitute_sku: str
+    oos_message_id: Optional[str] = None
+    warehouse: Optional[str] = None
+
+
 @substitution_router.post("/substitutions/propose")
 def propose_substitution(req: ProposalRequest, _: bool = Depends(require_admin)):
     """Create + email a substitution proposal [admin]. The order is NOT
@@ -116,6 +124,23 @@ def propose_substitution(req: ProposalRequest, _: bool = Depends(require_admin))
                                             req.substitute_sku, req.reason,
                                             oos_message_id=req.oos_message_id,
                                             supersede=req.supersede)
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@substitution_router.post("/substitutions/stock-check")
+def stock_check(req: StockCheckRequest, _: bool = Depends(require_admin)):
+    """Ask the WAREHOUSE whether the substitute is in stock, threaded into
+    the out-of-stock conversation when oos_message_id is given [admin].
+    Warehouse-first law (William 2026-07-16 round 3, built 2026-08-02):
+    this fires ONE supplier email and records the ask — the proposal to
+    the customer stays a separate human step."""
+    from substitutions import send_stock_check
+    try:
+        return send_stock_check(req.order_id, req.original_sku,
+                                req.substitute_sku,
+                                oos_message_id=req.oos_message_id or "",
+                                warehouse=req.warehouse or "")
     except Exception as e:
         return {"status": "error", "message": str(e)}
 

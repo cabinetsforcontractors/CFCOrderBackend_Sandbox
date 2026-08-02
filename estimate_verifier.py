@@ -479,6 +479,27 @@ def _mark_alert_sent(order_id: str, supplier: str, report_hash: str):
         print(f"[VERIFY] failed to mark alert sent: {e}")
 
 
+def _norm_doc_ref(r: str) -> str:
+    """Leading-zeros-blind, case-blind doc-ref compare key."""
+    return (r or "").strip().upper().lstrip("0")
+
+
+def _subject_is_invoice(message_id: str) -> bool:
+    """One metadata call: does the triggering message call itself an
+    invoice? Errors read as 'no' — the stamp is a bonus, never a blocker."""
+    try:
+        from gmail_sync import gmail_api_request
+        meta = gmail_api_request(
+            f"messages/{message_id}",
+            {"format": "metadata", "metadataHeaders": "Subject"}) or {}
+        for h in (meta.get("payload", {}) or {}).get("headers", []):
+            if h["name"].lower() == "subject":
+                return "invoice" in (h["value"] or "").lower()
+    except Exception:
+        pass
+    return False
+
+
 def _apply_verdict(order_id: str, supplier: str, verdict_ok: bool,
                    doc_ref: str, report: Dict, message_id: str,
                    consensus: Dict = None) -> str:
@@ -486,11 +507,33 @@ def _apply_verdict(order_id: str, supplier: str, verdict_ok: bool,
     SUPPLIER a revision request (CC us) and start the escalation clock.
     GHI instead gets an approval REPLY DRAFT (draft-first, William 2026-07-18).
     verdict_ok is the CONSENSUS verdict (fallback law 2026-07-31); consensus
-    detail rides the fire."""
+    detail rides the fire.
+    WAVE 2 (2026-08-02): build F — a SECOND different doc ref on the same
+    PO+warehouse rings the DUPLICATE-ENTRY alarm (the S118998 both-stores
+    trap). Build G — a clean verify from an invoice-subject message on a row
+    already confirmed-or-later advances it to invoice_verified."""
     from config import SUPPLIER_INFO
     from supplier_orders import ensure_supplier_orders_table, _send_email
 
     status = "confirmed" if verdict_ok else "discrepancy"
+    prior_status = prior_ref = None
+    with get_db() as conn:
+        ensure_supplier_orders_table(conn)
+        with conn.cursor() as cur:
+            cur.execute("""SELECT status, supplier_doc_ref FROM supplier_orders
+                           WHERE order_id = %s AND warehouse = %s""",
+                        (order_id, supplier))
+            row = cur.fetchone()
+            if row:
+                prior_status, prior_ref = row[0], row[1]
+
+    dup_entry = bool(doc_ref and prior_ref
+                     and _norm_doc_ref(doc_ref) != _norm_doc_ref(prior_ref))
+    if verdict_ok and not dup_entry \
+            and prior_status in ("confirmed", "scheduled", "picked_up",
+                                 "delivered") \
+            and _subject_is_invoice(message_id):
+        status = "invoice_verified"
     cons_summary = None
     if consensus:
         cons_summary = {
@@ -537,6 +580,33 @@ def _apply_verdict(order_id: str, supplier: str, verdict_ok: bool,
                                       "unresolved_supplier_lines", "flags")},
             }, default=str)))
             conn.commit()
+
+    # DUPLICATE-ENTRY ALARM (build F): two different supplier documents for
+    # one PO+warehouse — the order may be entered TWICE at the supplier
+    # (S118998 was entered at both C&S stores and nearly double-shipped).
+    # Alarm once per ref pair; the verify itself proceeds normally.
+    if dup_entry:
+        pair_hash = hashlib.sha1(
+            f"dup:{order_id}:{supplier}:"
+            f"{':'.join(sorted([_norm_doc_ref(doc_ref), _norm_doc_ref(prior_ref)]))}"
+            .encode()).hexdigest()[:16]
+        if not _alert_already_sent(order_id, pair_hash):
+            res = _send_email(
+                order_id, INTERNAL_ALERT_EMAIL,
+                f"DUPLICATE ENTRY? two {supplier} documents for PO {order_id}",
+                f"<div style='font-family:Arial,sans-serif;font-size:14px;'>"
+                f"<p><strong>Two DIFFERENT {supplier} document numbers have now "
+                f"verified against PO {order_id}:</strong></p>"
+                f"<p>Already on file: <strong>{prior_ref}</strong><br>"
+                f"Just arrived: <strong>{doc_ref}</strong> "
+                f"(Gmail msg {message_id})</p>"
+                f"<p>The S118998 lesson: the same order can be entered at TWO "
+                f"supplier locations and both will ship. Confirm with "
+                f"{supplier} which document is real and kill the other.</p>"
+                f"</div>",
+                triggered_by="duplicate_entry_alarm")
+            if res.get("success"):
+                _mark_alert_sent(order_id, supplier, pair_hash)
 
     if supplier == "GHI":
         # GHI's channel is a HUMAN reply to their "review and approve" email:

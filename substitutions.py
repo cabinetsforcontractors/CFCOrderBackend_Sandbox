@@ -473,6 +473,96 @@ def _send_guarded_email(order_id: str, to_email: str, subject: str, html: str,
 
 
 # =============================================================================
+# STOCK CHECK (Wave 2 build D, William 2026-08-02 — the 7/16 round-3 ruling
+# finally built: ask the WAREHOUSE first whether the substitute is in stock,
+# THEN propose to the customer.)
+# =============================================================================
+
+def send_stock_check(order_id: str, original_sku: str, substitute_sku: str,
+                     oos_message_id: str = "", warehouse: str = "") -> Dict:
+    """Threaded ask to the supplier: 'is {substitute} in stock?'. Sends ONE
+    supplier email (allowlist-guarded), records a stock_check_sent event,
+    changes nothing else. The reply comes back as a normal board card —
+    a human reads it and fires the proposal."""
+    from config import SUPPLIER_INFO
+    from db_helpers import get_db
+
+    wh = (warehouse or "").strip()
+    if not wh:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""SELECT warehouse FROM supplier_orders
+                               WHERE order_id = %s""", (order_id,))
+                rows = [r[0] for r in cur.fetchall()]
+        if len(rows) == 1:
+            wh = rows[0]
+        else:
+            return {"status": "error",
+                    "message": (f"warehouse ambiguous for order {order_id} "
+                                f"({rows}) — pass warehouse explicitly")}
+    to_email = (SUPPLIER_INFO.get(wh) or {}).get("email", "")
+    if not to_email:
+        return {"status": "error", "message": f"no email for warehouse {wh}"}
+
+    thread_headers = None
+    subject = f"PO {order_id} - stock check before replacement"
+    if (oos_message_id or "").strip():
+        try:
+            from gmail_sync import gmail_api_request
+            meta = gmail_api_request(
+                f"messages/{oos_message_id}",
+                {"format": "metadata", "metadataHeaders": "Subject"}) or {}
+            meta2 = gmail_api_request(
+                f"messages/{oos_message_id}",
+                {"format": "metadata", "metadataHeaders": "Message-ID"}) or {}
+            headers = {}
+            for m in (meta, meta2):
+                for h in (m.get("payload", {}) or {}).get("headers", []):
+                    headers[h["name"].lower()] = h["value"]
+            orig_subject = headers.get("subject") or ""
+            if orig_subject:
+                subject = orig_subject if orig_subject.upper().startswith("RE") \
+                    else f"RE: {orig_subject}"
+            thread_headers = {"thread_id": meta.get("threadId"),
+                              "message_id": headers.get("message-id"),
+                              "subject": subject}
+        except Exception as e:
+            print(f"[STOCK-CHECK] thread lookup failed ({oos_message_id}): {e}")
+
+    from supplier_orders import SIGNATURE_HTML, supplier_greeting
+    html = (f"<div style='font-family:Arial,sans-serif;font-size:14px;'>"
+            f"<p>{supplier_greeting(wh)}</p>"
+            f"<p>Before we set up a replacement on <strong>PO {order_id}</strong>: "
+            f"is <strong>{substitute_sku}</strong> in stock?</p>"
+            f"<p>(It would replace {original_sku}.)</p>"
+            f"{SIGNATURE_HTML}</div>")
+    result = _send_guarded_email(order_id, to_email, subject, html,
+                                 triggered_by="stock_check",
+                                 thread_headers=thread_headers)
+    if result.get("success"):
+        try:
+            with get_db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO order_events
+                            (order_id, event_type, event_data, source)
+                        VALUES (%s, 'stock_check_sent', %s, 'substitutions')
+                    """, (order_id, json.dumps(
+                        {"warehouse": wh, "to": result.get("to"),
+                         "original_sku": original_sku,
+                         "substitute_sku": substitute_sku,
+                         "oos_message_id": oos_message_id or None,
+                         "message_id": result.get("message_id"),
+                         "threaded": bool(thread_headers)}, default=str)))
+                    conn.commit()
+        except Exception as e:
+            print(f"[STOCK-CHECK] event record failed: {e}")
+    return {"status": "ok" if result.get("success") else "error",
+            "warehouse": wh, "send": result, "subject": subject,
+            "threaded": bool(thread_headers)}
+
+
+# =============================================================================
 # CREATE PROPOSAL
 # =============================================================================
 
