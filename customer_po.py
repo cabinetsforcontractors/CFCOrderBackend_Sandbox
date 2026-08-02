@@ -259,16 +259,24 @@ def create_order_from_message(message_id: str, dry_run: bool = True) -> Dict:
     result = {"status": "ok" if verified else "needs_human",
               "http": st, "new_order_id": new_id, "verified": verified,
               "lines_sent": len(products)}
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                INSERT INTO order_events (order_id, event_type, event_data, source)
-                VALUES (%s, 'customer_po_order_created', %s, 'customer_po')
-            """, (str(new_id or ""), json.dumps(
-                {"message_id": message_id, "ufp_po": parsed.get("po_number"),
-                 "customer_id": cid, "lines": len(products),
-                 "verified": verified, "http": st}, default=str)))
-            conn.commit()
+    # order_id NULL when unknown — order_events has an FK to orders, and
+    # the new order may not be synced locally yet (the 8/2 500 lesson);
+    # defensive so a log failure can never mask a REAL created order
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO order_events (order_id, event_type, event_data, source)
+                    VALUES (NULL, 'customer_po_order_created', %s, 'customer_po')
+                """, (json.dumps(
+                    {"message_id": message_id,
+                     "ufp_po": parsed.get("po_number"),
+                     "new_order_id": new_id,
+                     "customer_id": cid, "lines": len(products),
+                     "verified": verified, "http": st}, default=str),))
+                conn.commit()
+    except Exception as e:
+        print(f"[CUSTOMER-PO] create event log failed: {e}")
     from supplier_orders import _send_email
     _send_email(str(new_id or ""), INTERNAL_ALERT_EMAIL,
                 f"CUSTOMER-PO ORDER {'CREATED' if verified else 'NEEDS A LOOK'}"

@@ -116,9 +116,11 @@ def run_monthly_rollup() -> dict:
                           f"({n} bills, {delivered_count} deliveries)",
                           html, triggered_by="freight_monthly")
         with conn.cursor() as cur:
+            # order_id NULL — order_events has an FK to orders; '' would
+            # throw, kill the stamp, and re-send this email every cycle
             cur.execute("""
                 INSERT INTO order_events (order_id, event_type, event_data, source)
-                VALUES ('', 'freight_monthly_rollup', %s, 'freight_monthly')
+                VALUES (NULL, 'freight_monthly_rollup', %s, 'freight_monthly')
             """, (json.dumps({"month": key, "bills": n,
                               "delivered": delivered_count,
                               "sent": res.get("success")}),))

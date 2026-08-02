@@ -397,9 +397,11 @@ def normalize_rta_supplier(from_name: str = "C&S",
                            WHERE supplier = %s{pf_sql}""",
                         _args([to_name, from_name]))
             renamed = cur.rowcount
+            # order_id NULL — order_events carries an FK to orders, so a
+            # system event must be NULL, never '' (the 8/2 500 lesson)
             cur.execute("""
                 INSERT INTO order_events (order_id, event_type, event_data, source)
-                VALUES ('', 'rta_supplier_normalized', %s, 'migration')
+                VALUES (NULL, 'rta_supplier_normalized', %s, 'migration')
             """, (json.dumps({"from": from_name, "to": to_name,
                               "prefixes": plist, "rows": renamed}),))
             conn.commit()
