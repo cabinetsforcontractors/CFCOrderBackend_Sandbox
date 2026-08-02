@@ -44,6 +44,14 @@ CUSTOMER_SKU_PREFIX_MAP = {
     ("UFP", "BLK"): "NBLK",
 }
 
+# B2BWave customer account per PO sender. 1397 = Nationwide Custom Homes
+# (Dominic, price list .3675-UFP) — VERIFIED in William's customer export
+# 2026-08-02. Env override wins.
+CUSTOMER_B2BWAVE_IDS = {
+    "UFP": int(os.environ.get("UFP_B2BWAVE_CUSTOMER_ID", "1397") or 1397),
+    "Nationwide": int(os.environ.get("UFP_B2BWAVE_CUSTOMER_ID", "1397") or 1397),
+}
+
 _ORDER_NO_RE = re.compile(r"Order No\.?:\s*\n?(\d+)")
 _CUSTPO_RE = re.compile(r"DropShip CustPO:\s*\n?([\w-]+)")
 _PROMISED_RE = re.compile(r"PROMISED ON[\s\S]{0,200}?(\d{1,2}/\d{1,2}/\d{4})")
@@ -177,6 +185,101 @@ def prepare_from_message(message_id: str) -> Dict:
             "armed": False,
             "note": "v1 is review-only; creating the B2BWave order stays a "
                     "human step"}
+
+
+def create_order_from_message(message_id: str, dry_run: bool = True) -> Dict:
+    """ARMED 2026-08-02 (William's word + customer id 1397 verified in his
+    export): create the real B2BWave order from a parsed customer PO.
+    Refuses while ANY line is unmatched (resolve those first — the
+    mismatch draft to the sender exists for exactly that). dry_run=true
+    (default) returns the exact payload; dry_run=false creates the order
+    and VERIFIES BY READBACK. Respects B2BWAVE_MUTATIONS_ENABLED."""
+    prepared = prepare_from_message(message_id)
+    if prepared.get("status") != "ok":
+        return prepared
+    doc = (prepared.get("documents") or [{}])[0]
+    parsed = doc.get("parsed") or {}
+    if doc.get("unmatched"):
+        return {"status": "error",
+                "message": (f"{len(doc['unmatched'])} line(s) unmatched — "
+                            f"resolve with the sender first (a draft is "
+                            f"waiting), then re-fire"),
+                "unmatched": doc["unmatched"]}
+    mapped = doc.get("mapped") or []
+    if not mapped:
+        return {"status": "error", "message": "no mapped lines"}
+
+    customer = "UFP"
+    cid = CUSTOMER_B2BWAVE_IDS.get(customer, 1397)
+    from substitutions import _b2b, fetch_b2b_order, fetch_b2b_product
+    products = []
+    missing = []
+    for m in mapped:
+        prod = fetch_b2b_product(m["our_sku"])
+        if not prod:
+            missing.append(m["our_sku"])
+            continue
+        products.append({"product_id": prod["id"], "quantity": m["qty"],
+                         "sku": m["our_sku"]})
+    if missing:
+        return {"status": "error",
+                "message": f"not on B2BWave: {', '.join(missing[:6])}"}
+
+    comments = (f"UFP PO {parsed.get('po_number')} / DropShip CustPO "
+                f"{parsed.get('dropship_custpo')} / promised "
+                f"{parsed.get('promised_on')} — entered by the robot from "
+                f"the emailed PO PDF")
+    payload = {"order": {
+        "customer_id": cid,
+        "comments": comments,
+        "prevent_emails": 1,
+        "order_products": [{"product_id": p["product_id"],
+                            "quantity": p["quantity"]} for p in products],
+    }}
+    if dry_run:
+        return {"status": "dry_run", "customer_id": cid,
+                "lines": len(products), "payload": payload}
+    if os.environ.get("B2BWAVE_MUTATIONS_ENABLED", "true").lower() == "false":
+        return {"status": "error",
+                "message": "B2BWAVE_MUTATIONS_ENABLED=false"}
+
+    st, resp = _b2b("POST", "orders", payload)
+    new_id = None
+    if isinstance(resp, dict):
+        new_id = (resp.get("id") or (resp.get("order") or {}).get("id"))
+    # VERIFY BY READBACK (the standing law): the created order must exist
+    # and carry the right line count
+    verified = False
+    if new_id:
+        check = fetch_b2b_order(str(new_id))
+        if check:
+            got = len((check.get("order_products") or
+                       check.get("products") or []))
+            verified = got == len(products)
+    result = {"status": "ok" if verified else "needs_human",
+              "http": st, "new_order_id": new_id, "verified": verified,
+              "lines_sent": len(products)}
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO order_events (order_id, event_type, event_data, source)
+                VALUES (%s, 'customer_po_order_created', %s, 'customer_po')
+            """, (str(new_id or ""), json.dumps(
+                {"message_id": message_id, "ufp_po": parsed.get("po_number"),
+                 "customer_id": cid, "lines": len(products),
+                 "verified": verified, "http": st}, default=str)))
+            conn.commit()
+    from supplier_orders import _send_email
+    _send_email(str(new_id or ""), INTERNAL_ALERT_EMAIL,
+                f"CUSTOMER-PO ORDER {'CREATED' if verified else 'NEEDS A LOOK'}"
+                f" - {customer} PO {parsed.get('po_number')} -> "
+                f"order #{new_id}",
+                f"<p>The robot entered {customer} PO "
+                f"{parsed.get('po_number')} on B2BWave as order "
+                f"#{new_id} ({len(products)} lines, customer {cid}). "
+                f"Readback verified: {verified}.</p>",
+                triggered_by="customer_po_create")
+    return result
 
 
 def process_customer_po_scan(hours_back: int = 48,

@@ -63,6 +63,13 @@ def ensure_daylight_shipments(conn):
                 active BOOLEAN DEFAULT TRUE
             )
         """)
+        # STALL LAYER columns (William 2026-08-02): in-transit polls every
+        # 4 business hours; a status unchanged 8 business hours = stalled
+        cur.execute("""ALTER TABLE daylight_shipments
+                       ADD COLUMN IF NOT EXISTS last_poll_at TIMESTAMPTZ""")
+        cur.execute("""ALTER TABLE daylight_shipments
+                       ADD COLUMN IF NOT EXISTS last_status_change_at
+                       TIMESTAMPTZ""")
         conn.commit()
 
 
@@ -217,8 +224,6 @@ def poll_daylight_shipments(out=None, force=False):
         out.setdefault(k, [])
 
     now = datetime.now(timezone.utc)
-    if not force and now.hour < POLL_START_UTC:
-        return out
     today = date.today()
 
     with get_db() as conn:
@@ -228,17 +233,32 @@ def poll_daylight_shipments(out=None, force=False):
                 SELECT * FROM daylight_shipments
                 WHERE active = TRUE
                   AND delivered_at IS NULL
-                  AND (%s OR last_poll_date IS NULL OR last_poll_date < %s)
                   AND registered_at > NOW() - (%s || ' days')::interval
                 LIMIT 25
-            """, (force, today, POLL_MAX_AGE_DAYS))
+            """, (POLL_MAX_AGE_DAYS,))
             rows = cur.fetchall()
 
         for s in rows:
             oid, pro = s["order_id"], s["probill"]
             try:
+                # CADENCE (William 2026-08-02): pre-pickup = once per UTC
+                # day, mornings (unchanged). IN TRANSIT (picked up, not
+                # delivered) = every 4 BUSINESS hours, so the 8-hour stall
+                # clock has teeth.
+                if not force:
+                    if s.get("picked_up_at"):
+                        from oos_detect import business_hours_between
+                        if s.get("last_poll_at") and business_hours_between(
+                                s["last_poll_at"]) < 4:
+                            continue
+                    else:
+                        if now.hour < POLL_START_UTC:
+                            continue
+                        if s.get("last_poll_date") == today:
+                            continue
                 with conn.cursor() as cur:
-                    cur.execute("""UPDATE daylight_shipments SET last_poll_date = %s
+                    cur.execute("""UPDATE daylight_shipments
+                                   SET last_poll_date = %s, last_poll_at = NOW()
                                    WHERE id = %s""", (today, s["id"]))
                     conn.commit()
 
@@ -267,14 +287,81 @@ def poll_daylight_shipments(out=None, force=False):
                                    WHERE id = %s""", (status, raw, s["id"]))
                     if not s.get("picked_up_at"):
                         cur.execute("""UPDATE daylight_shipments
-                                       SET picked_up_at = NOW() WHERE id = %s""",
+                                       SET picked_up_at = NOW(),
+                                           last_status_change_at = NOW()
+                                       WHERE id = %s""",
                                     (s["id"],))
                         _event(conn, oid, "daylight_picked_up",
                                {"probill": pro, "status": status[:200]})
                     elif status_changed:
+                        cur.execute("""UPDATE daylight_shipments
+                                       SET last_status_change_at = NOW()
+                                       WHERE id = %s""", (s["id"],))
                         _event(conn, oid, "daylight_status_update",
                                {"probill": pro, "status": status[:200]})
                     conn.commit()
+
+                # STALL ALARM (William 2026-08-02, same law as R+L): status
+                # unchanged 8 BUSINESS hours while in transit -> one alarm
+                # per stuck-state + the ask (Daylight CS box, else William)
+                try:
+                    if (s.get("picked_up_at") and not status_changed
+                            and s.get("last_status_change_at")):
+                        from oos_detect import business_hours_between
+                        stall_h = business_hours_between(
+                            s["last_status_change_at"])
+                        if stall_h >= 8:
+                            import hashlib as _hl
+                            fp = _hl.sha1((status or "").encode()) \
+                                .hexdigest()[:12]
+                            with conn.cursor() as cur:
+                                cur.execute(
+                                    """SELECT 1 FROM order_events
+                                       WHERE event_type = 'daylight_stall_alerted'
+                                         AND event_data::text ILIKE %s
+                                       LIMIT 1""", (f"%{pro}:{fp}%",))
+                                seen = cur.fetchone()
+                            if not seen:
+                                _event(conn, oid, "daylight_stall_alerted",
+                                       {"key": f"{pro}:{fp}",
+                                        "stall_hours": stall_h,
+                                        "status": (status or "")[:160]})
+                                conn.commit()
+                                import os as _os
+                                from supplier_orders import _send_email
+                                alert_to = _os.environ.get(
+                                    "WAREHOUSE_NOTIFICATION_EMAIL",
+                                    "orders@cabinetsforcontractors.com").strip()
+                                _send_email(
+                                    oid, alert_to,
+                                    f"DAYLIGHT SHIPMENT STALLED - order "
+                                    f"#{oid} - no movement "
+                                    f"{int(stall_h)} business hours",
+                                    f"<p>Daylight PRO {pro} (order #{oid}) "
+                                    f"has shown the same status for "
+                                    f"{int(stall_h)} business hours: "
+                                    f"'{(status or '')[:160]}'. The robot "
+                                    f"is asking Daylight.</p>",
+                                    triggered_by="daylight_stall")
+                                cs = _os.environ.get(
+                                    "DAYLIGHT_CS_EMAIL", "").strip()
+                                if cs:
+                                    _send_email(
+                                        oid, cs,
+                                        f"PRO {pro} - shipment status "
+                                        f"inquiry",
+                                        f"<p>Hey There,</p><p>Our shipment "
+                                        f"PRO <strong>{pro}</strong> has "
+                                        f"shown no movement for "
+                                        f"{int(stall_h)} business hours. "
+                                        f"Can you tell us the holdup and "
+                                        f"when it will move?</p>"
+                                        f"<p>Thank you,<br>--<br>William "
+                                        f"Prince<br>Cabinets For "
+                                        f"Contractors<br>(770) 990-4885</p>",
+                                        triggered_by="daylight_stall_ask")
+                except Exception as _e:
+                    print(f"[DAYLIGHT] stall check failed {oid}: {_e}")
 
                 low = (status or "").lower()
                 if "delivered" in low:

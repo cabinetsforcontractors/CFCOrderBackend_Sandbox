@@ -286,6 +286,54 @@ def create_bol_for_shipment(
     }
 
 
+@bol_router.post("/bol/{shipment_id}/create-and-send")
+def create_bol_and_send(shipment_id: str, pickup_date: Optional[str] = None,
+                        force: bool = False,
+                        _: bool = Depends(require_admin)):
+    """ONE-CLICK BOL BEAT (William 2026-08-02, from the 7/30 defect list):
+    create the BOL and email it to the WAREHOUSE in one shot — the
+    'send us a BOL' reply gets one button instead of two doors [admin].
+    Gates identical to /bol/{id}/create (force = William's override)."""
+    try:
+        result = create_bol_for_shipment(shipment_id, pickup_date=pickup_date,
+                                         force=force, _=True)
+    except HTTPException as e:
+        return {"status": "blocked", "detail": e.detail}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+    if isinstance(result, dict) and result.get("error"):
+        return {"status": "error", "create": result}
+
+    shipment = _get_shipment_with_order(shipment_id) or {}
+    pro = (result.get("pro_number") if isinstance(result, dict) else None) \
+        or shipment.get("pro_number") or ""
+    pdf_url = (result.get("bol_pdf_url")
+               if isinstance(result, dict) else "") or ""
+    warehouse = shipment.get("warehouse") or ""
+    to_email = (SUPPLIER_INFO.get(warehouse) or {}).get("email", "")
+    send = {"success": False, "error": "no warehouse email"}
+    if to_email:
+        from supplier_orders import _send_email, po_tag
+        order_id = shipment.get("order_id") or ""
+        send = _send_email(
+            order_id, to_email,
+            f"Re: {po_tag(order_id, warehouse)} - BOL attached",
+            f"<div style='font-family:Arial,sans-serif;font-size:14px;'>"
+            f"<p>Hey There,</p>"
+            f"<p>The BOL for PO {order_id} is ready — PRO number "
+            f"<strong>{pro}</strong>."
+            + (f" You can download it here: <a href='{pdf_url}'>BOL PDF</a>."
+               if pdf_url else "")
+            + f"</p><p>R+L is scheduled for pickup"
+            + (f" on {pickup_date}" if pickup_date else " (date on the BOL)")
+            + f".</p><p>Thank you,<br>--<br>William Prince<br>"
+            f"Cabinets For Contractors<br>(770) 990-4885</p></div>",
+            triggered_by="bol_one_click")
+    return {"status": "ok" if send.get("success") else "created_not_sent",
+            "pro_number": pro, "bol_pdf_url": pdf_url or None,
+            "sent_to": send.get("to"), "send": send}
+
+
 @bol_router.get("/bol/{shipment_id}/status")
 def get_bol_status(shipment_id: str, _: bool = Depends(require_admin)):
     """Check BOL status for a shipment."""

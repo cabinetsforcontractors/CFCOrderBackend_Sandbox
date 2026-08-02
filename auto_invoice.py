@@ -114,9 +114,13 @@ def auto_shipping(order_id: str, order: Dict) -> Dict:
 
 
 def run_auto_invoice(order_id: str, triggered_by: str = "new_order",
-                     dry_run: bool = False) -> Dict:
+                     dry_run: bool = False,
+                     force_reinvoice: bool = False) -> Dict:
     """BEAT C. Gate-check, quote, link, SEND. dry_run computes everything
-    but creates no link and sends nothing."""
+    but creates no link and sends nothing.
+    force_reinvoice (William 2026-08-02, the substitution price law): an
+    ALREADY-INVOICED unpaid order re-invoices — old Square links die first
+    so the stale amount can never be paid, then the updated invoice sends."""
     out = {"order_id": order_id, "triggered_by": triggered_by,
            "dry_run": dry_run}
 
@@ -131,12 +135,18 @@ def run_auto_invoice(order_id: str, triggered_by: str = "new_order",
     if not order:
         out.update(status="error", reason="order not found")
         return out
-    if order.get("payment_link_sent"):
+    if order.get("payment_link_sent") and not force_reinvoice:
         out.update(status="skipped", reason="already invoiced")
         return out
     if order.get("payment_received"):
         out.update(status="skipped", reason="already paid")
         return out
+    if force_reinvoice and not dry_run:
+        try:
+            killed = kill_order_links(order_id)
+            out["links_killed"] = killed
+        except Exception as e:
+            out["links_killed"] = {"error": str(e)}
     email = (order.get("email") or "").strip()
     total = float(order.get("order_total") or 0)
     if not email or "@" not in email:

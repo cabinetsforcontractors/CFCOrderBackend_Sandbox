@@ -1085,20 +1085,37 @@ def apply_substitution(sub: Dict, substitute_sku: str = None,
                     f"on paid order {order_id}")
                 result["store_credit"] = chosen_option["credit_total"]
             elif chosen_option.get("action") == "cheaper":
-                from supplier_orders import _send_email
-                _send_email(
-                    order_id,
-                    os.environ.get("WAREHOUSE_NOTIFICATION_EMAIL",
-                                   "orders@cabinetsforcontractors.com").strip(),
-                    f"REFIRE INVOICE - order #{order_id} price dropped "
-                    f"after substitution",
-                    f"<p>Order #{order_id}: {sub['original_sku']} -> "
-                    f"{target_sku} applied at the LOWER price "
-                    f"${price:,.2f}. The invoice needs a refire: "
-                    f"<code>POST /orders/{order_id}/auto-invoice"
-                    f"?dry_run=false</code></p>",
-                    triggered_by="substitution_refire")
-                result["invoice_refire_alerted"] = True
+                # AUTO-REFIRE (William 2026-08-02): the updated invoice
+                # sends itself — old links die first. Failure falls back
+                # to the alert.
+                refire = {}
+                try:
+                    from auto_invoice import run_auto_invoice
+                    refire = run_auto_invoice(
+                        order_id, triggered_by="substitution_refire",
+                        force_reinvoice=True)
+                except Exception as e:
+                    refire = {"status": "error", "reason": str(e)}
+                result["invoice_refire"] = {
+                    "status": refire.get("status"),
+                    "reason": refire.get("reason")}
+                if refire.get("status") != "sent":
+                    from supplier_orders import _send_email
+                    _send_email(
+                        order_id,
+                        os.environ.get("WAREHOUSE_NOTIFICATION_EMAIL",
+                                       "orders@cabinetsforcontractors.com").strip(),
+                        f"REFIRE INVOICE FAILED - order #{order_id} "
+                        f"price dropped after substitution",
+                        f"<p>Order #{order_id}: {sub['original_sku']} -> "
+                        f"{target_sku} applied at the LOWER price "
+                        f"${price:,.2f}, but the automatic re-invoice came "
+                        f"back '{refire.get('status')}' "
+                        f"({refire.get('reason')}). Fire it by hand: "
+                        f"<code>POST /orders/{order_id}/auto-invoice"
+                        f"?dry_run=false</code></p>",
+                        triggered_by="substitution_refire")
+                    result["invoice_refire_alerted"] = True
         except Exception as e:
             result["price_law_error"] = str(e)
     try:

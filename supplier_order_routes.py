@@ -371,6 +371,20 @@ def customer_po_prepare(message_id: str, _: bool = Depends(require_admin)):
         return {"status": "error", "message": str(e)}
 
 
+@supplier_order_router.post("/customer-po/create/{message_id}")
+def customer_po_create(message_id: str, dry_run: bool = True,
+                       _: bool = Depends(require_admin)):
+    """ARMED (William 2026-08-02, customer 1397 verified): create the real
+    B2BWave order from a parsed customer PO [admin]. dry_run=true (default)
+    shows the exact payload; dry_run=false creates + verifies by readback.
+    Refuses while any line is unmatched."""
+    from customer_po import create_order_from_message
+    try:
+        return create_order_from_message(message_id, dry_run=dry_run)
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
 @supplier_order_router.post("/customer-po/scan")
 def customer_po_scan(hours_back: int = 48, dry_run: bool = True,
                      _: bool = Depends(require_admin)):

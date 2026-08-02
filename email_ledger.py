@@ -156,10 +156,15 @@ def _known_order_ids(conn, candidates: List[str]) -> List[str]:
 
 def _classify_orders(conn, subject: str, body: str) -> List[str]:
     """Order attribution: subject '#5699' patterns are trusted; body numbers
-    only count when they match a REAL order id in the DB."""
+    only count when they match a REAL order id in the DB.
+    BILL2 LAW (William 2026-08-02, the #5589 mis-attribution): R+L report
+    emails carry CSVs full of order-shaped numbers — those never attribute
+    from the body, subject only."""
     subj_hits = _SUBJECT_ORDER_RE.findall(subject or "")
     if subj_hits:
         return _known_order_ids(conn, subj_hits) or sorted(set(subj_hits))
+    if "BILL2" in (subject or "").upper():
+        return []
     return _known_order_ids(conn, _BODY_ORDER_RE.findall(
         f"{subject} {body}"[:6000]))
 
@@ -528,6 +533,22 @@ def run_ledger_cycle(hours_back: int = 24) -> Dict:
         check_stock_check_clocks()
     except Exception as e:
         print(f"[LEDGER] stock-check clocks failed: {e}")
+    # GMAIL MIRROR (William 2026-08-02): deleted-in-Gmail kills the card;
+    # promotional+read auto-settles; important+read stays
+    try:
+        from gmail_mirror import process_gmail_mirror
+        mir = process_gmail_mirror()
+        if mir.get("settled_deleted") or mir.get("settled_promo"):
+            print(f"[LEDGER] gmail mirror: {mir}")
+    except Exception as e:
+        print(f"[LEDGER] gmail mirror failed: {e}")
+    # FREIGHT MONTHLY (William 2026-08-02): first cycle of a new month
+    # emails the charged-vs-billed roll-up (idempotent per month)
+    try:
+        from freight_monthly import run_monthly_rollup
+        run_monthly_rollup()
+    except Exception as e:
+        print(f"[LEDGER] freight monthly failed: {e}")
     # NEW-CUSTOMER NOTIFICATION GUARD (at most once per NOTIF_GUARD_HOURS,
     # one API list call — the guard itself decides whether it's due)
     try:
@@ -608,6 +629,14 @@ def ledger_oos_scan(hours_back: int = 48, dry_run: bool = True,
     (default) lists the hits without recording or alerting."""
     from oos_detect import process_oos_scan
     return process_oos_scan(hours_back=hours_back, dry_run=dry_run)
+
+
+@ledger_router.post("/ledger/gmail-mirror")
+def ledger_gmail_mirror(limit: int = 60, _: bool = Depends(require_admin)):
+    """Run the Gmail mirror on demand [admin]: deleted-in-Gmail settles the
+    card (two-strike rule), promotional+read auto-settles, important stays."""
+    from gmail_mirror import process_gmail_mirror
+    return process_gmail_mirror(limit=limit)
 
 
 @ledger_router.post("/b2bwave/notif-guard")

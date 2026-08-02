@@ -120,7 +120,7 @@ def _inspect_blurb(order: Dict = None) -> str:
 TEMPLATE_REGISTRY = {
     "payment_link": {
         "name": "Payment Link",
-        "subject": "Invoice INV-{order_id} - your cabinet order - Cabinets For Contractors",
+        "subject": "Invoice For Your order #{order_id} from Cabinets For Contractors",
         "description": "Full invoice with line items, tariff, shipping, Pay Now button",
         "category": "manual",
         "is_lifecycle": False,
@@ -502,7 +502,9 @@ def _render_payment_link(order: Dict) -> str:
 <strong>&#128179; This account is invoiced for payment by check</strong> &mdash; no online payment is needed.<br>
 Please send your check for the Grand Total per our usual arrangement, and reply to this email if you need remittance details.</div>"""
     else:
-        pay_cta = f"""<p style="text-align:center;margin:26px 0"><a href="{payment_link}" style="display:inline-block;background:#1D4ED8;color:#ffffff;text-decoration:none;padding:16px 46px;border-radius:12px;font-weight:800;font-size:19px;letter-spacing:0.5px">CLICK TO PAY NOW</a></p>"""
+        # WORDING LAW (William 2026-08-02): the shouty CTA was a spam flag —
+        # softened, no sliced-image tricks (those carry a worse fingerprint)
+        pay_cta = f"""<p style="text-align:center;margin:26px 0"><a href="{payment_link}" style="display:inline-block;background:#1D4ED8;color:#ffffff;text-decoration:none;padding:16px 46px;border-radius:12px;font-weight:800;font-size:19px;letter-spacing:0.5px">View &amp; Complete Your Order</a></p>"""
 
     return f"""<div style="font-family:'Open Sans',Helvetica,Arial,sans-serif;font-size:14px;padding:20px">
 <div style="max-width:660px;margin:0px auto;padding:28px;border:1px solid rgb(229,229,229)">
@@ -708,7 +710,7 @@ def _render_trusted_payment_reminder(order: Dict) -> str:
     <p>Hi {first_name},</p>
     <p>Just a friendly reminder &mdash; your cabinets for Order #{order_id} have shipped and we have an outstanding balance of <strong>{total_fmt}</strong>.</p>
     {_order_summary_block(order)}
-    <p style="text-align:center;"><a href="{payment_link}" class="cta-button">Pay Now</a></p>
+    <p style="text-align:center;"><a href="{payment_link}" class="cta-button">Complete Your Order</a></p>
     <p>Thanks for your business,<br><strong>William Prince</strong><br>Cabinets For Contractors</p>
     """
     return _wrap_email(_header("Payment Reminder", f"Order #{order_id}"), body)
@@ -724,7 +726,7 @@ def _render_payment_reminder_day6(order: Dict) -> str:
     <p>Hi {first_name},</p>
     <p>We noticed your Order #{order_id} hasn't been paid yet. Want to make sure nothing fell through the cracks.</p>
     {_order_summary_block(order)}
-    <p style="text-align:center;"><a href="{payment_link}" class="cta-button">Pay Now</a></p>
+    <p style="text-align:center;"><a href="{payment_link}" class="cta-button">Complete Your Order</a></p>
     <p>Questions? Just reply.<br><strong>William Prince</strong><br>Cabinets For Contractors</p>
     """
     return _wrap_email(_header("Payment Reminder", f"Order #{order_id}"), body)
