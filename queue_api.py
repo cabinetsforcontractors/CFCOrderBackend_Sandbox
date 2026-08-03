@@ -353,6 +353,13 @@ def money_strip() -> Dict:
                         landed_n += 1
             except Exception:
                 conn.rollback()
+            # TEST EXCLUSION (William 2026-08-03 phase-1: the strip must
+            # never count play money as receivables)
+            try:
+                from test_registry import test_order_ids
+                tids = list(test_order_ids()) or [""]
+            except Exception:
+                tids = [""]
             cur.execute("""
                 SELECT COALESCE(SUM(order_total), 0), COUNT(*)
                 FROM orders
@@ -360,7 +367,8 @@ def money_strip() -> Dict:
                   AND payment_received = FALSE
                   AND NOT is_complete
                   AND COALESCE(lifecycle_status, 'active') != 'deleted'
-            """)
+                  AND NOT (order_id = ANY(%s))
+            """, (tids,))
             row = cur.fetchone()
             awaiting = float(row[0] or 0)
             awaiting_n = int(row[1] or 0)
@@ -526,6 +534,78 @@ def auto_settle_run(dry_run: bool = True, _: bool = Depends(require_admin)):
     """Flags die when their cause dies [admin]. dry_run=true reports what
     WOULD settle; dry_run=false settles (mark read + robot-settled trace)."""
     return run_auto_settle(dry_run=dry_run)
+
+
+@queue_router.get("/queue/awaiting-orders")
+def awaiting_orders(_: bool = Depends(require_admin)):
+    """PHASE 1 (William 2026-08-03): the money strip's drill-down — every
+    order behind the Awaiting number, with a TEST badge, ready for the
+    one-click Mark-Paid (the trigger-silent checkpoint door)."""
+    try:
+        from test_registry import test_order_ids
+        tids = test_order_ids()
+    except Exception:
+        tids = set()
+    from psycopg2.extras import RealDictCursor
+    with get_db() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT order_id, customer_name, company_name, email,
+                       order_total, payment_link_sent_at, order_date
+                FROM orders
+                WHERE payment_link_sent = TRUE
+                  AND payment_received = FALSE
+                  AND NOT is_complete
+                  AND COALESCE(lifecycle_status, 'active') != 'deleted'
+                ORDER BY order_date DESC NULLS LAST
+            """)
+            rows = [dict(r) for r in cur.fetchall()]
+    for r in rows:
+        r["is_test"] = str(r["order_id"]) in tids
+    return {"status": "ok", "count": len(rows), "orders": rows}
+
+
+@queue_router.get("/orders/{order_id}/threads")
+def order_threads(order_id: str, _: bool = Depends(require_admin)):
+    """PHASE 1 (William 2026-08-03, the 5750/5696 wrong-thread lesson):
+    every email thread linked to an order — exact SUBJECT, who spoke last,
+    direction, the newest inbound message id (the composer's anchor), and
+    an is_alert flag for robot-alert threads (replying there does NOT join
+    the order's real conversation)."""
+    from email_ledger import AUTOMATION_SUBJECT_PREFIXES
+    alert_pfx = tuple(p.upper() for p in AUTOMATION_SUBJECT_PREFIXES) + (
+        "CONFIRM DISPATCH", "NEW ORDER #", "PAYMENT NEEDS A HUMAN",
+        "OUT OF STOCK -", "NEEDS-A-HUMAN", "[ACTION]", "[CONFIRM+SEND]")
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT thread_id,
+                       MAX(email_date) AS last_at,
+                       (ARRAY_AGG(subject ORDER BY email_date DESC))[1] AS subject,
+                       (ARRAY_AGG(folder ORDER BY email_date DESC))[1] AS last_folder,
+                       (ARRAY_AGG(from_addr ORDER BY email_date DESC))[1] AS last_from,
+                       COUNT(*) AS messages,
+                       (ARRAY_AGG(message_id ORDER BY email_date DESC)
+                        FILTER (WHERE folder = 'inbox'))[1] AS newest_inbound_id
+                FROM email_ledger
+                WHERE thread_id IS NOT NULL AND thread_id != ''
+                  AND (',' || COALESCE(order_ids, '') || ',') LIKE %s
+                GROUP BY thread_id
+                ORDER BY MAX(email_date) DESC
+                LIMIT 30
+            """, (f"%,{order_id},%",))
+            cols = [c[0] for c in cur.description]
+            rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+    for r in rows:
+        subj = (r.get("subject") or "").upper()
+        r["is_alert"] = any(subj.startswith(p) or subj.startswith("RE: " + p)
+                            for p in alert_pfx)
+        r["who_spoke_last"] = ("us" if r.get("last_folder") == "sent"
+                               else "them")
+        if r.get("last_at"):
+            r["last_at"] = str(r["last_at"])
+    return {"status": "ok", "order_id": order_id, "count": len(rows),
+            "threads": rows}
 
 
 @queue_router.get("/queue/money-strip")
