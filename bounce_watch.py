@@ -66,8 +66,24 @@ def process_bounces(hours_back: int = 24) -> Dict:
                     (a for a in _ANY_ADDR_RE.findall(body)
                      if not _OUR_RE.search(a)), "(address not found in body)")
                 sm = _SUBJ_RE.search(body)
-                orig_subject = (sm.group(1).strip()[:120]
-                                if sm else "(original subject not found)")
+                orig_subject = sm.group(1).strip()[:120] if sm else ""
+                if not orig_subject:
+                    # FIRST-LIVE-PROOF LESSON (8/3, the weborders@ bounce):
+                    # Gmail bounce bodies don't always quote the headers —
+                    # but the bounce rides the SAME thread as the original
+                    # send, so the ledger already knows its subject.
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            SELECT subject FROM email_ledger
+                            WHERE thread_id = (SELECT thread_id
+                                               FROM email_ledger
+                                               WHERE message_id = %s)
+                              AND folder = 'sent'
+                            ORDER BY email_date DESC LIMIT 1
+                        """, (mid,))
+                        row = cur.fetchone()
+                    orig_subject = ((row[0] or "").strip()[:120] if row
+                                    else "(original subject not found)")
                 with conn.cursor() as cur:
                     cur.execute("""
                         INSERT INTO order_events
