@@ -165,8 +165,11 @@ def _classify_orders(conn, subject: str, body: str) -> List[str]:
         return _known_order_ids(conn, subj_hits) or sorted(set(subj_hits))
     if "BILL2" in (subject or "").upper():
         return []
-    return _known_order_ids(conn, _BODY_ORDER_RE.findall(
-        f"{subject} {body}"[:6000]))
+    # URL-DIGIT GUARD (William 8/3, the E FUEL lesson: Whitewater's portal
+    # link mcleodhosted.com:5696 tagged their dunning email as order 5696
+    # — a PORT NUMBER). URLs are stripped before body numbers count.
+    text = re.sub(r"https?://\S+", " ", f"{subject} {body}"[:6000])
+    return _known_order_ids(conn, _BODY_ORDER_RE.findall(text))
 
 
 def _parse_email_date(s: str):
