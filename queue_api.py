@@ -639,11 +639,16 @@ def dismiss_awaiting_reply(payload: Dict = Body(...),
     if not tid:
         return {"status": "error", "message": "thread_id required"}
     note = (payload or {}).get("note", "").strip() or "no reply needed"
-    if not _handled_note(f"needsreply:{tid}", (payload or {}).get("order_id"),
-                         f"[William: {note}]"):
+    oid = (payload or {}).get("order_id")
+    if not _handled_note(f"needsreply:{tid}", oid, f"[William: {note}]"):
         return {"status": "error",
                 "message": "settle write failed — the card will stay; "
                            "check server logs"}
+    # ONE SETTLE, EVERY TWIN (William 2026-08-03): the same email's
+    # thread:/noreply: board cards settle with the dismissal — a card he
+    # already ruled on must never keep standing under another key.
+    for twin in (f"thread:{tid}", f"noreply:{tid}"):
+        _handled_note(twin, oid, f"[William: {note}]")
     return {"status": "ok", "thread_id": tid, "note": note}
 
 
@@ -661,13 +666,23 @@ def queue_handled(payload: Dict = Body(...),
     if not task_key and not thread_id:
         return {"status": "error",
                 "message": "task_key or thread_id required"}
+    # ONE SETTLE, EVERY TWIN (William 2026-08-03, the QUEUE-resurface
+    # lesson): one email can spawn a thread: card, a noreply: card AND a
+    # needs-reply row — settling one through the wrong door left the twins
+    # standing on his board. Resolve the thread id from whichever key came
+    # in and settle ALL of them together.
+    if not thread_id and task_key.split(":", 1)[0] in ("thread", "noreply"):
+        thread_id = task_key.split(":", 1)[1]
     ok = True
     if task_key:
         ok = _handled_note(task_key, order_id, "[William: HANDLED]") and ok
     if thread_id:
         _mark_thread_read(thread_id)
-        ok = _handled_note(f"needsreply:{thread_id}", order_id,
-                           "[William: HANDLED]") and ok
+        for twin in (f"thread:{thread_id}", f"noreply:{thread_id}",
+                     f"needsreply:{thread_id}"):
+            if twin != task_key:
+                ok = _handled_note(twin, order_id,
+                                   "[William: HANDLED]") and ok
     if not ok:
         return {"status": "error",
                 "message": "settle write failed — the card will stay; "

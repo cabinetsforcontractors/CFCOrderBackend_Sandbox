@@ -78,6 +78,23 @@ WAREHOUSE_ADDRESSES = {
     "Dealer Cabinetry":        {"label": "Dealer-Bremen",                      "address": "202 N Georgia Ave",         "city": "Bremen",         "state": "GA", "zip": "30110", "phone": "7705374422"},
 }
 
+# SHORT-NAME ALIASES (2026-08-03, the 5737+5748 fire): shipment rows born
+# after the supplier normalization carry SHORT warehouse names ("ROC") while
+# the shipper/address tables above are keyed by the long names. Resolve
+# through this map before every lookup — a short-named leg must never 400.
+WAREHOUSE_ALIASES = {
+    "LI":    "Cabinetry Distribution",
+    "DL":    "DL Cabinetry",
+    "ROC":   "ROC Cabinetry",
+    "GHI":   "GHI Cabinets",
+    "Linda": "Dealer Cabinetry",
+}
+
+
+def _wh_key(name: str) -> str:
+    return WAREHOUSE_ALIASES.get((name or "").strip(), (name or "").strip())
+
+
 bol_router = APIRouter(tags=["bol"])
 
 
@@ -117,6 +134,12 @@ def create_bol_for_shipment(
     shipment_id: str,
     pickup_date: Optional[str] = None,
     force: bool = False,
+    pieces: int = 1,
+    weight_override: Optional[int] = None,
+    description: Optional[str] = None,
+    special_instructions: Optional[str] = None,
+    residential: Optional[bool] = None,
+    extra_order_ids: Optional[str] = None,
     _: bool = Depends(require_admin),
 ):
     """
@@ -134,6 +157,13 @@ def create_bol_for_shipment(
     before the fire, and the event records forced=true.
 
     pickup_date: optional MM/DD/YYYY — defaults to today if not supplied.
+
+    SHIP-TOGETHER SUPPORT (William 2026-08-03, the 5737+5748 ROC pair):
+    pieces / weight_override / description / special_instructions /
+    residential let one BOL carry several pallets as ONE shipment;
+    extra_order_ids (comma-separated) stamps the same PRO + bol_sent onto
+    the sibling orders and their legs at the same warehouse, so every
+    order in the combined shipment tracks under the one PRO.
     """
     shipment = _get_shipment_with_order(shipment_id)
     if not shipment:
@@ -161,18 +191,20 @@ def create_bol_for_shipment(
             )
 
     warehouse_name = shipment["warehouse"]
-    wh_info = WAREHOUSE_ADDRESSES.get(warehouse_name)
+    wh_info = WAREHOUSE_ADDRESSES.get(_wh_key(warehouse_name))
     if not wh_info:
         raise HTTPException(
             status_code=400,
             detail=f"Unknown warehouse '{warehouse_name}' — cannot look up shipper address"
         )
 
-    shipper_name = BOL_SHIPPER_NAMES.get(warehouse_name, "Cabinets For Contractors")
+    shipper_name = BOL_SHIPPER_NAMES.get(_wh_key(warehouse_name), "Cabinets For Contractors")
     consignee_name = shipment.get("company_name") or shipment.get("customer_name") or "Customer"
     dest_zip = (shipment.get("zip_code") or "").split("-")[0][:5]
-    weight = int(float(shipment.get("weight") or shipment.get("total_weight") or 200))
-    is_residential = bool(shipment.get("is_residential", True))
+    weight = int(weight_override) if weight_override else \
+        int(float(shipment.get("weight") or shipment.get("total_weight") or 200))
+    is_residential = bool(residential) if residential is not None \
+        else bool(shipment.get("is_residential", True))
 
     payload = {
         "shipper_name": shipper_name,
@@ -190,12 +222,13 @@ def create_bol_for_shipment(
         "weight_lbs": weight,
         "is_residential": is_residential,
         "order_id": shipment["order_id"],
-        "pieces": 1,
-        "description": "RTA Cabinetry",
+        "pieces": max(1, int(pieces)),
+        "description": description or "RTA Cabinetry",
         # WILLIAM'S PICKUP LAW 2026-07-27: no raw "today" defaults —
         # Mon-Thu 9-4 / Fri 9-3 Eastern, 2h same-day cutoff, no weekends
         "pickup_date": pickup_date or __import__("pickup_window").next_pickup_date_mmddyyyy(),
-        "special_instructions": f"CFC Order #{shipment['order_id']}",
+        "special_instructions": special_instructions
+        or f"CFC Order #{shipment['order_id']}",
     }
 
     try:
@@ -267,7 +300,49 @@ def create_bol_for_shipment(
                 ),
             )
 
+    # SHIP-TOGETHER stamping (William 2026-08-03): every sibling order in
+    # the combined shipment carries the same PRO — its leg at this
+    # warehouse settles under the one BOL.
+    extras = [x.strip() for x in (extra_order_ids or "").split(",") if x.strip()]
+    if extras:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                for xid in extras:
+                    cur.execute(
+                        """
+                        UPDATE order_shipments
+                        SET pro_number = %s, bol_url = %s, bol_sent = TRUE,
+                            bol_sent_at = NOW(), updated_at = NOW()
+                        WHERE order_id = %s AND warehouse = %s
+                        """,
+                        (pro_number, bol_pdf_url, xid, warehouse_name),
+                    )
+                    cur.execute(
+                        """
+                        UPDATE orders
+                        SET bol_sent = TRUE, bol_sent_at = NOW(),
+                            tracking = %s, pro_number = %s, updated_at = NOW()
+                        WHERE order_id = %s
+                        """,
+                        (pro_number, pro_number, xid),
+                    )
+                    cur.execute(
+                        """
+                        INSERT INTO order_events (order_id, event_type, event_data, source)
+                        VALUES (%s, 'bol_created', %s, 'bol_api')
+                        """,
+                        (xid, json.dumps({
+                            "shipment_id": shipment_id,
+                            "warehouse": warehouse_name,
+                            "pro_number": pro_number,
+                            "bol_pdf_url": bol_pdf_url,
+                            "ship_together_with": shipment["order_id"],
+                            "forced": bool(force),
+                        })),
+                    )
+
     print(f"[BOL] Order {shipment['order_id']} / shipment {shipment_id} — BOL created, PRO: {pro_number}"
+          + (f" (ship-together with {','.join(extras)})" if extras else "")
           + (" (FORCED past gates)" if force else ""))
 
     return {
