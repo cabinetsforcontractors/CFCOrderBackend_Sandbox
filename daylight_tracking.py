@@ -366,8 +366,13 @@ def poll_daylight_shipments(out=None, force=False):
                 low = (status or "").lower()
                 if "delivered" in low:
                     with conn.cursor() as cur:
+                        # WATCH-HEAL (8/3, the 5695 lesson): a delivered
+                        # shipment must also DEACTIVATE — active=true kept
+                        # regenerating its shipment-watch card forever.
                         cur.execute("""UPDATE daylight_shipments
-                                       SET delivered_at = NOW() WHERE id = %s""",
+                                       SET delivered_at = NOW(),
+                                           active = FALSE
+                                       WHERE id = %s""",
                                     (s["id"],))
                         _event(conn, oid, "customer_delivery_confirmed",
                                {"probill": pro, "carrier": "Daylight",

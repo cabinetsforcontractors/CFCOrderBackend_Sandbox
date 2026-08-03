@@ -549,7 +549,10 @@ def _sweep_supplier_orders(cur):
 
 
 def _sweep_daylight(cur):
-    cur.execute("SELECT probill, order_id, status FROM daylight_shipments WHERE active = true")
+    # WATCH-HEAL (8/3, the 5695 lesson): delivered rows are done rows —
+    # never resurface a watch for a shipment that already landed.
+    cur.execute("""SELECT probill, order_id, status FROM daylight_shipments
+                   WHERE active = true AND delivered_at IS NULL""")
     tasks = []
     for probill, oid, status in cur.fetchall():
         first = (status or "").split("|")[0].strip()
