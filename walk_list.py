@@ -288,10 +288,16 @@ def run_walk_list_schedule() -> Dict:
     slot_name = {8: "8 AM", 10: "10 AM", 12: "NOON", 15: "3 PM"}[due_slot]
     with get_db() as conn:
         with conn.cursor() as cur:
+            # DEDUPE (fixed 8/3 PM — the 200-email lesson): JSONB reorders
+            # keys when cast back to text, so the old adjacent
+            # '"slot": .., "date": ..' pattern NEVER matched and every
+            # ledger cycle resent the slot. Match each key independently.
             cur.execute("""SELECT 1 FROM order_events
                            WHERE event_type = 'walk_list_sent'
+                             AND event_data::text LIKE %s
                              AND event_data::text LIKE %s LIMIT 1""",
-                        (f'%"slot": "{slot_name}", "date": "{date.today()}"%',))
+                        (f'%"slot": "{slot_name}"%',
+                         f'%"date": "{date.today()}"%'))
             if cur.fetchone():
                 return {"status": "already_sent", "slot": slot_name}
     return send_walk_list(slot=slot_name)
