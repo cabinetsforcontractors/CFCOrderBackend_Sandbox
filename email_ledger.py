@@ -549,6 +549,13 @@ def run_ledger_cycle(hours_back: int = 24) -> Dict:
         run_monthly_rollup()
     except Exception as e:
         print(f"[LEDGER] freight monthly failed: {e}")
+    # THE WALK LIST (William 2026-08-03): 8/10/noon/3 ET sweeps, once per
+    # slot per day, weekends quiet; unworked items roll by themselves
+    try:
+        from walk_list import run_walk_list_schedule
+        run_walk_list_schedule()
+    except Exception as e:
+        print(f"[LEDGER] walk list failed: {e}")
     # NEW-CUSTOMER NOTIFICATION GUARD (at most once per NOTIF_GUARD_HOURS,
     # one API list call — the guard itself decides whether it's due)
     try:
@@ -629,6 +636,24 @@ def ledger_oos_scan(hours_back: int = 48, dry_run: bool = True,
     (default) lists the hits without recording or alerting."""
     from oos_detect import process_oos_scan
     return process_oos_scan(hours_back=hours_back, dry_run=dry_run)
+
+
+@ledger_router.get("/walk-list")
+def walk_list_now(_: bool = Depends(require_admin)):
+    """THE WALK LIST in one call [admin] — the chat session's opening move
+    (William 2026-08-03: 'show me a list and we work through it one by
+    one'). Needs-you w/ subjects, NEW vs ROLLED, due, deferred, supplier
+    legs, money, robot receipts."""
+    from walk_list import build_walk_list
+    return build_walk_list()
+
+
+@ledger_router.post("/walk-list/send")
+def walk_list_send(slot: str = "manual", _: bool = Depends(require_admin)):
+    """Compose + email the walk list to the bell [admin] (drill door; the
+    scheduled slots ride the ledger cycle)."""
+    from walk_list import send_walk_list
+    return send_walk_list(slot=slot)
 
 
 @ledger_router.post("/ledger/gmail-mirror")
