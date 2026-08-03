@@ -56,24 +56,52 @@ def build_walk_list() -> Dict:
         out["last_sweep"] = str(last) if last else None
 
         # --- board cards (open, everything except settles) ---------------
+        # PRESENTATION LAWS (William 8/3): every item carries FROM +
+        # SUBJECT + DATE · >14-day non-order items age off · cost
+        # cross-checks (Pirate Ship / Daylight docs / carrier-vs-charged)
+        # are AUDIT inputs, their own section · deferred items are NEVER
+        # shown before their day ("you are my memory")
+        import re as _re
+        _XCHECK_RE = _re.compile(
+            r"pirate ship|daylight|adjustment notice|"
+            r"roc cabinetry (order|invoice)|received your payment", _re.I)
         try:
             with conn.cursor() as cur:
                 cur.execute("""
-                    SELECT task_key, type, title, order_id, thread_id,
-                           first_seen, due_date, date_str
-                    FROM task_board_items
-                    WHERE status = 'open' AND type != 'dismissal'
-                    ORDER BY first_seen
+                    SELECT t.task_key, t.type, t.title, t.order_id,
+                           t.thread_id, t.first_seen, t.due_date, t.date_str,
+                           (SELECT l.from_addr FROM email_ledger l
+                            WHERE l.thread_id = t.thread_id
+                              AND l.folder = 'inbox'
+                            ORDER BY l.email_date DESC LIMIT 1) AS from_addr
+                    FROM task_board_items t
+                    WHERE t.status = 'open' AND t.type != 'dismissal'
+                    ORDER BY t.first_seen
                 """)
-                for (key, typ, title, oid, tid, seen, due, dstr) in cur.fetchall():
+                for (key, typ, title, oid, tid, seen, due, dstr,
+                     frm) in cur.fetchall():
                     item = {"task_key": key, "type": typ, "title": title,
+                            "subject": title, "from": frm or "",
                             "order_id": oid, "thread_id": tid,
+                            "date": str(dstr or seen or ""),
                             "since": str(seen) if seen else None,
                             "due_date": str(due) if due else None}
+                    age = None
+                    try:
+                        if seen:
+                            age = (datetime.now(timezone.utc)
+                                   - seen).days
+                    except Exception:
+                        age = None
                     if due and due <= date.today():
                         out["due_today"].append(item)
                     elif due:
-                        out["deferred"].append(item)
+                        out["deferred"].append(item)   # held; never emailed
+                    elif age is not None and age > 14 and not oid:
+                        item["aged"] = age
+                        out.setdefault("aged_off", []).append(item)
+                    elif _XCHECK_RE.search(title or ""):
+                        out.setdefault("cross_checks", []).append(item)
                     elif last and seen and seen > last:
                         item["badge"] = "NEW"
                         out["needs_you"].append(item)
@@ -154,6 +182,8 @@ def build_walk_list() -> Dict:
 
 
 def _fmt_item(i: Dict) -> str:
+    """PRESENTATION LAW (8/3): task · from-address · subject · order # ·
+    date — everything he needs to search and age it himself."""
     bits = []
     if i.get("order_id"):
         bits.append(f"#{i['order_id']}")
@@ -162,7 +192,9 @@ def _fmt_item(i: Dict) -> str:
     elif i.get("title"):
         bits.append(i["title"])
     if i.get("from"):
-        bits.append(f"from {i['from'][:40]}")
+        bits.append(f"from {i['from'][:45]}")
+    if i.get("date"):
+        bits.append(str(i["date"])[:10])
     if i.get("due_date"):
         bits.append(f"due {i['due_date']}")
     return " &middot; ".join(bits)
@@ -180,20 +212,39 @@ def send_walk_list(slot: str = "manual") -> Dict:
         return (f"<p style='margin:10px 0 2px;font-weight:700;color:{color}'>"
                 f"{title}</p>{rows}")
 
-    quiet = not any([wl["needs_you"], wl["due_today"], wl["supplier_legs"]])
+    # AUTO AGE-OUT (14-day law): the sweep settles what it aged off
+    if wl.get("aged_off"):
+        try:
+            with get_db() as conn:
+                with conn.cursor() as cur:
+                    for i in wl["aged_off"]:
+                        cur.execute("""
+                            UPDATE task_board_items
+                            SET status = 'handled',
+                                note = %s, note_at = NOW(), updated_at = NOW()
+                            WHERE task_key = %s AND status = 'open'
+                        """, (f"[aged off: {i.get('aged')}d old, not "
+                              f"order-related - the 14-day law]",
+                              i["task_key"]))
+                    conn.commit()
+        except Exception as e:
+            print(f"[WALK] age-out failed: {e}")
+
+    # EMAIL LAWS (William 8/3): no already-handled section, no deferred
+    # (only on their day), every line = from + subject + order + date
+    quiet = not any([wl["needs_you"], wl["due_today"],
+                     wl["supplier_legs"], wl.get("cross_checks")])
     body = (
         f"<div style='font-family:Arial,sans-serif;font-size:13px;color:#333'>"
-        + (f"<p>Nothing new &middot; {c['rolled']} rolled &middot; the robot "
-           f"handled {len(wl['receipts'])} things.</p>" if quiet else "")
+        + (f"<p>Nothing new &middot; {c['rolled']} rolled.</p>" if quiet else "")
         + section("🔴 NEEDS YOU", wl["needs_you"], "#DC2626")
         + section("⏳ ROLLED (still waiting)", wl["rolled"], "#B45309")
         + section("⏰ DUE TODAY", wl["due_today"], "#7C3AED")
+        + section("💵 COST CROSS-CHECKS (charged vs paid — dispute candidates)",
+                  wl.get("cross_checks") or [], "#0E7490")
         + section("🏭 SUPPLIER LEGS NEEDING A HUMAN", wl["supplier_legs"], "#B45309")
         + (f"<p style='margin:10px 0 2px;font-weight:700;color:#059669'>💰 MONEY</p>"
            f"<div>{(wl['money'] or {}).get('line', '')}</div>")
-        + (section("✅ THE ROBOT HANDLED SINCE LAST SWEEP",
-                   [{"title": f"#{r['order_id'] or '—'} {r['event']}"}
-                    for r in wl["receipts"]], "#059669"))
         + f"<p style='color:#888;font-size:12px;margin-top:12px'>Work it in "
           f"the app, or sit down with Claude and say &ldquo;walk it&rdquo;. "
           f"Anything unworked rolls into the next sweep by itself.</p></div>")
