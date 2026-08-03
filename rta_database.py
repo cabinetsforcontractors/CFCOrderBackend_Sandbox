@@ -216,9 +216,12 @@ def get_sku_info(sku: str) -> Optional[Dict]:
     """
     with get_db() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # supplier_sku added 2026-08-03 (the Sevachko quick-order build:
+            # the single-sku door is the clean token readback)
             cur.execute("""
                 SELECT product_sku, product_code, weight, height, width,
-                       requires_long_pallet, supplier, cabinet_type
+                       requires_long_pallet, supplier, cabinet_type,
+                       supplier_sku
                 FROM rta_products
                 WHERE product_sku = %s
             """, (sku,))
