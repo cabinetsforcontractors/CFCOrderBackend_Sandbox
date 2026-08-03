@@ -86,7 +86,11 @@ SUPPLIER_INFO = {
         'name': 'ROC Cabinetry',
         'address': '505 Best Friend Court Suite 580, Norcross GA 30071',
         'contact': 'Franklin Velasquez (770) 847-8222',
-        'email': 'homesupplyplus@gmail.com'  # RESTORE: weborders01@roccabinetry.com
+        # ⚖️ ROC ADDRESS LAW (William 8/3, the bounce lesson): CSR box
+        # csr05@roccabinetry.com is the ONLY proven-deliverable ROC
+        # address (Liliexis). weborders@ BOUNCED on receive (their
+        # send-only notification box); weborders01@ unproven.
+        'email': 'homesupplyplus@gmail.com'  # RESTORE: csr05@roccabinetry.com
     },
     'Go Bravura': {
         'name': 'Go Bravura',

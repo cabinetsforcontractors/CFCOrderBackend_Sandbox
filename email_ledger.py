@@ -536,6 +536,15 @@ def run_ledger_cycle(hours_back: int = 24) -> Dict:
         check_stock_check_clocks()
     except Exception as e:
         print(f"[LEDGER] stock-check clocks failed: {e}")
+    # BOUNCE WATCHER (William 2026-08-03, the weborders@ lesson): a
+    # bounced send never dies silently again — one bell per bounce
+    try:
+        from bounce_watch import process_bounces
+        b = process_bounces(hours_back=hours_back)
+        if b.get("alerted"):
+            print(f"[LEDGER] bounces alerted: {b}")
+    except Exception as e:
+        print(f"[LEDGER] bounce watch failed: {e}")
     # GMAIL MIRROR (William 2026-08-02): deleted-in-Gmail kills the card;
     # promotional+read auto-settles; important+read stays
     try:
