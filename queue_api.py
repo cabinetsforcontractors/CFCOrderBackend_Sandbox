@@ -127,7 +127,25 @@ def _mark_thread_read(thread_id: str) -> bool:
 def _handled_note(task_key: str, order_id: str, note: str) -> bool:
     """Upsert a handled row — the trace the board shows. Ledger-born cards
     (needsreply:*) have no pre-existing row, so the INSERT must carry
-    every NOT NULL column of task_board_items (board/type/title)."""
+    every NOT NULL column of task_board_items (board/type/title).
+    TITLE LAW (William 8/4, the HANDLED-list lesson): a settled row must
+    still SAY WHAT THE TASK WAS — new rows get the email's from + subject
+    as the title, never the bare note. Existing rows keep their title."""
+    title = note
+    tid = task_key.split(":", 1)[1] if ":" in task_key else ""
+    try:
+        if tid and len(tid) >= 12:
+            with get_db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""SELECT from_addr, subject FROM email_ledger
+                                   WHERE thread_id = %s
+                                   ORDER BY email_date DESC LIMIT 1""", (tid,))
+                    row = cur.fetchone()
+                    if row and (row[1] or "").strip():
+                        title = f"{(row[1] or '').strip()[:140]}" \
+                                + (f" · from {row[0]}" if row[0] else "")
+    except Exception:
+        pass
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
@@ -141,7 +159,7 @@ def _handled_note(task_key: str, order_id: str, note: str) -> bool:
                     SET status = 'handled',
                         note = EXCLUDED.note,
                         note_at = NOW(), updated_at = NOW()
-                """, (task_key, note, order_id or None, note))
+                """, (task_key, title, order_id or None, note))
             conn.commit()
         return True
     except Exception as e:

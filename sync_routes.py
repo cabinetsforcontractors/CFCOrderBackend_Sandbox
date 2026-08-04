@@ -23,7 +23,9 @@ Endpoints:
 
 from datetime import datetime, timezone, timedelta
 
-from fastapi import APIRouter, HTTPException, Depends
+import json
+
+from fastapi import APIRouter, HTTPException, Depends, Body
 
 from auth import require_admin
 from config import B2BWAVE_URL, B2BWAVE_USERNAME, B2BWAVE_API_KEY
@@ -207,6 +209,67 @@ def square_payment_link_probe(_: bool = Depends(require_admin)):
                            f"deactivate id {link['id']} in the dashboard"}
     return {"status": "ok", "created_url": link["url"],
             "link_id": link["id"], "deleted": deleted["status"] == "ok"}
+
+
+@sync_router.post("/square/refund")
+def square_refund(payload: dict = Body(...), _: bool = Depends(require_admin)):
+    """REFUND DOOR (William 8/4: "can you refund in square?" — yes).
+    Refunds a Square payment [admin]. Body: {order_id} (looks up the
+    payment_received event's square_payment_id + amount) OR an explicit
+    {payment_id, amount}. Partial refunds via amount override. Every fire
+    records a payment_refunded event on the order. DO-box only — this
+    door never fires itself."""
+    from square_links import _square_request
+    import uuid as _uuid
+    order_id = str(payload.get("order_id") or "").strip() or None
+    payment_id = (payload.get("payment_id") or "").strip() or None
+    amount = payload.get("amount")
+    if order_id and not payment_id:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT event_data FROM order_events
+                    WHERE order_id = %s AND event_type = 'payment_received'
+                    ORDER BY created_at DESC LIMIT 1
+                """, (order_id,))
+                row = cur.fetchone()
+        if not row:
+            return {"status": "error",
+                    "message": f"no payment_received event on {order_id}"}
+        ed = row[0] if isinstance(row[0], dict) else json.loads(row[0] or "{}")
+        payment_id = (ed.get("square_payment_id") or "").strip()
+        if amount is None:
+            amount = ed.get("payment_amount")
+    if not payment_id or amount is None:
+        return {"status": "error",
+                "message": "payment_id + amount required (or order_id with "
+                           "a recorded square payment)"}
+    cents = int(round(float(amount) * 100))
+    try:
+        resp = _square_request("POST", "/refunds", {
+            "idempotency_key": str(_uuid.uuid4()),
+            "payment_id": payment_id,
+            "amount_money": {"amount": cents, "currency": "USD"},
+            "reason": f"CFC refund" + (f" - order {order_id}" if order_id else ""),
+        })
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+    refund = resp.get("refund") or {}
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO order_events (order_id, event_type, event_data, source)
+                VALUES (%s, 'payment_refunded', %s, 'square_refund_door')
+            """, (order_id, json.dumps({
+                "payment_id": payment_id, "amount": float(amount),
+                "refund_id": refund.get("id"),
+                "refund_status": refund.get("status")})))
+            conn.commit()
+    return {"status": "ok", "order_id": order_id, "payment_id": payment_id,
+            "amount": float(amount), "refund_id": refund.get("id"),
+            "refund_status": refund.get("status"),
+            "note": "Square refunds settle as PENDING then COMPLETED "
+                    "(minutes to 1 business day)"}
 
 
 @sync_router.delete("/square/payment-link/{link_id}")

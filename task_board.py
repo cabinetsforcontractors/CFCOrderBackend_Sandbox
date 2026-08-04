@@ -87,6 +87,17 @@ OWN_ADDRESSES = {a.strip().lower() for a in os.environ.get(
 # robot-flag sweep watches the box the alerts actually go to (env wins).
 FLAG_INBOX = os.environ.get("FLAG_INBOX_EMAIL",
                             "orders@cabinetsforcontractors.com").strip()
+# THE 5755 SILENT-HOLE LESSON (William 8/4): the robot's needs-human
+# alerts moved to WAREHOUSE_NOTIFICATION_EMAIL (wpjob1, his 8/2 Render
+# move) while the flag sweep kept watching only FLAG_INBOX (orders@) —
+# a real order's INVOICE NEEDS A HUMAN never became a card. The sweep
+# now watches EVERY box alerts can land in.
+FLAG_INBOXES = {b.strip().lower() for b in [
+    FLAG_INBOX,
+    os.environ.get("WAREHOUSE_NOTIFICATION_EMAIL", ""),
+    os.environ.get("INTERNAL_SAFETY_EMAIL", ""),
+    "orders@cabinetsforcontractors.com",
+] if b.strip()}
 
 NO_REPLY_BUSINESS_DAYS = 2
 ORDER_TYPES = {"unpaid-order", "supplier-action", "shipment-watch",
@@ -455,7 +466,8 @@ def is_own_automation_subject(subject: str) -> bool:
 
 def _sweep_robot_flags(known_ids, hours=FULL_FLAGS_H, cap=20):
     tasks = []
-    for m in search_emails(f"in:sent to:{FLAG_INBOX} "
+    to_q = "(" + " OR ".join(f"to:{b}" for b in sorted(FLAG_INBOXES)) + ")"
+    for m in search_emails(f"in:sent {to_q} "
                            f"newer_than:{int(hours)}h", cap):
         c = get_email_content(m["id"])
         if not c:
@@ -591,7 +603,7 @@ def _sweep_no_reply(known_ids, hours=FULL_NOREPLY_H, cap=40, thread_cap=25):
         if frm not in OWN_ADDRESSES:
             continue
         # skip robot flags, notes-to-self, handoffs
-        if FLAG_INBOX in to or HANDOFF_RE.search(subject):
+        if any(b in to for b in FLAG_INBOXES) or HANDOFF_RE.search(subject):
             continue
         if any(own in to for own in OWN_ADDRESSES):
             continue
