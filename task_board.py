@@ -713,8 +713,15 @@ def _sweep_windows(conn, deep: bool, days: int) -> dict:
 
 
 def run_task_sweep(conn, deep: bool = False, days: int = 0) -> dict:
-    _ensure_tables(conn)
+    # THE COLD-START FLAP (found 8/4, twice-proven): NOW() in Postgres is
+    # frozen at TRANSACTION start. On a fresh instance _ensure_tables
+    # opened the transaction BEFORE sweep_start was captured, so every
+    # card upserted with last_seen older than sweep_start — and the
+    # gone-sweep buried the whole board's state cards on the first sweep
+    # after every deploy. sweep_start now precedes any DB statement AND
+    # the upsert stamps clock_timestamp() (true wall time).
     sweep_start = datetime.now(timezone.utc)
+    _ensure_tables(conn)
     win = _sweep_windows(conn, deep, days)
     errors = {}
     tasks = []
@@ -766,7 +773,8 @@ def run_task_sweep(conn, deep: bool = False, days: int = 0) -> dict:
                 INSERT INTO task_board_items
                     (task_key, board, type, title, detail, order_id, gmail_id,
                      thread_id, date_str, status, last_seen, updated_at)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'open',NOW(),NOW())
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'open',
+                        clock_timestamp(), clock_timestamp())
                 ON CONFLICT (task_key) DO UPDATE SET
                     title = EXCLUDED.title, detail = EXCLUDED.detail,
                     type = EXCLUDED.type, board = EXCLUDED.board,
@@ -774,7 +782,8 @@ def run_task_sweep(conn, deep: bool = False, days: int = 0) -> dict:
                     gmail_id = COALESCE(EXCLUDED.gmail_id, task_board_items.gmail_id),
                     thread_id = COALESCE(EXCLUDED.thread_id, task_board_items.thread_id),
                     date_str = EXCLUDED.date_str,
-                    last_seen = NOW(), updated_at = NOW(),
+                    last_seen = clock_timestamp(),
+                    updated_at = clock_timestamp(),
                     status = CASE WHEN task_board_items.status = 'gone'
                                   THEN 'open' ELSE task_board_items.status END
             """, (t["task_key"], _board_for(t["type"]), t["type"], t["title"],
