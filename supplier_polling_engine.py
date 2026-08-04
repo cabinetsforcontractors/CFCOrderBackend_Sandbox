@@ -527,22 +527,25 @@ def check_tracking_updates() -> dict:
             if not is_moving:
                 summary["not_yet_moving"] += 1
                 print(f"[TRACKING] PRO {pro_number} — order {order_id} — not yet moving (status: {status_code})")
-                # MISSED-PICKUP WATCH (Wave 3 build I, 2026-08-02): BOL sent
-                # 48h+ ago and R+L still shows nothing = the pallet is likely
-                # sitting on the warehouse dock. One alarm per order.
+                # MISSED-PICKUP WATCH (Wave 3 build I, 2026-08-02;
+                # TIGHTENED William 8/4, the 5737 ruling: "ping rl to make
+                # sure the order was picked up within 8 working hours"):
+                # BOL out 8+ BUSINESS hours with no R+L scan = alarm. One
+                # alarm per order.
                 try:
                     bol_at = order.get("bol_sent_at")
                     if bol_at is not None:
                         import datetime as _dt
-                        age_h = (_dt.datetime.now(_dt.timezone.utc)
-                                 - bol_at).total_seconds() / 3600
-                        if age_h >= 48 and _watch_alert_once(
+                        from oos_detect import business_hours_between
+                        age_h = business_hours_between(
+                            bol_at, _dt.datetime.now(_dt.timezone.utc))
+                        if age_h >= 8 and _watch_alert_once(
                                 order_id, f"pickup_missed:{order_id}"):
                             from supplier_orders import _send_email
                             _send_email(
                                 order_id, CFC_INTERNAL_EMAIL,
                                 f"PICKUP MISSED? order #{order_id} - BOL sent "
-                                f"{int(age_h)}h ago, no R+L scan",
+                                f"{int(age_h)} business hours ago, no R+L scan",
                                 f"<p>The BOL for order #{order_id} (PRO "
                                 f"{pro_number}) went out {int(age_h)} hours "
                                 f"ago and R+L still shows NO pickup scan — "

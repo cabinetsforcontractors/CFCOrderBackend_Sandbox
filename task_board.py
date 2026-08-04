@@ -1010,9 +1010,22 @@ def get_tasks(_: bool = Depends(require_admin)):
                 WHERE created_at > NOW() - INTERVAL '3 days'
                 ORDER BY created_at DESC LIMIT 60
             """)
+            def _ev_data(ed):
+                if isinstance(ed, str):
+                    try:
+                        import json as _json
+                        ed = _json.loads(ed)
+                    except Exception:
+                        return {}
+                if not isinstance(ed, dict):
+                    return {}
+                return {k: (str(v)[:400] if not isinstance(v, (int, float, bool))
+                            else v)
+                        for k, v in ed.items() if k != "_fire"}
             events = [{"order_id": str(a), "event_type": b, "source": c or "",
                        "at": d.isoformat() if d else "",
-                       "detail": _event_detail(ed)}
+                       "detail": _event_detail(ed),
+                       "data": _ev_data(ed)}
                       for a, b, c, d, ed in cur.fetchall()]
             # the board clock = the last sweep that actually ran clean
             last_sweep = None

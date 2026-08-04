@@ -574,11 +574,21 @@ def build_po_email(order_id: str, warehouse: str, wdata: Dict) -> Dict:
                           f"{', '.join(color['blocked'][:6])} — the supplier "
                           f"would ask 'what color?'. Add the (supplier, "
                           f"prefix) pair to SUPPLIER_DOOR_INFO.")}
+    # C&S STORE-CREDIT LAW (William 8/4): our return credits at Cabinet &
+    # Stone (RINV/2026/59630 + RINV/2026/59635, granted 8/3, expire 12
+    # months) ride EVERY C&S PO as payment until exhausted.
+    credit_note = ""
+    if (warehouse or "").strip() in ("Cabinet & Stone", "Cabinet & Stone CA",
+                                     "C&S"):
+        credit_note = ("<p><strong>Payment: please apply our store credits "
+                       "RINV/2026/59630 and RINV/2026/59635 toward this "
+                       "order until they are used up.</strong></p>")
     html = (f"<div style='font-family:Arial,sans-serif;font-size:14px;'>"
             f"<p>{supplier_greeting(warehouse)}</p>"
             f"<p>Please process our order <strong>PO {order_id}</strong>:{door_txt}</p>"
             f"{_supplier_lines_table(items)}"
             f"<p><strong>Total Qty All SKUS: {total_units}</strong></p>"
+            f"{credit_note}"
             f"{color['html']}"
             f"{STOCK_CHECK_ASK}"
             f"{SIGNATURE_HTML}</div>")
