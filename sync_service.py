@@ -92,6 +92,29 @@ def sync_order_from_b2bwave(order_data: dict) -> dict:
         is_pickup = bool(detect_warehouse_pickup(order))
     except Exception as e:
         print(f"[SYNC] pickup detect failed {order_id}: {e}")
+    # ⚖️ 75-MILE PICKUP RULE OVERRIDE (William 8/4, the 5698 lesson): once
+    # the distance rule converts a "pickup" order to a shipped order, the
+    # sticky detector must never flip it back — the override event is the
+    # senior law.
+    if is_pickup:
+        try:
+            with get_db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""SELECT 1 FROM order_events
+                                   WHERE order_id = %s
+                                     AND event_type = 'pickup_distance_override'
+                                   LIMIT 1""", (str(order_id),))
+                    if cur.fetchone():
+                        is_pickup = False
+                        # the upsert is sticky-true (OR) — clear the
+                        # stored flag here so false actually lands
+                        cur.execute("""UPDATE orders SET is_pickup = FALSE
+                                       WHERE order_id = %s
+                                         AND is_pickup = TRUE""",
+                                    (str(order_id),))
+                        conn.commit()
+        except Exception as e:
+            print(f"[SYNC] pickup override check failed {order_id}: {e}")
 
     submitted_at = order.get('submitted_at')
     if submitted_at:
