@@ -123,6 +123,9 @@ class OrderUpdate(BaseModel):
     # auditor reads it) — it must be settable/correctable through the door.
     shipping_cost: Optional[float] = None
     pro_number: Optional[str] = None
+    # 8/4 (the 5755 lesson): pickup lives in the customer's own words as
+    # often as in B2BWave's flag — the human must be able to set it.
+    is_pickup: Optional[bool] = None
 
 
 class CheckpointUpdate(BaseModel):
