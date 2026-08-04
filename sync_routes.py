@@ -129,6 +129,19 @@ def sync_from_b2bwave(days_back: int = 14, _: bool = Depends(require_admin)):
     }
 
 
+@sync_router.get("/debug/b2bwave-raw/{order_id}")
+def get_b2bwave_raw(order_id: str, _: bool = Depends(require_admin)):
+    """Raw B2BWave order payload [admin] — field-name diagnostics (8/4,
+    born hunting the customer-PO field)."""
+    if not SYNC_SERVICE_LOADED:
+        raise HTTPException(status_code=503, detail="sync_service not loaded")
+    data = b2bwave_api_request("orders", {"id_eq": order_id})
+    order_data = (data[0] if isinstance(data, list) and data else data) or {}
+    slim = {k: (v if not isinstance(v, list)
+                else f"[list x{len(v)}]") for k, v in order_data.items()}
+    return {"status": "ok", "keys": sorted(order_data.keys()), "order": slim}
+
+
 @sync_router.get("/b2bwave/order/{order_id}")
 def get_b2bwave_order(order_id: str, _: bool = Depends(require_admin)):
     """Fetch a specific order from B2BWave and sync it."""
