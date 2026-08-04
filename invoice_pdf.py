@@ -146,7 +146,12 @@ def generate_invoice_pdf(order_data: dict, shipping_result: dict) -> Optional[by
     # BILLING / SHIPPING blocks (same content as the email) + invoice info
     bill_to_content = (f"<b>{company_name}</b><br/>{customer_name}<br/>"
                        f"{addr_lines}<br/>{phone}<br/>{email}")
-    ship_to_content = f"<b>{company_name}</b><br/>{addr_lines}"
+    # 🚚 PICKUP LAW (William 8/4): pickup invoices say WAREHOUSE PICKUP
+    if order_data.get('is_pickup'):
+        ship_to_content = ("<b>WAREHOUSE PICKUP</b><br/>"
+                           "Collect at the warehouse &mdash; we'll say when it's ready")
+    else:
+        ship_to_content = f"<b>{company_name}</b><br/>{addr_lines}"
 
     info_table = Table(
         [['Invoice #:', order_id],

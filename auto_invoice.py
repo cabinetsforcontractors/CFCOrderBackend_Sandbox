@@ -63,11 +63,64 @@ def _event(order_id: str, event_type: str, data: Dict):
         print(f"[AUTO-INVOICE] event log failed {order_id}: {e}")
 
 
+def _pickup_too_far(order_id: str, order: Dict):
+    """⚖️ 75-MILE PICKUP RULE (William 8/4): a pickup order whose
+    destination sits farther than PICKUP_MAX_MILES from its warehouse
+    ships anyway — shipping is added automatically. Returns
+    {'miles', 'warehouse'} when over the line, None when pickup stands
+    (or when distance can't be determined — never guess)."""
+    try:
+        from config import (WAREHOUSE_COORDS, PICKUP_MAX_MILES,
+                            RL_QUOTE_SANDBOX_URL, miles_between)
+        coords = [(w, WAREHOUSE_COORDS.get((order.get(f"warehouse_{i}")
+                                            or "").strip()))
+                  for i, w in ((1, order.get("warehouse_1")),
+                               (2, order.get("warehouse_2")),
+                               (3, order.get("warehouse_3")),
+                               (4, order.get("warehouse_4")))]
+        coords = [(w, c) for w, c in coords if w and c]
+        if not coords:
+            return None
+        import json as _json
+        import urllib.request
+        body = _json.dumps({
+            "street": order.get("street") or "",
+            "street2": order.get("street2") or "",
+            "city": order.get("city") or "",
+            "state": order.get("state") or "",
+            "zip_code": (order.get("zip_code") or "").split("-")[0][:5],
+        }).encode()
+        req = urllib.request.Request(
+            f"{RL_QUOTE_SANDBOX_URL}/validate-address", data=body,
+            method="POST", headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            v = _json.loads(resp.read().decode())
+        addr = v.get("address") or {}
+        lat, lon = addr.get("latitude"), addr.get("longitude")
+        if lat is None or lon is None:
+            return None
+        best = min(((w, miles_between(lat, lon, c[0], c[1]))
+                    for w, c in coords), key=lambda x: x[1])
+        if best[1] > PICKUP_MAX_MILES:
+            return {"miles": round(best[1]), "warehouse": best[0],
+                    "limit": PICKUP_MAX_MILES}
+    except Exception as e:
+        print(f"[AUTO-INVOICE] pickup-distance check failed {order_id}: {e}")
+    return None
+
+
 def auto_shipping(order_id: str, order: Dict) -> Dict:
     """BEAT A. Returns {'ok': True, 'shipping': X, 'detail': ...} or
     {'ok': False, 'reason': ...}."""
     if order.get("is_pickup"):
-        return {"ok": True, "shipping": 0.0, "detail": "warehouse pickup"}
+        far = _pickup_too_far(order_id, order)
+        if not far:
+            return {"ok": True, "shipping": 0.0,
+                    "detail": "warehouse pickup"}
+        _event(order_id, "pickup_distance_override", far)
+        print(f"[AUTO-INVOICE] {order_id}: pickup marked but customer is "
+              f"{far['miles']} mi from {far['warehouse']} — 75-MILE RULE, "
+              f"shipping added")
     try:
         from freight_router import carrier_quote_order
         q = carrier_quote_order(order_id)

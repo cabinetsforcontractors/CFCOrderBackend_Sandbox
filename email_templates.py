@@ -471,6 +471,19 @@ def _render_payment_link(order: Dict) -> str:
     # invoiced without a payment link — the policy consent rides payment
     # itself, and the pay button is replaced by a check notice.
     pay_by_check = bool(order.get("pay_by_check"))
+    # 🚚 PICKUP LAW (William 8/4): a pickup invoice says WAREHOUSE PICKUP —
+    # never a ship-to address with a verify warning.
+    if bool(order.get("is_pickup")):
+        shipping_to_box = """<div style="color:rgb(51,51,51);border:2px solid rgb(29,201,183);border-radius:6px;padding:14px;margin:18px 0px">
+<div style="font-weight:700">&#128666; SHIPPING TO: WAREHOUSE PICKUP</div>
+<div style="margin:6px 0">This order is set for pickup at the warehouse &mdash; we&rsquo;ll let you know when it&rsquo;s ready to collect.</div>
+</div>"""
+    else:
+        shipping_to_box = f"""<div style="color:rgb(51,51,51);border:2px solid rgb(29,201,183);border-radius:6px;padding:14px;margin:18px 0px">
+<div style="font-weight:700">&#128666; SHIPPING TO:</div>
+<div style="font-weight:700;margin:6px 0">{company}, {ship_line}</div>
+<div style="color:#c0392b;font-weight:700">Please verify this address BEFORE paying. If your ship-to address has changed, reply to this email first &mdash; shipping cost may change with a different address.</div>
+</div>"""
     policy_intro = ("By paying this invoice you agree to the following policies:"
                     if pay_by_check else
                     "By clicking the payment link you agree to the following policies:")
@@ -527,11 +540,7 @@ Please remit the Grand Total per our usual arrangement, and reply to this email 
 <tr><td colspan="2"></td><td style="padding:6px;text-align:right">{ship_label}</td><td style="padding:6px;text-align:right">${total_shipping:,.2f}</td></tr>
 <tr><td colspan="2"></td><td style="padding:6px;text-align:right;font-weight:700">Grand Total</td><td style="padding:6px;text-align:right;font-weight:700">${grand_total:,.2f}</td></tr>
 </tfoot></table>
-<div style="color:rgb(51,51,51);border:2px solid rgb(29,201,183);border-radius:6px;padding:14px;margin:18px 0px">
-<div style="font-weight:700">&#128666; SHIPPING TO:</div>
-<div style="font-weight:700;margin:6px 0">{company}, {ship_line}</div>
-<div style="color:#c0392b;font-weight:700">Please verify this address BEFORE paying. If your ship-to address has changed, reply to this email first &mdash; shipping cost may change with a different address.</div>
-</div>
+{shipping_to_box}
 {residential_notice}
 {policy_box}
 {pay_cta}

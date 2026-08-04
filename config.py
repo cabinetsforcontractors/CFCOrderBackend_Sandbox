@@ -193,6 +193,49 @@ WAREHOUSE_TIMEZONES = {
 }
 
 
+# =============================================================================
+# ⚖️ 75-MILE PICKUP RULE (William 2026-08-04, the 5698 lesson: LD marked
+# warehouse pickup from Fountain Inn SC — hundreds of miles from LI's
+# dock). A "pickup" order whose destination is farther than
+# PICKUP_MAX_MILES (default 75) from its warehouse gets SHIPPING ADDED
+# automatically. City-level coordinates are plenty for a 75-mile line.
+# =============================================================================
+
+WAREHOUSE_COORDS = {
+    'LI':                     (29.624, -81.892),   # Interlachen FL
+    'DL':                     (30.245, -81.553),   # Jacksonville FL
+    'ROC':                    (33.941, -84.213),   # Norcross GA
+    'GHI':                    (27.521, -82.572),   # Palmetto FL
+    'Go Bravura':             (29.960, -95.495),   # Houston TX
+    'Love-Milestone':         (28.396, -81.365),   # Orlando FL
+    'Cabinet & Stone':        (29.803, -95.559),   # Houston TX
+    'Cabinet & Stone CA':     (33.989, -118.089),  # Pico Rivera CA
+    'DuraStone':              (29.888, -95.398),   # Houston TX
+    'L&C Cabinetry':          (36.834, -76.093),   # Virginia Beach VA
+    'Linda':                  (33.721, -85.146),   # Bremen GA
+    'Cabinetry Distribution': (29.624, -81.892),
+    'DL Cabinetry':           (30.245, -81.553),
+    'ROC Cabinetry':          (33.941, -84.213),
+    'GHI Cabinets':           (27.521, -82.572),
+    'Dealer Cabinetry':       (33.721, -85.146),
+    'L&C':                    (36.834, -76.093),
+}
+
+PICKUP_MAX_MILES = float(os.environ.get("PICKUP_MAX_MILES", "75") or 75)
+
+
+def miles_between(lat1, lon1, lat2, lon2) -> float:
+    """Great-circle miles."""
+    import math
+    r = 3958.8
+    p1, p2 = math.radians(float(lat1)), math.radians(float(lat2))
+    dp = p2 - p1
+    dl = math.radians(float(lon2) - float(lon1))
+    a = (math.sin(dp / 2) ** 2
+         + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2)
+    return 2 * r * math.asin(math.sqrt(a))
+
+
 def warehouse_tz(warehouse: str) -> str:
     """The warehouse's IANA zone; Eastern when unknown."""
     return WAREHOUSE_TIMEZONES.get((warehouse or "").strip(),
