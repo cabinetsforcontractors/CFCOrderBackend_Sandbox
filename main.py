@@ -234,6 +234,11 @@ app.include_router(sync_router)               # Phase 5B: /b2bwave/* /gmail/* /s
 app.include_router(migration_router)          # Phase 5B: /init-db /add-* /fix-* /debug/orders-columns
 app.include_router(checkout_router)           # Phase 5B: /checkout* /checkout-ui/* /webhook/*
 app.include_router(bol_router)                # Phase 8:  /bol/{shipment_id}/create  /bol/{shipment_id}/status
+try:
+    from small_package import small_package_router
+    app.include_router(small_package_router)  # 8/4: /small-package/plan /shippo/quote (the UPS lane)
+except Exception as _e:
+    print(f"[STARTUP] small_package not loaded: {_e}")
 app.include_router(supplier_router)           # Phase 9:  /supplier/{token}/* + /supplier/{id}/send-poll
 
 if INVOICE_LOADED:

@@ -963,6 +963,60 @@ def _parse_due(s):
 # ENDPOINTS
 # =============================================================================
 
+def _order_beats(cur, order_ids):
+    """TODAY / PENDING SPLIT (William 8/4): every order-linked card says
+    what fires NOW and what waits in line. Trusted customers (Nationwide,
+    Gerald, Acute) dispatch BEFORE payment — the trusted table drives it."""
+    ids = [str(x) for x in order_ids if x]
+    if not ids:
+        return {}
+    cur.execute("""
+        SELECT o.order_id, COALESCE(o.payment_link_sent, false),
+               COALESCE(o.payment_received, false),
+               COALESCE(o.sent_to_warehouse, false),
+               COALESCE(o.warehouse_confirmed, false),
+               COALESCE(o.bol_sent, false),
+               COALESCE(o.is_pickup, false), o.tracking,
+               COALESCE(o.is_complete, false),
+               EXISTS (SELECT 1 FROM trusted_customers t
+                       WHERE LOWER(t.customer_name) =
+                             LOWER(COALESCE(o.customer_name, ''))
+                          OR (COALESCE(t.company_name, '') <> '' AND
+                              LOWER(t.company_name) =
+                              LOWER(COALESCE(o.company_name, ''))))
+        FROM orders o WHERE o.order_id = ANY(%s)
+    """, (ids,))
+    beats = {}
+    for (oid, link, paid, sent, confirmed, bol, pickup, tracking,
+         complete, trusted) in cur.fetchall():
+        if complete:
+            continue
+        today, pending = [], []
+        if not link and not paid:
+            today.append("send the invoice")
+        if not sent:
+            if trusted or paid:
+                today.append("send to warehouse"
+                             + (" (trusted — before payment)"
+                                if trusted and not paid else ""))
+            else:
+                pending.append("send to warehouse (fires on payment)")
+        else:
+            if not confirmed:
+                pending.append("warehouse confirmation (robot watches)")
+            if not pickup and not bol:
+                pending.append("BOL + pickup when the warehouse is ready")
+        if pickup and not complete:
+            pending.append("customer collects at the warehouse")
+        if bol and tracking:
+            pending.append(f"transit watch PRO {tracking} (robot)")
+        if link and not paid:
+            pending.append("payment (invoice is out)")
+        beats[str(oid)] = {"today": today, "pending": pending,
+                           "trusted": bool(trusted)}
+    return beats
+
+
 def _event_detail(ed) -> str:
     """WHAT-IT-WAS LAW (William 8/4): DONE RECENTLY must say what really
     happened, not just the event name — pull the human bits out of the
@@ -1043,6 +1097,18 @@ def get_tasks(_: bool = Depends(require_admin)):
             if r.get(k) is not None and hasattr(r[k], "isoformat"):
                 r[k] = r[k].isoformat()
     open_rows = [r for r in rows if r["status"] == "open"]
+    # TODAY / PENDING SPLIT (William 8/4) — beats ride every order card
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                beats = _order_beats(
+                    cur, {r.get("order_id") for r in open_rows})
+        for r in open_rows:
+            b = beats.get(str(r.get("order_id") or ""))
+            if b:
+                r["beats"] = b
+    except Exception as e:
+        print(f"[TASKS] beats failed: {e}")
     handled = [r for r in rows if r["status"] == "handled"][:25]
     return {
         "status": "ok",
