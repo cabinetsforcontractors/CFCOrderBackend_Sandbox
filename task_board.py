@@ -102,7 +102,8 @@ FLAG_INBOXES = {b.strip().lower() for b in [
 NO_REPLY_BUSINESS_DAYS = 2
 ORDER_TYPES = {"unpaid-order", "supplier-action", "shipment-watch",
                "unread-customer", "unread-supplier", "unread-website",
-               "unread-payment", "robot-flag", "draft-waiting", "info"}
+               "unread-payment", "robot-flag", "draft-waiting", "info",
+               "needs-invoice"}
 
 # STICKY LAW (William 8/1): email-born cards leave only by action/heal.
 # State-born cards clear when their source state resolves (gone-sweep),
@@ -110,7 +111,8 @@ ORDER_TYPES = {"unpaid-order", "supplier-action", "shipment-watch",
 GONE_SWEEP_SECTIONS = {"unpaid": "unpaid-order",
                        "supplier": "supplier-action",
                        "daylight": "shipment-watch",
-                       "drafts": "draft-waiting"}
+                       "drafts": "draft-waiting",
+                       "needs_invoice": "needs-invoice"}
 
 # Full-sweep windows (hours) — also the ceiling for incremental windows.
 FULL_UNREAD_H = 7 * 24
@@ -537,6 +539,43 @@ def _sweep_unpaid(cur):
     return tasks
 
 
+def _sweep_needs_invoice(cur):
+    """NEEDS-HUMAN LAW (William 8/4, the 5698 lesson): an ACTIVE order
+    with NO invoice out is a QUEUE item born from STATE — the alert email
+    for 5698 died on the very Gmail token blip that killed its invoice
+    send, so email can never be the only card source. Self-heals: the
+    moment an invoice/payment lands, the gone-sweep retires the card."""
+    cur.execute("""
+        SELECT o.order_id, COALESCE(o.company_name, o.customer_name, ''),
+               o.order_total, o.order_date,
+               (SELECT e.event_data->>'reason' FROM order_events e
+                WHERE e.order_id = o.order_id
+                  AND e.event_type = 'auto_invoice_needs_human'
+                ORDER BY e.created_at DESC LIMIT 1)
+        FROM orders o
+        WHERE o.payment_received = false AND o.is_complete = false
+          AND COALESCE(o.payment_link_sent, false) = false
+          AND COALESCE(o.lifecycle_status, 'active') = 'active'
+          AND COALESCE(o.order_total, 0) > 0
+          AND o.order_date < NOW() - INTERVAL '2 hours'
+    """)
+    test_ids = _registry_ids()
+    tasks = []
+    for oid, company, total, odate, reason in cur.fetchall():
+        if str(oid) in test_ids:
+            continue
+        tasks.append({
+            "task_key": f"needsinvoice:{oid}", "type": "needs-invoice",
+            "title": f"NO INVOICE OUT — order #{oid} ({company})",
+            "detail": (f"${float(total):,.2f}, ordered {odate:%m/%d} — "
+                       + (f"robot blocked: {reason[:160]}" if reason
+                          else "no invoice has gone out")),
+            "order_id": str(oid),
+            "date_str": odate.isoformat() if odate else "",
+        })
+    return tasks
+
+
 def _sweep_supplier_orders(cur):
     cur.execute("""
         SELECT id, order_id, warehouse, status FROM supplier_orders
@@ -692,6 +731,7 @@ def run_task_sweep(conn, deep: bool = False, days: int = 0) -> dict:
             known_ids, errors["known_ids"] = set(), str(e)
             conn.rollback()
         for name, fn in [("unpaid", _sweep_unpaid),
+                         ("needs_invoice", _sweep_needs_invoice),
                          ("supplier", _sweep_supplier_orders),
                          ("daylight", _sweep_daylight)]:
             try:
