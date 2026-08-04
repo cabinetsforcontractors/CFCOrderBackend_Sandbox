@@ -62,9 +62,12 @@ def build_walk_list() -> Dict:
         # are AUDIT inputs, their own section · deferred items are NEVER
         # shown before their day ("you are my memory")
         import re as _re
+        # 8/4 add: R+L BILL2 freight-bill forwards + rlinvoices batches
+        # are cost cross-checks by his law, never needs-you
         _XCHECK_RE = _re.compile(
             r"pirate ship|daylight|adjustment notice|"
-            r"roc cabinetry (order|invoice)|received your payment", _re.I)
+            r"roc cabinetry (order|invoice)|received your payment|"
+            r"r&l carriers - bill2|r\+l carriers invoices|rlinvoices", _re.I)
         try:
             with conn.cursor() as cur:
                 cur.execute("""

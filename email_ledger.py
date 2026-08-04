@@ -481,6 +481,47 @@ def apply_facts_to_orders(dry_run: bool = False) -> Dict:
 # THE LEDGER CYCLE (rides every gmail-sync run: ingest -> rebuild -> apply)
 # =============================================================================
 
+def stamp_hand_sent_invoices(days_back: int = 3) -> Dict:
+    """HAND-SEND STAMP (William 8/4): a sent-folder email whose subject is
+    the robot's own invoice subject stamps payment_link_sent on its
+    order. Born from the 8/4 sweep: 5698/5755 invoices went out by his
+    hand and the board still shouted 'send the invoice'."""
+    import re as _re
+    out = {"stamped": []}
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT DISTINCT subject FROM email_ledger
+                WHERE folder = 'sent'
+                  AND email_date > NOW() - (%s || ' days')::interval
+                  AND subject ILIKE 'Invoice For Your order #%%'
+            """, (int(days_back),))
+            subjects = [r[0] for r in cur.fetchall()]
+        for subj in subjects:
+            m = _re.search(r"#(\d{3,5})", subj or "")
+            if not m:
+                continue
+            oid = m.group(1)
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE orders
+                    SET payment_link_sent = TRUE, updated_at = NOW()
+                    WHERE order_id = %s
+                      AND COALESCE(payment_link_sent, FALSE) = FALSE
+                      AND COALESCE(payment_received, FALSE) = FALSE
+                """, (oid,))
+                if cur.rowcount:
+                    cur.execute("""
+                        INSERT INTO order_events
+                            (order_id, event_type, event_data, source)
+                        VALUES (%s, 'invoice_sent_detected', %s,
+                                'hand_send_stamp')
+                    """, (oid, json.dumps({"subject": (subj or "")[:140]})))
+                    out["stamped"].append(oid)
+            conn.commit()
+    return out
+
+
 def run_ledger_cycle(hours_back: int = 24) -> Dict:
     ing = ingest_new_messages(hours_back=hours_back)
     if ing.get("new_rows"):
@@ -488,6 +529,16 @@ def run_ledger_cycle(hours_back: int = 24) -> Dict:
         app = apply_facts_to_orders()
     else:
         reb, app = {"orders": 0}, {"stamped": [], "errors": []}
+    # HAND-SEND STAMP (8/4 lesson, the 5698/5755 case): William sends
+    # invoice DRAFTS from Gmail by his own hand -- the robot must notice
+    # its own invoice subject in the SENT ledger and stamp
+    # payment_link_sent (trigger-silent, no polls fire on this
+    # checkpoint). Idempotent: only unstamped unpaid orders.
+    hand_stamp = {}
+    try:
+        hand_stamp = stamp_hand_sent_invoices()
+    except Exception as e:
+        hand_stamp = {"errors": [str(e)]}
     # R+L delivered notices -> customer delivered-email DRAFTS (William
     # 2026-07-28 "yes" ruling; idempotent, safe to run every cycle)
     rl = {}
