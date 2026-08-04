@@ -160,6 +160,9 @@ def _ensure_tables(conn):
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
             )
         """)
+        # RECURRING TASKS (William 8/4): daily / weekly / monthly repeats
+        cur.execute("""ALTER TABLE task_board_items
+                       ADD COLUMN IF NOT EXISTS repeat VARCHAR(10)""")
         # legacy v1 notes table stays for one-time migration
         cur.execute("""
             CREATE TABLE IF NOT EXISTS task_board_notes (
@@ -1058,14 +1061,14 @@ def get_tasks(_: bool = Depends(require_admin)):
             cur.execute("""
                 SELECT task_key, board, type, title, detail, order_id, gmail_id,
                        thread_id, date_str, due_date, status, note, note_at,
-                       last_seen
+                       last_seen, repeat
                 FROM task_board_items
                 WHERE status IN ('open', 'handled')
                 ORDER BY (status = 'open') DESC, last_seen DESC
             """)
             cols = ["task_key", "board", "type", "title", "detail", "order_id",
                     "gmail_id", "thread_id", "date_str", "due_date", "status",
-                    "note", "note_at", "last_seen"]
+                    "note", "note_at", "last_seen", "repeat"]
             rows = [dict(zip(cols, r)) for r in cur.fetchall()]
             cur.execute("""
                 SELECT order_id, event_type, source, created_at, event_data
@@ -1361,6 +1364,38 @@ def task_done(payload: dict = Body(...), _: bool = Depends(require_admin)):
     with get_db() as conn:
         _ensure_tables(conn)
         with conn.cursor() as cur:
+            # RECURRING (William 8/4): Done on a repeating task ROLLS the
+            # due date forward instead of retiring the card.
+            cur.execute("""SELECT repeat, due_date FROM task_board_items
+                           WHERE task_key = %s""", (task_key,))
+            row = cur.fetchone()
+            if row and row[0]:
+                repeat = row[0]
+                from datetime import date as _date, timedelta as _td
+                base = max(row[1] or _date.today(), _date.today())
+                if repeat == "daily":
+                    nxt = base + _td(days=1)
+                elif repeat == "weekly":
+                    nxt = base + _td(days=7)
+                else:
+                    m = base.month % 12 + 1
+                    y = base.year + (1 if base.month == 12 else 0)
+                    try:
+                        nxt = base.replace(year=y, month=m)
+                    except ValueError:
+                        nxt = _date(y, m, 28)
+                cur.execute("""
+                    UPDATE task_board_items
+                    SET due_date = %s,
+                        note = '[done ' || to_char(clock_timestamp(),
+                               'MM/DD') || ' - rolls ' || repeat || ']',
+                        note_at = clock_timestamp(),
+                        updated_at = clock_timestamp()
+                    WHERE task_key = %s
+                """, (nxt, task_key))
+                conn.commit()
+                return {"status": "ok", "task_key": task_key,
+                        "rolled_to": str(nxt), "repeat": repeat}
             cur.execute("""
                 UPDATE task_board_items
                 SET status = 'handled',
@@ -1370,6 +1405,25 @@ def task_done(payload: dict = Body(...), _: bool = Depends(require_admin)):
             hit = cur.rowcount
         conn.commit()
     return {"status": "ok" if hit else "error", "task_key": task_key}
+
+
+@task_router.post("/tasks/delete")
+def task_delete(payload: dict = Body(...), _: bool = Depends(require_admin)):
+    """DELETE a manual/follow-up task outright (William 8/4 -- for killing
+    recurring tasks). Only human-made rows can be deleted; swept cards
+    settle through their own doors."""
+    task_key = (payload.get("task_key") or "").strip()
+    with get_db() as conn:
+        _ensure_tables(conn)
+        with conn.cursor() as cur:
+            cur.execute("""DELETE FROM task_board_items
+                           WHERE task_key = %s
+                             AND type IN ('manual', 'follow-up')""",
+                        (task_key,))
+            hit = cur.rowcount
+        conn.commit()
+    return {"status": "ok" if hit else "error", "task_key": task_key,
+            "deleted": bool(hit)}
 
 
 @task_router.post("/tasks/due")
@@ -1399,6 +1453,12 @@ def add_manual(payload: dict = Body(...), _: bool = Depends(require_admin)):
     text = (payload.get("text") or "").strip()
     due = _parse_due(payload.get("due_date"))
     order_id = str(payload.get("order_id") or "").strip() or None
+    # RECURRING TASKS (William 8/4: bank statements, card paydowns --
+    # "events that happen over and over again")
+    repeat = (payload.get("repeat") or "").strip().lower() or None
+    if repeat and repeat not in ("daily", "weekly", "monthly"):
+        return {"status": "error",
+                "message": "repeat must be daily, weekly or monthly"}
     if not text:
         return {"status": "error", "message": "text required"}
     if order_id:
@@ -1416,11 +1476,13 @@ def add_manual(payload: dict = Body(...), _: bool = Depends(require_admin)):
             cur.execute("""
                 INSERT INTO task_board_items
                     (task_key, board, type, title, detail, order_id, due_date,
-                     date_str, status)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'open')
+                     date_str, status, repeat)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'open', %s)
             """, (key, board, ttype, text,
-                  "added by William" + (f", follow up {due}" if due else ""),
-                  order_id, due, datetime.now(timezone.utc).isoformat()))
+                  "added by William" + (f", follow up {due}" if due else "")
+                  + (f" - repeats {repeat}" if repeat else ""),
+                  order_id, due, datetime.now(timezone.utc).isoformat(),
+                  repeat))
         conn.commit()
     return {"status": "ok", "task_key": key, "due_date": due, "board": board}
 

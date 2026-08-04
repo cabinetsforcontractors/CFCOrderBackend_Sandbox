@@ -381,6 +381,18 @@ def create_invoice_draft(
     if pays_by_check(order_data) or no_link:
         auto_link = False
         order_data["pay_by_check"] = True
+    # ONE LIVE LINK PER ORDER (8/4 lesson — 5698 needed THREE hand-kills
+    # in one morning; stale links are the 5752 double-pay trap): every
+    # re-draft of an UNPAID order kills the order's previous links first.
+    if not order_data.get("payment_received"):
+        try:
+            from auto_invoice import kill_order_links
+            kr = kill_order_links(order_id)
+            if kr.get("killed"):
+                print(f"[EMAIL] draft-invoice {order_id}: killed stale "
+                      f"links {kr['killed']}")
+        except Exception as e:
+            print(f"[EMAIL] draft-invoice link-kill failed {order_id}: {e}")
     if (note or "").strip():
         # William 2026-07-28 (the 5731 B09->B09-FH case): a per-invoice note
         # rides the email body AND the PDF when passed.
