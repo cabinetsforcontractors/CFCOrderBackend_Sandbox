@@ -603,6 +603,12 @@ def _sweep_no_reply(known_ids, hours=FULL_NOREPLY_H, cap=40, thread_cap=25):
         age = business_days_since(sent_at)
         if age < NO_REPLY_BUSINESS_DAYS:
             continue
+        # TEST-LANE FILTER (8/4 walk lesson): the robot's own emails on
+        # REGISTERED TEST orders (5753/5754 class) never expect answers —
+        # six of them stood on his Tuesday board as "needs you".
+        oid_for_test = extract_order_id(subject)
+        if oid_for_test and str(oid_for_test) in _registry_ids():
+            continue
         tasks.append({
             "task_key": f"noreply:{tid}", "type": "no-reply",
             "title": f"No answer yet: {subject}",
