@@ -121,6 +121,18 @@ def auto_shipping(order_id: str, order: Dict) -> Dict:
         print(f"[AUTO-INVOICE] {order_id}: pickup marked but customer is "
               f"{far['miles']} mi from {far['warehouse']} — 75-MILE RULE, "
               f"shipping added")
+        # the order truly SHIPS now — flip the flag so every surface
+        # (invoice header, pickup flows) tells the same story
+        try:
+            with get_db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""UPDATE orders SET is_pickup = FALSE,
+                                          updated_at = NOW()
+                                   WHERE order_id = %s""", (order_id,))
+                    conn.commit()
+            order["is_pickup"] = False
+        except Exception as e:
+            print(f"[AUTO-INVOICE] pickup flag flip failed {order_id}: {e}")
     try:
         from freight_router import carrier_quote_order
         q = carrier_quote_order(order_id)
