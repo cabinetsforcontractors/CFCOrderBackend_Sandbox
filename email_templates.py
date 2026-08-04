@@ -499,8 +499,8 @@ def _render_payment_link(order: Dict) -> str:
 
     if pay_by_check:
         pay_cta = """<div style="border:2px solid #1D4ED8;border-radius:8px;padding:16px 18px;margin:26px 0;text-align:center;font-size:14px;color:rgb(51,51,51);line-height:1.6">
-<strong>&#128179; This account is invoiced for payment by check</strong> &mdash; no online payment is needed.<br>
-Please send your check for the Grand Total per our usual arrangement, and reply to this email if you need remittance details.</div>"""
+<strong>&#128179; This account is invoiced for direct payment (check or ACH)</strong> &mdash; no online payment is needed.<br>
+Please remit the Grand Total per our usual arrangement, and reply to this email if you need remittance details.</div>"""
     else:
         # WORDING LAW (William 2026-08-02): the shouty CTA was a spam flag —
         # softened, no sliced-image tricks (those carry a worse fingerprint)

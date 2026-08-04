@@ -239,7 +239,7 @@ async def roc_schedule_draft(order_id: str, ready_date: str,
 async def draft_invoice(order_id: str, to: str = "", shipping: float = 0.0,
                         square_link: str = "", tariff_rate: float = 0.08,
                         auto_link: bool = True, note: str = "",
-                        residential: str = ""):
+                        residential: str = "", no_link: bool = False):
     """BEAT 3: render the v4 invoice (template + PDF + pick list) into a Gmail
     DRAFT with the PDFs attached. Never sends. Empty square_link +
     auto_link=true (the default, 2026-07-27) -> the robot CREATES the Square
@@ -254,7 +254,8 @@ async def draft_invoice(order_id: str, to: str = "", shipping: float = 0.0,
                                   tariff_rate=tariff_rate,
                                   auto_link=auto_link,
                                   note=note,
-                                  residential=residential)
+                                  residential=residential,
+                                  no_link=no_link)
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("error"))
     return result

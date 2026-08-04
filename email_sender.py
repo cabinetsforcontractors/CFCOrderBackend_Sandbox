@@ -352,6 +352,7 @@ def create_invoice_draft(
     auto_link: bool = True,
     note: str = "",
     residential: str = "",
+    no_link: bool = False,
 ) -> dict:
     """BEAT 3 (William 2026-07-26): render the v4 invoice (template + PDF)
     from the order row and land it as a GMAIL DRAFT with the PDF attached —
@@ -375,7 +376,9 @@ def create_invoice_draft(
     # pay-by-check accounts (William 2026-07-29, Nationwide): no Square link
     # on their invoices — check notice replaces the pay button.
     from config import pays_by_check
-    if pays_by_check(order_data):
+    # no_link (William 8/4, the UFP/ACH case): direct-payment accounts
+    # beyond the env list — the check/ACH notice replaces the pay button.
+    if pays_by_check(order_data) or no_link:
         auto_link = False
         order_data["pay_by_check"] = True
     if (note or "").strip():
