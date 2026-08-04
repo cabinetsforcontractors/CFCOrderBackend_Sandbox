@@ -83,7 +83,8 @@ def sync_order_from_b2bwave(order_data: dict) -> dict:
     # CUSTOMER PO / REFERENCE (William 8/4, the UFP-card lesson): B2BWave
     # carries the buyer's PO (e.g. UFP-0398138917) - store it so the
     # robot can MATCH POs to orders.
-    customer_reference = str(order.get('customer_reference')
+    customer_reference = str(order.get('customer_order_reference')
+                             or order.get('customer_reference')
                              or order.get('order_customer_reference')
                              or '').strip()[:120]
     order_total = float(order.get('gross_total', 0) or 0)
