@@ -899,6 +899,52 @@ def run_task_sweep(conn, deep: bool = False, days: int = 0) -> dict:
         except Exception as e:
             errors["answered"] = str(e)
             conn.rollback()
+        # MANUAL-CARD SELF-SETTLE (William 8/4: "this should have been
+        # marked handled by the robot - we made a real order and sent an
+        # invoice"): an open manual/follow-up card that NAMES an order
+        # (#5xxx) settles itself once that order shows real progress
+        # (invoiced / dispatched / paid / BOL) AFTER the card was born.
+        # Cards without an order number cannot be linked - the law going
+        # forward: manual cards carry the order #.
+        selfset = 0
+        try:
+            cur.execute("""SELECT task_key, title, first_seen
+                           FROM task_board_items
+                           WHERE status = 'open'
+                             AND type IN ('manual', 'follow-up')""")
+            _manuals = cur.fetchall()
+            import re as _re_ss
+            for _mkey, _mtitle, _mseen in _manuals:
+                _ids = set(_re_ss.findall(r"#?\b(5\d{3})\b", _mtitle or ""))
+                if not _ids or _mseen is None:
+                    continue
+                cur.execute("""
+                    SELECT order_id, event_type FROM order_events
+                    WHERE order_id = ANY(%s)
+                      AND event_type IN ('invoice_auto_sent',
+                                         'invoice_drafted',
+                                         'invoice_sent_detected',
+                                         'payment_link_created',
+                                         'payment_received',
+                                         'supplier_dispatch', 'bol_created')
+                      AND created_at > %s
+                    ORDER BY created_at DESC LIMIT 1
+                """, (list(_ids), _mseen))
+                _hit = cur.fetchone()
+                if _hit:
+                    cur.execute("""
+                        UPDATE task_board_items
+                        SET status = 'handled',
+                            note = '[robot settled: order #' || %s ||
+                                   ' progressed - ' || %s || ']',
+                            note_at = clock_timestamp(),
+                            updated_at = clock_timestamp()
+                        WHERE task_key = %s AND repeat IS NULL
+                    """, (str(_hit[0]), _hit[1], _mkey))
+                    selfset += cur.rowcount
+        except Exception as e:
+            errors["selfsettle"] = str(e)
+            conn.rollback()
         # ARCHIVE PURGE (William approved 2026-07-29): completed tasks are
         # kept 3 months in the Archive, then deleted.
         purged = 0
