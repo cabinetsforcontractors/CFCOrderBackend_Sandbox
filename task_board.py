@@ -788,6 +788,27 @@ def run_task_sweep(conn, deep: bool = False, days: int = 0) -> dict:
             FROM task_board_notes n
             WHERE i.task_key = n.task_key AND i.note IS NULL
         """)
+        # TITLE BACKFILL (8/4, idempotent): pre-existing dismissal rows
+        # whose title is just the bracket note learn their email's
+        # subject + from, so HANDLED still says what the task was.
+        try:
+            cur.execute("""
+                UPDATE task_board_items i
+                SET title = l.subject
+                            || CASE WHEN COALESCE(l.from_addr,'') <> ''
+                                    THEN ' · from ' || l.from_addr
+                                    ELSE '' END
+                FROM (SELECT DISTINCT ON (thread_id)
+                             thread_id, subject, from_addr
+                      FROM email_ledger
+                      WHERE thread_id IS NOT NULL
+                      ORDER BY thread_id, email_date DESC) l
+                WHERE i.type = 'dismissal' AND i.title LIKE '[%'
+                  AND l.thread_id = split_part(i.task_key, ':', 2)
+                  AND COALESCE(l.subject, '') <> ''
+            """)
+        except Exception:
+            conn.rollback()
         # STICKY LAW (William 8/1): email-born cards never age out — the
         # gone-sweep covers ONLY state-derived types whose source resolving
         # IS the action (order got paid, supplier leg moved, draft sent),
@@ -942,6 +963,30 @@ def _parse_due(s):
 # ENDPOINTS
 # =============================================================================
 
+def _event_detail(ed) -> str:
+    """WHAT-IT-WAS LAW (William 8/4): DONE RECENTLY must say what really
+    happened, not just the event name — pull the human bits out of the
+    event payload."""
+    if isinstance(ed, str):
+        try:
+            import json as _json
+            ed = _json.loads(ed)
+        except Exception:
+            return ""
+    if not isinstance(ed, dict):
+        return ""
+    bits = []
+    for k in ("subject", "orig_subject", "reason", "error", "to_email",
+              "failed_to", "payment_amount", "amount", "pro_number",
+              "probill", "warehouse", "slot", "refund_status", "note"):
+        v = ed.get(k)
+        if v not in (None, "", []):
+            bits.append(f"{k.replace('_', ' ')}: {str(v)[:90]}")
+        if len(bits) >= 3:
+            break
+    return " · ".join(bits)
+
+
 @task_router.get("/tasks")
 def get_tasks(_: bool = Depends(require_admin)):
     with get_db() as conn:
@@ -960,12 +1005,15 @@ def get_tasks(_: bool = Depends(require_admin)):
                     "note", "note_at", "last_seen"]
             rows = [dict(zip(cols, r)) for r in cur.fetchall()]
             cur.execute("""
-                SELECT order_id, event_type, source, created_at FROM order_events
+                SELECT order_id, event_type, source, created_at, event_data
+                FROM order_events
                 WHERE created_at > NOW() - INTERVAL '3 days'
                 ORDER BY created_at DESC LIMIT 60
             """)
             events = [{"order_id": str(a), "event_type": b, "source": c or "",
-                       "at": d.isoformat() if d else ""} for a, b, c, d in cur.fetchall()]
+                       "at": d.isoformat() if d else "",
+                       "detail": _event_detail(ed)}
+                      for a, b, c, d, ed in cur.fetchall()]
             # the board clock = the last sweep that actually ran clean
             last_sweep = None
             try:

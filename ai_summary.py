@@ -309,6 +309,9 @@ Format rules:
 - Highlight any unusual requests or issues
 - Be thorough but organized
 - If information is missing for a section, skip that section
+- NEWEST FIRST (William's law, 8/4): inside EVERY section, list items
+  newest to oldest — the latest email/event is always the FIRST line.
+  Lead the whole summary with the single most recent development.
 
 ORDER DATA:
 {context}"""
