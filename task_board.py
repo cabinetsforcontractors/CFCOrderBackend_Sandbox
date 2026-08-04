@@ -916,7 +916,39 @@ def run_task_sweep(conn, deep: bool = False, days: int = 0) -> dict:
             import re as _re_ss
             for _mkey, _mtitle, _mseen in _manuals:
                 _ids = set(_re_ss.findall(r"#?\b(5\d{3})\b", _mtitle or ""))
-                if not _ids or _mseen is None:
+                if _mseen is None:
+                    continue
+                # PO-TO-ORDER MATCH (William 8/4: "the robot needs to
+                # scan an order for PO as a way to match; fuzzy match ->
+                # human review"): long tokens in the card title are
+                # customer POs - one exact customer_reference hit joins
+                # the order-id set; several hits = FUZZY, flag the card
+                # for human review instead of settling.
+                _pos = set(_re_ss.findall(r"\b(\d{7,12})\b", _mtitle or ""))
+                for _po in _pos:
+                    try:
+                        cur.execute("""SELECT order_id FROM orders
+                                       WHERE customer_reference ILIKE %s
+                                       LIMIT 3""", (f"%{_po}%",))
+                        _hits = [r[0] for r in cur.fetchall()]
+                    except Exception:
+                        conn.rollback()
+                        _hits = []
+                    if len(_hits) == 1:
+                        _ids.add(str(_hits[0]))
+                    elif len(_hits) > 1:
+                        cur.execute("""
+                            UPDATE task_board_items
+                            SET note = '[robot: PO ' || %s ||
+                                       ' fuzzy-matches orders ' || %s ||
+                                       ' - human review]',
+                                note_at = clock_timestamp()
+                            WHERE task_key = %s
+                              AND COALESCE(note, '') NOT LIKE
+                                  '%%fuzzy-matches%%'
+                        """, (_po, ", ".join(f"#{h}" for h in _hits),
+                              _mkey))
+                if not _ids:
                     continue
                 cur.execute("""
                     SELECT order_id, event_type FROM order_events
