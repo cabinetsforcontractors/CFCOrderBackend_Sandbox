@@ -539,6 +539,15 @@ def run_ledger_cycle(hours_back: int = 24) -> Dict:
         hand_stamp = stamp_hand_sent_invoices()
     except Exception as e:
         hand_stamp = {"errors": [str(e)]}
+    # PAYMENT NUDGE CADENCE (William's ruling 8/4): 3 business days
+    # after invoice, DRAFT-first, repeats every 3bd, terms accounts
+    # (Nationwide class) exempt. Idempotent per order per interval.
+    nudges = {}
+    try:
+        from payment_nudges import run_payment_nudges
+        nudges = run_payment_nudges()
+    except Exception as e:
+        nudges = {"errors": [str(e)]}
     # R+L delivered notices -> customer delivered-email DRAFTS (William
     # 2026-07-28 "yes" ruling; idempotent, safe to run every cycle)
     rl = {}

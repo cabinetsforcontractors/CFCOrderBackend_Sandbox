@@ -22,6 +22,8 @@ from config import (
     AUTO_SYNC_INTERVAL_MINUTES, AUTO_SYNC_DAYS_BACK
 )
 from db_helpers import get_db
+
+_CUSTREF_COL_READY = False
 from email_parser import get_warehouses_for_skus
 
 # Global state for auto-sync
@@ -78,6 +80,12 @@ def sync_order_from_b2bwave(order_data: dict) -> dict:
     state = order.get('province', '')
     zip_code = order.get('postal_code', '')
     comments = order.get('comments_customer', '')
+    # CUSTOMER PO / REFERENCE (William 8/4, the UFP-card lesson): B2BWave
+    # carries the buyer's PO (e.g. UFP-0398138917) - store it so the
+    # robot can MATCH POs to orders.
+    customer_reference = str(order.get('customer_reference')
+                             or order.get('order_customer_reference')
+                             or '').strip()[:120]
     order_total = float(order.get('gross_total', 0) or 0)
     total_weight = float(order.get('total_weight', 0) or 0)
 
@@ -149,6 +157,18 @@ def sync_order_from_b2bwave(order_data: dict) -> dict:
     warehouse_3 = warehouses[2] if len(warehouses) > 2 else None
     warehouse_4 = warehouses[3] if len(warehouses) > 3 else None
 
+    global _CUSTREF_COL_READY
+    if not _CUSTREF_COL_READY:
+        try:
+            with get_db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""ALTER TABLE orders ADD COLUMN IF NOT
+                                   EXISTS customer_reference VARCHAR(120)""")
+                conn.commit()
+            _CUSTREF_COL_READY = True
+        except Exception as _e:
+            print(f"[SYNC] customer_reference column ensure failed: {_e}")
+
     is_trusted = False
     with get_db() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -168,8 +188,8 @@ def sync_order_from_b2bwave(order_data: dict) -> dict:
                     order_id, order_date, customer_name, company_name,
                     street, street2, city, state, zip_code, phone, email,
                     comments, order_total, total_weight, warehouse_1, warehouse_2, warehouse_3, warehouse_4,
-                    is_trusted_customer, is_pickup
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    is_trusted_customer, is_pickup, customer_reference
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (order_id) DO UPDATE SET
                     customer_name = EXCLUDED.customer_name,
                     company_name = EXCLUDED.company_name,
@@ -189,13 +209,15 @@ def sync_order_from_b2bwave(order_data: dict) -> dict:
                     warehouse_4 = COALESCE(orders.warehouse_4, EXCLUDED.warehouse_4),
                     is_trusted_customer = EXCLUDED.is_trusted_customer,
                     is_pickup = COALESCE(orders.is_pickup, FALSE) OR EXCLUDED.is_pickup,
+                    customer_reference = COALESCE(NULLIF(EXCLUDED.customer_reference, ''),
+                                                  orders.customer_reference),
                     updated_at = NOW()
                 RETURNING order_id
             """, (
                 order_id, order_date, customer_name, company_name,
                 street, street2, city, state, zip_code, phone, email,
                 comments, order_total, total_weight, warehouse_1, warehouse_2, warehouse_3, warehouse_4,
-                is_trusted, is_pickup
+                is_trusted, is_pickup, customer_reference
             ))
             cur.fetchone()
 
