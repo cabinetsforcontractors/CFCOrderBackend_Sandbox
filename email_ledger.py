@@ -539,6 +539,14 @@ def run_ledger_cycle(hours_back: int = 24) -> Dict:
         hand_stamp = stamp_hand_sent_invoices()
     except Exception as e:
         hand_stamp = {"errors": [str(e)]}
+    # FUNDING-TEXT FILTER (William 8/4): IFTTT text forwards matching
+    # his negative-keyword rules settle silently - never a board card.
+    spam_guard = {}
+    try:
+        from text_spam_guard import run_text_spam_guard
+        spam_guard = run_text_spam_guard()
+    except Exception as e:
+        spam_guard = {"errors": [str(e)]}
     # PAYMENT NUDGE CADENCE (William's ruling 8/4): 3 business days
     # after invoice, DRAFT-first, repeats every 3bd, terms accounts
     # (Nationwide class) exempt. Idempotent per order per interval.
