@@ -157,10 +157,27 @@ def _send_raw_email(to_email: str, subject: str, html_body: str) -> bool:
         msg["To"] = to_email
         msg["Subject"] = subject
 
+        # ⚖️ DRAFT-FIRST (2026-08-07, the 5762 poll leak): this raw sender
+        # had no allowlist gate. An outward (non-allowlisted) recipient now
+        # DRAFTS in orders@ with the real address; William's hand sends.
+        _as_draft = False
+        _allow = os.environ.get("EMAIL_ALLOWLIST", "").strip()
+        if _allow:
+            _allowed = {e.strip().lower() for e in _allow.split(",") if e.strip()}
+            if to_email.lower() not in _allowed:
+                from email_sender import outbound_draft_first
+                if outbound_draft_first():
+                    _as_draft = True
+
         raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("utf-8")
-        payload = json.dumps({"raw": raw}).encode("utf-8")
+        if _as_draft:
+            payload = json.dumps({"message": {"raw": raw}}).encode("utf-8")
+            _gmail_url = "https://gmail.googleapis.com/gmail/v1/users/me/drafts"
+        else:
+            payload = json.dumps({"raw": raw}).encode("utf-8")
+            _gmail_url = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"
         req = urllib.request.Request(
-            "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
+            _gmail_url,
             data=payload, method="POST"
         )
         req.add_header("Authorization", f"Bearer {token}")

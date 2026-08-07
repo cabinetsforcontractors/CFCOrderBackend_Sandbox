@@ -1342,10 +1342,29 @@ def _send_raw_email(to_email: str, subject: str, html_body: str,
         msg["To"] = to_email
         msg["Subject"] = subject
 
+        # ⚖️ DRAFT-FIRST (2026-08-07, the 5762 poll leak): this raw sender
+        # bypassed every allowlist gate — harmless in the cast-box era,
+        # a real outward SEND once the addresses were restored. An outward
+        # (non-allowlisted) recipient now DRAFTS in orders@ with the real
+        # address; William's hand sends.
+        _as_draft = False
+        _allow = os.environ.get("EMAIL_ALLOWLIST", "").strip()
+        if _allow:
+            _allowed = {e.strip().lower() for e in _allow.split(",") if e.strip()}
+            if to_email.lower() not in _allowed:
+                from email_sender import outbound_draft_first
+                if outbound_draft_first():
+                    _as_draft = True
+
         raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("utf-8")
-        payload = json.dumps({"raw": raw}).encode("utf-8")
+        if _as_draft:
+            payload = json.dumps({"message": {"raw": raw}}).encode("utf-8")
+            _gmail_url = "https://gmail.googleapis.com/gmail/v1/users/me/drafts"
+        else:
+            payload = json.dumps({"raw": raw}).encode("utf-8")
+            _gmail_url = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"
         req = urllib.request.Request(
-            "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
+            _gmail_url,
             data=payload, method="POST"
         )
         req.add_header("Authorization", f"Bearer {token}")
@@ -1353,7 +1372,8 @@ def _send_raw_email(to_email: str, subject: str, html_body: str,
         with urllib.request.urlopen(req, timeout=30) as resp:
             resp.read()
         att = f" + PDF {len(pdf_bytes)}b" if pdf_bytes else ""
-        print(f"[SUPPLIER_POLL] Email sent to {to_email}: {subject}{att}")
+        verb = "DRAFTED for" if _as_draft else "Email sent to"
+        print(f"[SUPPLIER_POLL] {verb} {to_email}: {subject}{att}")
         return True
     except Exception as e:
         print(f"[SUPPLIER_POLL] Email failed to {to_email}: {e}")
