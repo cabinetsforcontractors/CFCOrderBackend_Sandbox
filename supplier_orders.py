@@ -407,19 +407,29 @@ def _send_email(order_id: str, to_email: str, subject: str, html: str,
         return {"success": False, "error": f"invalid email: {to_email}"}
     if not GMAIL_SEND_ENABLED:
         return {"success": False, "error": "GMAIL_SEND_ENABLED=false", "dry_run": True}
+    _as_draft = False
     allowlist = os.environ.get("EMAIL_ALLOWLIST", "").strip()
     if allowlist:
         allowed = {e.strip().lower() for e in allowlist.split(",") if e.strip()}
         if to_email.lower() not in allowed:
-            redirect = os.environ.get("INTERNAL_SAFETY_EMAIL", "").strip()
-            if redirect:
-                print(f"[DISPATCH-GUARD] redirected {to_email} -> {redirect} order={order_id}")
-                to_email = redirect
+            from email_sender import outbound_draft_first
+            if outbound_draft_first():
+                # ⚖️ DRAFT-FIRST RESTORED (William 2026-08-06 EVE): outward
+                # mail drafts with its REAL recipient (cc kept); his hand
+                # sends. This is also the dispatch ladder's draft_to_real
+                # stage wearing V1 clothes.
+                _as_draft = True
+                print(f"[DISPATCH-GUARD] DRAFTING for {to_email} order={order_id}")
             else:
-                print(f"[DISPATCH-GUARD] blocked {to_email} order={order_id}")
-                return {"success": False, "error": "recipient not in EMAIL_ALLOWLIST",
-                        "dry_run": True, "original_to": to_email}
-        if cc and cc.lower() not in allowed:
+                redirect = os.environ.get("INTERNAL_SAFETY_EMAIL", "").strip()
+                if redirect:
+                    print(f"[DISPATCH-GUARD] redirected {to_email} -> {redirect} order={order_id}")
+                    to_email = redirect
+                else:
+                    print(f"[DISPATCH-GUARD] blocked {to_email} order={order_id}")
+                    return {"success": False, "error": "recipient not in EMAIL_ALLOWLIST",
+                            "dry_run": True, "original_to": to_email}
+        if cc and cc.lower() not in allowed and not _as_draft:
             cc = os.environ.get("INTERNAL_SAFETY_EMAIL", "").strip() or None
             if cc and cc.lower() == to_email.lower():
                 cc = None  # avoid To == Cc after double redirect
@@ -458,14 +468,19 @@ def _send_email(order_id: str, to_email: str, subject: str, html: str,
             msg.attach(part)
         import urllib.error
         import urllib.request
-        payload = json.dumps(
-            {"raw": base64.urlsafe_b64encode(msg.as_bytes()).decode()}).encode()
+        _raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+        if _as_draft:
+            payload = json.dumps({"message": {"raw": _raw}}).encode()
+            _gmail_url = "https://gmail.googleapis.com/gmail/v1/users/me/drafts"
+        else:
+            payload = json.dumps({"raw": _raw}).encode()
+            _gmail_url = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"
         # RETRY-ONCE LAW (2026-08-02): transient failures (429/5xx/network)
         # get one more try after 3s with a fresh token; hard 4xx fails now.
         message_id = None
         for attempt in (1, 2):
             req = urllib.request.Request(
-                "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
+                _gmail_url,
                 data=payload, method="POST")
             req.add_header("Authorization", f"Bearer {token}")
             req.add_header("Content-Type", "application/json")
@@ -489,9 +504,11 @@ def _send_email(order_id: str, to_email: str, subject: str, html: str,
                 raise
         _log_email_event(order_id=order_id, template_id="supplier_dispatch",
                          to_email=to_email, subject=subject, message_id=message_id,
-                         triggered_by=triggered_by, source="email_send")
+                         triggered_by=triggered_by,
+                         source="email_drafted" if _as_draft else "email_send",
+                         drafted=_as_draft)
         return {"success": bool(message_id), "message_id": message_id,
-                "to": to_email, "cc": cc}
+                "drafted": _as_draft, "to": to_email, "cc": cc}
     except Exception as e:
         return {"success": False, "error": str(e)}
 

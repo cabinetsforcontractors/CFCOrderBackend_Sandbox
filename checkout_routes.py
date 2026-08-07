@@ -123,17 +123,25 @@ def _get_gmail_token():
 def _send_gmail_message(token: str, to: str, subject: str, body: str):
     # Sandbox safety: EMAIL_ALLOWLIST gate (mirrors email_sender.send_order_email).
     # Default (env unset) = full backward compatibility, no change.
+    _as_draft = False
     _email_allowlist = os.environ.get("EMAIL_ALLOWLIST", "").strip()
     if _email_allowlist:
         allowed = {e.strip().lower() for e in _email_allowlist.split(",") if e.strip()}
         if to.lower() not in allowed:
-            redirect = os.environ.get("INTERNAL_SAFETY_EMAIL", "").strip()
-            if redirect:
-                print(f"[EMAIL-GUARD] redirected to={to} -> {redirect} via=_send_gmail_message subject={subject[:60]!r}")
-                to = redirect
+            from email_sender import outbound_draft_first
+            if outbound_draft_first():
+                # ⚖️ DRAFT-FIRST RESTORED (William 2026-08-06 EVE): outward
+                # mail drafts with its REAL recipient; his hand sends.
+                _as_draft = True
+                print(f"[EMAIL-GUARD] DRAFTING for={to} via=_send_gmail_message subject={subject[:60]!r}")
             else:
-                print(f"[EMAIL-GUARD] blocked to={to} reason=not_in_allowlist via=_send_gmail_message subject={subject[:60]!r}")
-                return
+                redirect = os.environ.get("INTERNAL_SAFETY_EMAIL", "").strip()
+                if redirect:
+                    print(f"[EMAIL-GUARD] redirected to={to} -> {redirect} via=_send_gmail_message subject={subject[:60]!r}")
+                    to = redirect
+                else:
+                    print(f"[EMAIL-GUARD] blocked to={to} reason=not_in_allowlist via=_send_gmail_message subject={subject[:60]!r}")
+                    return
     import json, base64, urllib.request
     from email.mime.text import MIMEText
     from email.mime.multipart import MIMEMultipart
@@ -143,9 +151,14 @@ def _send_gmail_message(token: str, to: str, subject: str, body: str):
     msg["Subject"] = subject
     msg.attach(MIMEText(body, "plain"))
     raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("utf-8")
-    payload = json.dumps({"raw": raw}).encode("utf-8")
+    if _as_draft:
+        payload = json.dumps({"message": {"raw": raw}}).encode("utf-8")
+        _gmail_url = "https://gmail.googleapis.com/gmail/v1/users/me/drafts"
+    else:
+        payload = json.dumps({"raw": raw}).encode("utf-8")
+        _gmail_url = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"
     req = urllib.request.Request(
-        "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
+        _gmail_url,
         data=payload, method="POST"
     )
     req.add_header("Authorization", f"Bearer {token}")

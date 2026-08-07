@@ -206,6 +206,25 @@ def run_auto_invoice(order_id: str, triggered_by: str = "new_order",
     if order.get("payment_received"):
         out.update(status="skipped", reason="already paid")
         return out
+    # ⚖️ DRAFT-FIRST RESTORED (William 2026-08-06 EVE): an invoice DRAFT
+    # already awaiting his send must not re-draft every ledger cycle —
+    # the draft is the invoice until his hand sends it (the hand-send
+    # stamp closes the loop then).
+    if not force_reinvoice and not dry_run:
+        try:
+            with get_db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT 1 FROM order_events
+                           WHERE order_id = %s AND event_type = 'email_drafted'
+                             AND event_data->>'template_id' = 'payment_link'
+                           LIMIT 1""", (order_id,))
+                    if cur.fetchone():
+                        out.update(status="skipped",
+                                   reason="invoice draft awaiting William's send")
+                        return out
+        except Exception as e:
+            print(f"[AUTO-INVOICE] draft-dedupe check failed {order_id}: {e}")
     if force_reinvoice and not dry_run:
         try:
             killed = kill_order_links(order_id)
@@ -347,6 +366,23 @@ def run_auto_invoice(order_id: str, triggered_by: str = "new_order",
             mark_credits_applied(credit_ids, order_id, credit_used)
         except Exception as e:
             print(f"[AUTO-INVOICE] store-credit apply-mark failed {order_id}: {e}")
+    # ⚖️ DRAFT-FIRST RESTORED (William 2026-08-06 EVE): a DRAFTED invoice
+    # stamps NOTHING — payment_link_sent + the B2BWave ladder wait for his
+    # actual send (the hand-send stamp sees the subject in SENT and does
+    # the bookkeeping then). The email_drafted event is the dedupe.
+    if res.get("drafted"):
+        _event(order_id, "invoice_auto_drafted",
+               {"for": email, "grand_total": grand,
+                "total_items": total, "tariff_amount": tariff,
+                "total_shipping": ship["shipping"],
+                "link_id": link["id"] if link else None,
+                "pay_by_check": check_account})
+        out.update(status="drafted", drafted_for=email,
+                   payment_link=link["url"] if link else None,
+                   payment_link_id=link["id"] if link else None)
+        print(f"[AUTO-INVOICE] DRAFTED order {order_id} for {email} "
+              f"grand ${grand:,.2f} — awaiting William's send")
+        return out
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute("""UPDATE orders SET payment_link_sent = TRUE,

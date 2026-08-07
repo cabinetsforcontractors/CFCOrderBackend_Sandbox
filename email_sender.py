@@ -115,20 +115,30 @@ def send_order_email(
         return {"success": False, "error": f"Invalid email address: {to_email}"}
 
     # Sandbox safety: EMAIL_ALLOWLIST gate
-    # If EMAIL_ALLOWLIST is non-empty, non-listed recipients are redirected
-    # to INTERNAL_SAFETY_EMAIL (if set) or blocked outright.
-    # Default (env unset) = full backward compatibility, no change.
+    # ⚖️ DRAFT-FIRST RESTORED (William 2026-08-06 EVE): an OUTWARD (non-
+    # allowlisted) recipient's email now lands as a Gmail DRAFT in orders@
+    # carrying its REAL recipient — the robot sends nothing outward;
+    # William reviews and his hand sends (the hand-send stamp then does
+    # the bookkeeping). Internal/allowlisted boxes still receive directly
+    # (sweeps, alerts, the test cast). His reason: eyeball the shipping /
+    # long-pallet math before anything reaches a customer.
+    # Reversible: OUTBOUND_DRAFT_FIRST=false restores the old redirect.
+    _draft_instead = False
     _email_allowlist = os.environ.get("EMAIL_ALLOWLIST", "").strip()
     if _email_allowlist:
         allowed = {e.strip().lower() for e in _email_allowlist.split(",") if e.strip()}
         if to_email.lower() not in allowed:
-            redirect = os.environ.get("INTERNAL_SAFETY_EMAIL", "").strip()
-            if redirect:
-                print(f"[EMAIL-GUARD] redirected to={to_email} -> {redirect} order={order_id}")
-                to_email = redirect
+            if outbound_draft_first():
+                _draft_instead = True
+                print(f"[EMAIL-GUARD] DRAFTING for={to_email} order={order_id} (draft-first law)")
             else:
-                print(f"[EMAIL-GUARD] blocked to={to_email} order={order_id} reason=not_in_allowlist")
-                return {"success": False, "error": "recipient not in EMAIL_ALLOWLIST", "dry_run": True, "original_to": to_email}
+                redirect = os.environ.get("INTERNAL_SAFETY_EMAIL", "").strip()
+                if redirect:
+                    print(f"[EMAIL-GUARD] redirected to={to_email} -> {redirect} order={order_id}")
+                    to_email = redirect
+                else:
+                    print(f"[EMAIL-GUARD] blocked to={to_email} order={order_id} reason=not_in_allowlist")
+                    return {"success": False, "error": "recipient not in EMAIL_ALLOWLIST", "dry_run": True, "original_to": to_email}
 
     if order_data is None:
         order_data = get_order_by_id(order_id)
@@ -170,11 +180,12 @@ def send_order_email(
 
     try:
         message_id = _gmail_send(to_email, subject, html_body, pdf_bytes=pdf_bytes, order_id=order_id,
-                                 extra_attachments=extra_attachments)
+                                 extra_attachments=extra_attachments, as_draft=_draft_instead)
 
         if message_id:
             is_lifecycle = is_lifecycle_template(template_id)
-            event_source = "system_generated" if is_lifecycle else "email_send"
+            event_source = "email_drafted" if _draft_instead else (
+                "system_generated" if is_lifecycle else "email_send")
 
             _log_email_event(
                 order_id=order_id,
@@ -184,11 +195,13 @@ def send_order_email(
                 message_id=message_id,
                 triggered_by=triggered_by,
                 source=event_source,
+                drafted=_draft_instead,
             )
 
             return {
                 "success": True,
                 "message_id": message_id,
+                "drafted": _draft_instead,
                 "template": template_id,
                 "to": to_email,
                 "subject": subject,
@@ -248,6 +261,14 @@ def send_email_dry_run(
 # GMAIL API SEND
 # =============================================================================
 
+def outbound_draft_first() -> bool:
+    """⚖️ DRAFT-FIRST RESTORED (William 2026-08-06 EVE): every outward email
+    drafts in orders@ with its REAL recipient; his hand sends. Internal
+    allowlisted boxes still receive directly. OUTBOUND_DRAFT_FIRST=false
+    restores the pre-8/6 redirect behavior."""
+    return os.environ.get("OUTBOUND_DRAFT_FIRST", "true").strip().lower() != "false"
+
+
 def _gmail_send(
     to_email: str,
     subject: str,
@@ -255,6 +276,7 @@ def _gmail_send(
     pdf_bytes: Optional[bytes] = None,
     order_id: str = "",
     extra_attachments: Optional[list] = None,
+    as_draft: bool = False,
 ) -> Optional[str]:
     """
     Send an email via Gmail API, optionally with a PDF attachment plus any
@@ -307,8 +329,15 @@ def _gmail_send(
 
     raw_message = base64.urlsafe_b64encode(msg.as_bytes()).decode("utf-8")
 
-    url = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"
-    payload = json.dumps({"raw": raw_message}).encode("utf-8")
+    # ⚖️ DRAFT-FIRST RESTORED (William 2026-08-06 EVE): as_draft posts the
+    # SAME built message to the drafts door — real recipient kept, nothing
+    # sends until William's hand does.
+    if as_draft:
+        url = "https://gmail.googleapis.com/gmail/v1/users/me/drafts"
+        payload = json.dumps({"message": {"raw": raw_message}}).encode("utf-8")
+    else:
+        url = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"
+        payload = json.dumps({"raw": raw_message}).encode("utf-8")
 
     # RETRY-ONCE LAW (2026-08-02): a transient send failure (rate limit,
     # Gmail 5xx, network drop) gets one more try after 3s with a fresh
@@ -322,7 +351,8 @@ def _gmail_send(
             with urllib.request.urlopen(req, timeout=30) as response:
                 data = json.loads(response.read().decode())
                 message_id = data.get("id")
-                print(f"[EMAIL] Sent to {to_email}: {subject} (msg_id={message_id}, pdf={pdf_bytes is not None}, attempt={attempt})")
+                verb = "DRAFTED for" if as_draft else "Sent to"
+                print(f"[EMAIL] {verb} {to_email}: {subject} (id={message_id}, pdf={pdf_bytes is not None}, attempt={attempt})")
                 return message_id
         except urllib.error.HTTPError as e:
             error_body = e.read().decode()[:500]
@@ -606,8 +636,12 @@ def _log_email_event(
     triggered_by: str,
     source: str,
     error: str = None,
+    drafted: bool = False,
 ):
-    event_type = "email_sent" if message_id else "email_send_failed"
+    # ⚖️ DRAFT-FIRST RESTORED (8/6): a drafted email logs email_drafted —
+    # never email_sent — so nothing downstream mistakes a draft for an out.
+    event_type = ("email_drafted" if drafted
+                  else "email_sent" if message_id else "email_send_failed")
     event_data = {
         "template_id": template_id,
         "template_name": TEMPLATE_REGISTRY.get(template_id, {}).get("name", template_id),

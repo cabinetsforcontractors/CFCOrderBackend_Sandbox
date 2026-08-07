@@ -494,16 +494,23 @@ def send_reply(message_id: str, body: str, to: str = "",
     original_to = to
     allow = os.environ.get("EMAIL_ALLOWLIST", "").strip()
     redirected = False
+    as_draft = False
     if allow:
         allowed = {e.strip().lower() for e in allow.split(",") if e.strip()}
         if to.lower() not in allowed:
-            redirect = os.environ.get("INTERNAL_SAFETY_EMAIL", "").strip()
-            if redirect:
-                to = redirect
-                redirected = True
+            from email_sender import outbound_draft_first
+            if outbound_draft_first():
+                # ⚖️ DRAFT-FIRST RESTORED (William 2026-08-06 EVE): the
+                # reply drafts with its REAL recipient; his hand sends.
+                as_draft = True
             else:
-                return {"status": "error",
-                        "message": "recipient not in EMAIL_ALLOWLIST"}
+                redirect = os.environ.get("INTERNAL_SAFETY_EMAIL", "").strip()
+                if redirect:
+                    to = redirect
+                    redirected = True
+                else:
+                    return {"status": "error",
+                            "message": "recipient not in EMAIL_ALLOWLIST"}
 
     token = get_gmail_access_token()
     if not token:
@@ -529,11 +536,19 @@ def send_reply(message_id: str, body: str, to: str = "",
         pass
 
     raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
-    payload = {"raw": raw}
-    if chain.get("thread_id"):
-        payload["threadId"] = chain["thread_id"]
+    if as_draft:
+        inner = {"raw": raw}
+        if chain.get("thread_id"):
+            inner["threadId"] = chain["thread_id"]
+        payload = {"message": inner}
+        gmail_url = "https://gmail.googleapis.com/gmail/v1/users/me/drafts"
+    else:
+        payload = {"raw": raw}
+        if chain.get("thread_id"):
+            payload["threadId"] = chain["thread_id"]
+        gmail_url = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"
     req = urllib.request.Request(
-        "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
+        gmail_url,
         data=json.dumps(payload).encode(), method="POST")
     req.add_header("Authorization", f"Bearer {token}")
     req.add_header("Content-Type", "application/json")
@@ -549,9 +564,10 @@ def send_reply(message_id: str, body: str, to: str = "",
     if oid:
         try:
             from fire_log import record_fire
-            record_fire(oid, "reply_sent",
+            record_fire(oid, "reply_drafted" if as_draft else "reply_sent",
                         {"to": to, "original_to": original_to,
-                         "redirected": redirected, "subject": subject,
+                         "redirected": redirected, "drafted": as_draft,
+                         "subject": subject,
                          "re_anchored": re_anchored,
                          "explicit_to": explicit_to,
                          "anchor_from": anchor.get("from", ""),
@@ -563,6 +579,7 @@ def send_reply(message_id: str, body: str, to: str = "",
             print(f"[REPLY] fire failed: {e}")
 
     return {"status": "ok", "sent_message_id": sent.get("id"),
+            "drafted": as_draft,
             "to": to, "redirected": redirected,
             "original_to": original_to, "subject": subject,
             "re_anchored": re_anchored, "explicit_to": explicit_to,
