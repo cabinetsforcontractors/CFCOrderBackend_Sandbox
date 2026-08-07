@@ -3,22 +3,15 @@ config.py
 Centralized configuration for CFC Order Backend.
 All environment variables and constants in one place.
 
-⚠️ TEST LANE (William 2026-08-02): ALL 10 supplier emails point at
-   homesupplyplus@gmail.com — the warehouse actor in the end-to-end test
-   (William answers as Bella from that inbox). Customer actor = 4wprince,
-   admin = orders@/wpjob1.
-
-   RESTORE BEFORE GO-LIVE — the real supplier addresses:
-     LI:              cabinetrydistribution@gmail.com
-     DL:              ecomm@dlcabinetry.com
-     ROC:             weborders01@roccabinetry.com
-     Go Bravura:      vpan@gobravura.com
-     Love-Milestone:  lovetoucheskitchen@gmail.com
-     Cabinet & Stone: amy@cabinetstonellc.com
-     DuraStone:       ranji@durastoneusa.com
-     L&C Cabinetry:   lnccabinetryvab@gmail.com
-     GHI:             orders@ghicabinets.com
-     Linda:           linda@dealercabinetry.com
+⚖️ REAL SUPPLIER ADDRESSES RESTORED (William's word 2026-08-07). The
+   2026-08-02 test lane (all 10 -> homesupplyplus@gmail.com) is OVER —
+   the cast-box era hid every robot PO from the real suppliers (the
+   PO 5755/5756 "I didn't see the PO" lesson). Under DRAFT-FIRST
+   (2026-08-06, email_sender.outbound_draft_first) a robot PO to any
+   of these lands as a DRAFT in orders@ addressed to the REAL supplier
+   — William reviews and his hand sends. Nothing auto-sends outward.
+   ROC's address = csr05@roccabinetry.com per the ROC ADDRESS LAW 8/3
+   (weborders@ is their send-only box and bounces).
 """
 
 import os
@@ -74,13 +67,13 @@ SUPPLIER_INFO = {
         'name': 'Cabinetry Distribution',
         'address': '561 Keuka Rd, Interlachen FL 32148',
         'contact': 'Li Yang (615) 410-6775',
-        'email': 'homesupplyplus@gmail.com'  # RESTORE: cabinetrydistribution@gmail.com
+        'email': 'cabinetrydistribution@gmail.com'  # REAL (restored 8/7 - draft-first drafts POs here)
     },
     'DL': {
         'name': 'DL Cabinetry',
         'address': '8145 Baymeadows Way W, Jacksonville FL 32256',
         'contact': 'Lily Chen (904) 723-1061',
-        'email': 'homesupplyplus@gmail.com'  # RESTORE: ecomm@dlcabinetry.com
+        'email': 'ecomm@dlcabinetry.com'  # REAL (restored 8/7 - draft-first drafts POs here)
     },
     'ROC': {
         'name': 'ROC Cabinetry',
@@ -90,51 +83,51 @@ SUPPLIER_INFO = {
         # csr05@roccabinetry.com is the ONLY proven-deliverable ROC
         # address (Liliexis). weborders@ BOUNCED on receive (their
         # send-only notification box); weborders01@ unproven.
-        'email': 'homesupplyplus@gmail.com'  # RESTORE: csr05@roccabinetry.com
+        'email': 'csr05@roccabinetry.com'  # REAL (restored 8/7 - draft-first drafts POs here)
     },
     'Go Bravura': {
         'name': 'Go Bravura',
         'address': '14200 Hollister Street Suite 200, Houston TX 77066',
         'contact': 'Vincent Pan (832) 756-2768',
-        'email': 'homesupplyplus@gmail.com'  # RESTORE: vpan@gobravura.com
+        'email': 'vpan@gobravura.com'  # REAL (restored 8/7 - draft-first drafts POs here)
     },
     'Love-Milestone': {
         'name': 'Love-Milestone',
         'address': '10963 Florida Crown Dr STE 100, Orlando FL 32824',
         # William 2026-07-30: the contact is Bella now, no longer Ireen
         'contact': 'Bella',
-        'email': 'homesupplyplus@gmail.com'  # RESTORE: lovetoucheskitchen@gmail.com
+        'email': 'lovetoucheskitchen@gmail.com'  # REAL (restored 8/7 - draft-first drafts POs here)
     },
     'Cabinet & Stone': {
         'name': 'Cabinet & Stone',
         'address': '1760 Stebbins Dr, Houston TX 77043',
         'contact': 'Amy Cao (281) 833-0980',
-        'email': 'homesupplyplus@gmail.com'  # RESTORE: amy@cabinetstonellc.com
+        'email': 'amy@cabinetstonellc.com'  # REAL (restored 8/7 - draft-first drafts POs here)
     },
     'DuraStone': {
         'name': 'DuraStone',
         'address': '9815 North Fwy, Houston TX 77037',
         'contact': 'Ranjith Venugopalan / Rachel Guo (832) 228-7866',
-        'email': 'homesupplyplus@gmail.com'  # RESTORE: ranji@durastoneusa.com
+        'email': 'ranji@durastoneusa.com'  # REAL (restored 8/7 - draft-first drafts POs here)
     },
     'L&C Cabinetry': {
         'name': 'L&C Cabinetry',
         'address': '2028 Virginia Beach Blvd, Virginia Beach VA 23454',
         'contact': 'Rey Allison (757) 917-5619',
-        'email': 'homesupplyplus@gmail.com'  # RESTORE: lnccabinetryvab@gmail.com
+        'email': 'lnccabinetryvab@gmail.com'  # REAL (restored 8/7 - draft-first drafts POs here)
     },
     'GHI': {
         'name': 'GHI Cabinets',
         'address': '1807 48th Ave E Unit 110, Palmetto FL 34221',
         'contact': 'Kathryn Belfiore (941) 479-8070',
         # William 2026-07-28: orders go to the orders box going forward
-        'email': 'homesupplyplus@gmail.com'  # RESTORE: orders@ghicabinets.com
+        'email': 'orders@ghicabinets.com'  # REAL (restored 8/7 - draft-first drafts POs here)
     },
     'Linda': {
         'name': 'Dealer Cabinetry',
         'address': '202 West Georgia Ave, Bremen GA 30110',
         'contact': 'Linda Yang (678) 821-3505',
-        'email': 'homesupplyplus@gmail.com'  # RESTORE: linda@dealercabinetry.com
+        'email': 'linda@dealercabinetry.com'  # REAL (restored 8/7 - draft-first drafts POs here)
     }
 }
 
